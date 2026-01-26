@@ -30,16 +30,16 @@ pub fn benchmark_schema() -> SchemaRef {
 ///
 /// Each line is a valid JSON object matching the benchmark schema.
 pub fn generate_json_lines(count: usize) -> Vec<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let sides = ["buy", "sell"];
 
     (0..count)
         .map(|i| {
-            let side = sides[rng.gen_range(0..2)];
-            let price: f64 = rng.gen_range(100.0..10000.0);
-            let quantity: f64 = rng.gen_range(0.01..100.0);
+            let side = sides[rng.random_range(0..2)];
+            let price: f64 = rng.random_range(100.0..10000.0);
+            let quantity: f64 = rng.random_range(0.01..100.0);
             let timestamp: i64 = 1700000000000 + (i as i64);
-            let active: bool = rng.gen_bool(0.9);
+            let active: bool = rng.random_bool(0.9);
 
             format!(
                 r#"{{"id":"order_{}","timestamp":{},"price":{:.2},"quantity":{:.4},"side":"{}","active":{}}}"#,
@@ -76,7 +76,7 @@ pub fn generate_ndjson_gz_file(count: usize) -> tempfile::NamedTempFile {
 /// Creates batches with the benchmark schema containing realistic data.
 pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<RecordBatch> {
     let schema = benchmark_schema();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     (0..num_batches)
         .map(|batch_idx| {
@@ -95,8 +95,8 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
             // Generate prices (some nulls)
             let prices: Vec<Option<f64>> = (0..batch_size)
                 .map(|_| {
-                    if rng.gen_bool(0.95) {
-                        Some(rng.gen_range(100.0..10000.0))
+                    if rng.random_bool(0.95) {
+                        Some(rng.random_range(100.0..10000.0))
                     } else {
                         None
                     }
@@ -106,8 +106,8 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
             // Generate quantities (some nulls)
             let quantities: Vec<Option<f64>> = (0..batch_size)
                 .map(|_| {
-                    if rng.gen_bool(0.95) {
-                        Some(rng.gen_range(0.01..100.0))
+                    if rng.random_bool(0.95) {
+                        Some(rng.random_range(0.01..100.0))
                     } else {
                         None
                     }
@@ -117,7 +117,7 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
             // Generate sides
             let sides: Vec<Option<&str>> = (0..batch_size)
                 .map(|_| {
-                    if rng.gen_bool(0.5) {
+                    if rng.random_bool(0.5) {
                         Some("buy")
                     } else {
                         Some("sell")
@@ -128,8 +128,8 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
             // Generate active flags
             let active: Vec<Option<bool>> = (0..batch_size)
                 .map(|_| {
-                    if rng.gen_bool(0.98) {
-                        Some(rng.gen_bool(0.9))
+                    if rng.random_bool(0.98) {
+                        Some(rng.random_bool(0.9))
                     } else {
                         None
                     }
