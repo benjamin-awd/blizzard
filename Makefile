@@ -7,8 +7,9 @@ help: ## Show this help
 # Docker configuration
 DOCKER_REGISTRY ?= asia-northeast1-docker.pkg.dev/data-dev-596660/main-asia/flowdesk/blizzard
 TAG ?= latest
+VERSION := $(shell cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[] | select(.name == "blizzard") | .version')
 
-.PHONY: docker-build docker-push docker-run
+.PHONY: docker-build docker-push docker-push-version docker-run
 
 docker-build: ## Build Docker image for linux/amd64
 	docker buildx build \
@@ -27,8 +28,22 @@ docker-push: ## Build and push Docker image with registry cache
 		--push \
 		.
 
+docker-push-version: ## Build and push Docker image tagged with Cargo.toml version
+	$(MAKE) docker-push TAG=$(VERSION)
+
 docker-run: ## Run Docker image locally with a config file (CONFIG=path/to/config.yaml)
 	docker run --rm \
 		-v $(CONFIG):/config/config.yaml:ro \
 		-p 8080:8080 \
 		$(DOCKER_REGISTRY):$(TAG)
+
+.PHONY: bump-patch bump-minor bump-major
+
+bump-patch: ## Bump patch version (0.1.0 -> 0.1.1)
+	@./scripts/bump-version.sh patch
+
+bump-minor: ## Bump minor version (0.1.0 -> 0.2.0)
+	@./scripts/bump-version.sh minor
+
+bump-major: ## Bump major version (0.1.0 -> 1.0.0)
+	@./scripts/bump-version.sh major
