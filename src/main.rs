@@ -8,13 +8,11 @@ mod checkpoint;
 mod config;
 mod dlq;
 mod error;
-mod internal_events;
 mod metrics;
 mod pipeline;
 mod sink;
 mod source;
 mod storage;
-mod utilization;
 
 use clap::Parser;
 use snafu::prelude::*;

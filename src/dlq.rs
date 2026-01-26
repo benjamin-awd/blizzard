@@ -14,7 +14,7 @@ use tracing::{debug, error, info};
 
 use crate::config::ErrorHandlingConfig;
 use crate::error::{DlqError, DlqSerializeSnafu, DlqStorageSnafu, DlqWriteSnafu};
-use crate::internal_events::FailureStage;
+use crate::metrics::events::FailureStage;
 use crate::storage::StorageProvider;
 
 /// A record representing a failed file in the DLQ.

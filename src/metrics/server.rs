@@ -71,22 +71,3 @@ async fn metrics_handler(Extension(handle): Extension<PrometheusHandle>) -> Stri
 async fn health_handler() -> &'static str {
     "ok\n"
 }
-
-///
-/// This macro calls the `InternalEvent::emit()` method on the given event,
-/// which records the corresponding Prometheus counter metric.
-///
-/// # Example
-///
-/// ```ignore
-/// use blizzard::internal_events::{RecordsProcessed, BytesWritten};
-///
-/// emit!(RecordsProcessed { count: 100 });
-/// emit!(BytesWritten { bytes: 1024 });
-/// ```
-#[macro_export]
-macro_rules! emit {
-    ($event:expr) => {
-        $crate::internal_events::InternalEvent::emit($event)
-    };
-}

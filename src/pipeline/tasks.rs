@@ -17,7 +17,8 @@ use crate::checkpoint::CheckpointCoordinator;
 use crate::dlq::DeadLetterQueue;
 use crate::emit;
 use crate::error::StorageError;
-use crate::internal_events::{
+use crate::metrics::UtilizationTimer;
+use crate::metrics::events::{
     ActiveDownloads, ActiveUploads, FailureStage, FileDownloadCompleted, FileFailed,
     RecoveredRecords,
 };
@@ -25,7 +26,6 @@ use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
 use crate::source::SourceState;
 use crate::storage::{StorageProvider, StorageProviderRef};
-use crate::utilization::UtilizationTimer;
 
 /// Future type for upload operations.
 type UploadFuture = Pin<Box<dyn Future<Output = Result<UploadResult, StorageError>> + Send>>;

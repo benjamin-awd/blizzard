@@ -36,7 +36,8 @@ use crate::error::{
     DeltaSnafu, DlqSnafu, MaxFailuresExceededSnafu, ParquetSnafu, PipelineError,
     PipelineStorageSnafu, ReaderSnafu, TaskJoinSnafu,
 };
-use crate::internal_events::{
+use crate::metrics::UtilizationTimer;
+use crate::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileFailed,
     FileProcessed, FileStatus, PendingBatches, RecordsProcessed,
 };
@@ -45,7 +46,6 @@ use crate::sink::delta::DeltaSink;
 use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig, RollingPolicy};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
-use crate::utilization::UtilizationTimer;
 
 use tasks::{DownloadedFile, UploaderConfig, run_downloader, run_uploader};
 
@@ -364,7 +364,7 @@ impl Pipeline {
                                 self.stats.files_processed += 1;
                                 files_remaining -= 1;
                                 emit!(FileProcessed { status: FileStatus::Success });
-                                info!(
+                                debug!(
                                     "[-] Finished file (remaining: {}): {} ({} records)",
                                     files_remaining, short_name, processed.total_records
                                 );

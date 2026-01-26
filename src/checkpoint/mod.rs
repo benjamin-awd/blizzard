@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::emit;
-use crate::internal_events::CheckpointAge;
+use crate::metrics::events::CheckpointAge;
 use crate::source::SourceState;
 
 /// Consolidated checkpoint state protected by a single lock.
