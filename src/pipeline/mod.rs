@@ -610,14 +610,35 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
     tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
-            tokio::signal::ctrl_c().await.ok();
-            info!("Received shutdown signal");
+            shutdown_signal().await;
             shutdown.cancel();
         }
     });
 
     let mut pipeline = Pipeline::new(config, shutdown).await?;
     pipeline.run().await
+}
+
+/// Wait for a shutdown signal (SIGINT, SIGTERM, or SIGQUIT on Unix).
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
+    let mut sigquit = signal(SignalKind::quit()).expect("Failed to set up SIGQUIT handler");
+
+    tokio::select! {
+        _ = sigint.recv() => {
+            info!(message = "Signal received.", signal = "SIGINT");
+        }
+        _ = sigterm.recv() => {
+            info!(message = "Signal received.", signal = "SIGTERM");
+        }
+        _ = sigquit.recv() => {
+            info!(message = "Signal received.", signal = "SIGQUIT");
+        }
+    }
 }
 
 #[cfg(test)]
