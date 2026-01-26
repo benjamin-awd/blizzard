@@ -6,6 +6,7 @@
 
 mod checkpoint;
 mod config;
+mod dlq;
 mod error;
 mod internal_events;
 mod metrics;
@@ -76,7 +77,6 @@ async fn main() -> Result<(), PipelineError> {
         info!("Dry run mode - validating configuration");
         info!("Source: {}", config.source.path);
         info!("Sink: {}", config.sink.path);
-        info!("Checkpoint: {}", config.checkpoint.path);
         info!("Schema fields: {}", config.schema.fields.len());
         for field in &config.schema.fields {
             info!("  - {}: {:?}", field.name, field.field_type);

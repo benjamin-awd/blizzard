@@ -12,8 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::{
-    ConfigError, EmptyCheckpointPathSnafu, EmptySchemaSnafu, EmptySinkPathSnafu,
-    EmptySourcePathSnafu, EnvInterpolationSnafu, ReadFileSnafu, YamlParseSnafu,
+    ConfigError, EmptySchemaSnafu, EmptySinkPathSnafu, EmptySourcePathSnafu, EnvInterpolationSnafu,
+    ReadFileSnafu, YamlParseSnafu,
 };
 
 /// Byte size constants (binary/IEC units).
@@ -25,11 +25,27 @@ pub const MB: usize = 1024 * KB;
 pub struct Config {
     pub source: SourceConfig,
     pub sink: SinkConfig,
-    pub checkpoint: CheckpointConfig,
     pub schema: SchemaConfig,
     /// Metrics configuration (optional, enabled by default).
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// Error handling configuration (optional).
+    #[serde(default)]
+    pub error_handling: ErrorHandlingConfig,
+}
+
+/// Error handling configuration for resilient pipeline execution.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ErrorHandlingConfig {
+    /// Maximum failures before stopping pipeline (0 = unlimited, default: 0).
+    #[serde(default)]
+    pub max_failures: usize,
+    /// Path to write failed file records (required for DLQ).
+    #[serde(default)]
+    pub dlq_path: Option<String>,
+    /// Storage options for DLQ (credentials, region, etc.)
+    #[serde(default)]
+    pub dlq_storage_options: HashMap<String, String>,
 }
 
 /// Metrics configuration for Prometheus endpoint.
@@ -166,26 +182,6 @@ fn default_max_concurrent_parts() -> usize {
     8
 }
 
-/// Checkpoint configuration for recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointConfig {
-    /// Path to store checkpoints.
-    /// Examples: "s3://bucket/checkpoints/", "/local/path/checkpoints/"
-    pub path: String,
-
-    /// Checkpoint interval in seconds (default: 30)
-    #[serde(default = "default_checkpoint_interval")]
-    pub interval_seconds: u64,
-
-    /// Storage options for checkpoint storage.
-    #[serde(default)]
-    pub storage_options: HashMap<String, String>,
-}
-
-fn default_checkpoint_interval() -> u64 {
-    30
-}
-
 /// Schema configuration defining the structure of input data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaConfig {
@@ -286,7 +282,6 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         ensure!(!self.source.path.is_empty(), EmptySourcePathSnafu);
         ensure!(!self.sink.path.is_empty(), EmptySinkPathSnafu);
-        ensure!(!self.checkpoint.path.is_empty(), EmptyCheckpointPathSnafu);
         ensure!(!self.schema.fields.is_empty(), EmptySchemaSnafu);
         Ok(())
     }
@@ -347,11 +342,6 @@ mod tests {
                 storage_options: HashMap::new(),
                 compression: ParquetCompression::Snappy,
             },
-            checkpoint: CheckpointConfig {
-                path: "s3://bucket/checkpoints/".to_string(),
-                interval_seconds: 30,
-                storage_options: HashMap::new(),
-            },
             schema: SchemaConfig {
                 fields: vec![
                     FieldConfig {
@@ -372,6 +362,7 @@ mod tests {
                 ],
             },
             metrics: MetricsConfig::default(),
+            error_handling: ErrorHandlingConfig::default(),
         };
 
         let schema = config.to_arrow_schema();
@@ -391,10 +382,6 @@ source:
 sink:
   path: "s3://bucket/output/table"
   file_size_mb: 128
-
-checkpoint:
-  path: "s3://bucket/checkpoints/"
-  interval_seconds: 30
 
 schema:
   fields:

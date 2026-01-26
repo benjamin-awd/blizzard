@@ -14,10 +14,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::checkpoint::CheckpointCoordinator;
+use crate::dlq::DeadLetterQueue;
 use crate::emit;
 use crate::error::StorageError;
 use crate::internal_events::{
-    ActiveDownloads, ActiveUploads, FileDownloadCompleted, RecoveredRecords,
+    ActiveDownloads, ActiveUploads, FailureStage, FileDownloadCompleted, FileFailed,
+    RecoveredRecords,
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
@@ -99,6 +101,7 @@ pub(super) async fn run_uploader(
     checkpoint_coordinator: Arc<CheckpointCoordinator>,
     shutdown: CancellationToken,
     config: UploaderConfig,
+    dlq: Option<Arc<DeadLetterQueue>>,
 ) -> (DeltaSink, usize, usize) {
     let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
 
@@ -165,6 +168,12 @@ pub(super) async fn run_uploader(
                     }
                     Err(e) => {
                         error!("[upload] Upload failed: {}", e);
+                        emit!(FileFailed { stage: FailureStage::Upload });
+
+                        // Record to DLQ if configured
+                        if let Some(dlq) = &dlq {
+                            dlq.record_failure("unknown", &e.to_string(), FailureStage::Upload).await;
+                        }
                     }
                 }
             }

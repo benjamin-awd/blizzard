@@ -30,13 +30,15 @@ use tracing::{debug, error, info, warn};
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{CompressionFormat, Config, MB};
+use crate::dlq::DeadLetterQueue;
 use crate::emit;
 use crate::error::{
-    DeltaSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, ReaderSnafu, TaskJoinSnafu,
+    DeltaSnafu, DlqSnafu, MaxFailuresExceededSnafu, ParquetSnafu, PipelineError,
+    PipelineStorageSnafu, ReaderSnafu, TaskJoinSnafu,
 };
 use crate::internal_events::{
-    BatchesProcessed, BytesWritten, DecompressionQueueDepth, FileProcessed, FileStatus,
-    PendingBatches, RecordsProcessed,
+    BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileFailed,
+    FileProcessed, FileStatus, PendingBatches, RecordsProcessed,
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
@@ -80,6 +82,7 @@ struct InitializedState {
     max_concurrent: usize,
     compression: CompressionFormat,
     batch_size: usize,
+    dlq: Option<Arc<DeadLetterQueue>>,
 }
 
 /// Main processing pipeline.
@@ -163,7 +166,12 @@ impl Pipeline {
             max_concurrent,
             compression,
             batch_size,
+            dlq,
         } = state;
+
+        // Track failure count for max_failures limit
+        let mut failure_count = 0usize;
+        let max_failures = self.config.error_handling.max_failures;
 
         // Create the NDJSON reader for decompression and parsing
         let reader_config = NdjsonReaderConfig::new(batch_size, compression);
@@ -203,6 +211,7 @@ impl Pipeline {
             checkpoint_coordinator,
             upload_shutdown,
             uploader_config,
+            dlq.clone(),
         ));
 
         // Spawn download tasks concurrently using FuturesUnordered
@@ -285,19 +294,35 @@ impl Pipeline {
                             });
                         }
                         Some(Err(e)) => {
-                            let error_str = e.to_string();
-                            if error_str.contains("not found")
-                                || error_str.contains("404")
-                                || error_str.contains("NoSuchKey")
-                            {
-                                warn!("Skipping file with download error: {}", e);
+                            if e.is_not_found() {
+                                warn!("Skipping file with download error (not found): {}", e);
                                 files_remaining -= 1;
                                 emit!(FileProcessed { status: FileStatus::Skipped });
                             } else {
-                                error!("Error downloading file: {}", e);
+                                // Record failure and continue processing
+                                let error_str = e.to_string();
+                                warn!("Skipping failed file (download error): {}", e);
+                                files_remaining -= 1;
+                                failure_count += 1;
                                 emit!(FileProcessed { status: FileStatus::Failed });
-                                // Note: checkpoint state is committed with uploads
-                                return Err(e).context(PipelineStorageSnafu);
+                                emit!(FileFailed { stage: FailureStage::Download });
+
+                                // Record to DLQ if configured
+                                if let Some(dlq) = &dlq {
+                                    dlq.record_failure("unknown", &error_str, FailureStage::Download).await;
+                                }
+
+                                // Check max_failures limit
+                                if max_failures > 0 && failure_count >= max_failures {
+                                    error!("Max failures ({}) reached, stopping pipeline", failure_count);
+                                    // Finalize DLQ before returning
+                                    if let Some(dlq) = &dlq {
+                                        if let Err(dlq_err) = dlq.finalize().await {
+                                            error!("Failed to finalize DLQ: {}", dlq_err);
+                                        }
+                                    }
+                                    return MaxFailuresExceededSnafu { count: failure_count }.fail();
+                                }
                             }
                         }
                         None => {
@@ -357,19 +382,45 @@ impl Pipeline {
                                 }
                             }
                             Err(e) => {
-                                let error_str = e.to_string();
-                                if error_str.contains("not found")
-                                    || error_str.contains("404")
-                                    || error_str.contains("NoSuchKey")
-                                {
-                                    warn!("Skipping file with processing error: {}", e);
+                                if e.is_not_found() {
+                                    warn!("Skipping file with processing error (not found): {}", e);
                                     files_remaining -= 1;
                                     emit!(FileProcessed { status: FileStatus::Skipped });
                                 } else {
-                                    error!("Error processing file: {}", e);
+                                    // Determine failure stage based on error type
+                                    let stage = match &e {
+                                        PipelineError::Reader {
+                                            source:
+                                                crate::error::ReaderError::GzipDecompression { .. }
+                                                | crate::error::ReaderError::ZstdDecompression { .. },
+                                        } => FailureStage::Decompress,
+                                        _ => FailureStage::Parse,
+                                    };
+
+                                    // Record failure and continue processing
+                                    let error_str = e.to_string();
+                                    warn!("Skipping failed file (processing error): {}", e);
+                                    files_remaining -= 1;
+                                    failure_count += 1;
                                     emit!(FileProcessed { status: FileStatus::Failed });
-                                    // Note: checkpoint state is committed with uploads
-                                    return Err(e);
+                                    emit!(FileFailed { stage });
+
+                                    // Record to DLQ if configured
+                                    if let Some(dlq) = &dlq {
+                                        dlq.record_failure("unknown", &error_str, stage).await;
+                                    }
+
+                                    // Check max_failures limit
+                                    if max_failures > 0 && failure_count >= max_failures {
+                                        error!("Max failures ({}) reached, stopping pipeline", failure_count);
+                                        // Finalize DLQ before returning
+                                        if let Some(dlq) = &dlq {
+                                            if let Err(dlq_err) = dlq.finalize().await {
+                                                error!("Failed to finalize DLQ: {}", dlq_err);
+                                            }
+                                        }
+                                        return MaxFailuresExceededSnafu { count: failure_count }.fail();
+                                    }
                                 }
                             }
                         }
@@ -414,6 +465,20 @@ impl Pipeline {
 
         // Note: final checkpoint is committed atomically with the last file batch
         // in the uploader task
+
+        // Finalize DLQ if configured
+        if let Some(dlq) = &dlq {
+            if let Err(dlq_err) = dlq.finalize().await {
+                error!("Failed to finalize DLQ: {}", dlq_err);
+            }
+        }
+
+        if failure_count > 0 {
+            warn!(
+                "Pipeline completed with {} failures (recorded to DLQ if configured)",
+                failure_count
+            );
+        }
 
         info!("Pipeline completed: {:?}", self.stats);
         info!("Final Delta table version: {}", delta_sink.version());
@@ -492,6 +557,12 @@ impl Pipeline {
 
         let writer = ParquetWriter::new(schema.clone(), writer_config);
 
+        // Initialize DLQ if configured
+        let dlq = DeadLetterQueue::from_config(&self.config.error_handling)
+            .await
+            .context(DlqSnafu)?
+            .map(Arc::new);
+
         Ok(Some(InitializedState {
             pending_files,
             source_state,
@@ -501,6 +572,7 @@ impl Pipeline {
             max_concurrent: self.config.source.max_concurrent_files,
             compression: self.config.source.compression,
             batch_size: self.config.source.batch_size,
+            dlq,
         }))
     }
 
