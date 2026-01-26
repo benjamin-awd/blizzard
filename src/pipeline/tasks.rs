@@ -20,7 +20,7 @@ use crate::error::StorageError;
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
     ActiveDownloads, ActiveUploads, FailureStage, FileDownloadCompleted, FileFailed,
-    RecoveredRecords,
+    PendingCommitFiles, RecoveredRecords, UploadQueueBytes, UploadQueueDepth,
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
@@ -112,6 +112,7 @@ pub(super) async fn run_uploader(
     let mut files_to_commit: Vec<FinishedFile> = Vec::new();
     let mut channel_open = true;
     let mut util_timer = UtilizationTimer::new("uploader");
+    let mut upload_queue_bytes: usize = 0;
 
     const COMMIT_BATCH_SIZE: usize = 10;
 
@@ -149,12 +150,19 @@ pub(super) async fn run_uploader(
                         );
                         files_uploaded += 1;
                         bytes_uploaded += upload_result.size;
+
+                        // Track upload queue memory (file bytes now released)
+                        upload_queue_bytes = upload_queue_bytes.saturating_sub(upload_result.size);
+                        emit!(UploadQueueBytes { bytes: upload_queue_bytes });
+                        emit!(UploadQueueDepth { count: active_uploads });
+
                         files_to_commit.push(FinishedFile {
                             filename: upload_result.filename,
                             size: upload_result.size,
                             record_count: upload_result.record_count,
                             bytes: None,
                         });
+                        emit!(PendingCommitFiles { count: files_to_commit.len() });
 
                         // Batch commit every N files with atomic checkpoint
                         if files_to_commit.len() >= COMMIT_BATCH_SIZE {
@@ -164,6 +172,7 @@ pub(super) async fn run_uploader(
                                 &checkpoint_coordinator,
                             )
                             .await;
+                            emit!(PendingCommitFiles { count: files_to_commit.len() });
                         }
                     }
                     Err(e) => {
@@ -190,6 +199,12 @@ pub(super) async fn run_uploader(
                         emit!(ActiveUploads {
                             count: active_uploads
                         });
+
+                        // Track upload queue memory
+                        upload_queue_bytes += file.size;
+                        emit!(UploadQueueBytes { bytes: upload_queue_bytes });
+                        emit!(UploadQueueDepth { count: active_uploads });
+
                         info!(
                             "[upload] Starting {} ({} bytes, {} records, active: {})",
                             file.filename, file.size, file.record_count, active_uploads
@@ -234,8 +249,11 @@ pub(super) async fn run_uploader(
     )
     .await;
 
-    // Reset gauge to 0 on completion
+    // Reset gauges to 0 on completion
     emit!(ActiveUploads { count: 0 });
+    emit!(UploadQueueBytes { bytes: 0 });
+    emit!(UploadQueueDepth { count: 0 });
+    emit!(PendingCommitFiles { count: 0 });
 
     info!(
         "Uploader finished: {} files, {} bytes",

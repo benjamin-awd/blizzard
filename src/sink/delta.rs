@@ -28,7 +28,7 @@ use crate::error::{
     Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, SchemaConversionSnafu,
     StructTypeSnafu, UrlParseSnafu,
 };
-use crate::metrics::events::DeltaCommitCompleted;
+use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted};
 use crate::storage::{BackendConfig, StorageProvider, StorageProviderRef};
 
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
@@ -311,6 +311,12 @@ fn create_txn_action(
     use deltalake::kernel::Transaction;
 
     let checkpoint_json = serde_json::to_string(checkpoint_state).context(CheckpointJsonSnafu)?;
+
+    // Track checkpoint state size for memory monitoring
+    emit!(CheckpointStateSize {
+        bytes: checkpoint_json.len()
+    });
+
     let encoded = base64::engine::general_purpose::STANDARD.encode(&checkpoint_json);
     let app_id = format!("{}{}", TXN_APP_ID_PREFIX, encoded);
 
