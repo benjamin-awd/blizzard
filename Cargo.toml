@@ -1,0 +1,74 @@
+[package]
+name = "blizzard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A standalone tool for streaming NDJSON.gz files to Delta Lake with checkpoint-based recovery"
+license = "MIT OR Apache-2.0"
+
+# This makes the package standalone, not part of the arroyo workspace
+[workspace]
+
+[dependencies]
+# Arrow ecosystem
+arrow = { version = "55", default-features = false, features = ["chrono-tz"] }
+arrow-json = { version = "55", default-features = false }
+parquet = { version = "55", default-features = false, features = ["arrow", "async", "snap", "zstd", "lz4"] }
+
+# Delta Lake
+deltalake = { version = "0.30", default-features = false, features = ["s3", "gcs"] }
+
+# Object storage
+object_store = { version = "0.12.5", default-features = false, features = ["aws", "gcp"] }
+
+# Async runtime
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "signal"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# Decompression
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+zstd = { version = "0.13", default-features = false }
+
+# Serialization
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+serde_yaml = "0.9"
+
+# CLI
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+
+# Error handling
+snafu = { version = "0.8", default-features = false, features = ["std"] }
+
+# Logging
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "ansi"] }
+
+# URL parsing
+url = { version = "2", default-features = false }
+regex = { version = "1", default-features = false, features = ["std"] }
+
+# Misc
+bytes = { version = "1", default-features = false, features = ["std"] }
+uuid = { version = "1", default-features = false, features = ["v7"] }
+
+# Metrics
+metrics = { version = "0.24", default-features = false }
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "async_tokio"] }
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
+bytes = { version = "1", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "blizzard_benchmarks"
+harness = false
+
+[patch.crates-io]
+object_store = { git = "https://github.com/benjamin-awd/arrow-rs-object-store", branch = "0.12.5/gcs-content-length" }
