@@ -35,12 +35,23 @@ The checkpoint captures:
 
 ### Source State
 
-Each source file is tracked with one of two states:
+Source state uses a memory-efficient high-water mark approach:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `files` | `HashMap` | Only in-progress files with `RecordsRead(n)` state |
+| `last_committed_file` | `Option<String>` | High-water mark - all files at or before this are finished |
+
+Each file in the `files` map has one of two states:
 
 | State | Description |
 |-------|-------------|
-| `Finished` | File completely processed |
+| `Finished` | File completely processed (pruned after commit) |
 | `RecordsRead(n)` | Partially processed with `n` records read |
+
+A file is considered finished if:
+- It's explicitly marked `Finished` in the map, OR
+- It sorts lexicographically at or before `last_committed_file`
 
 Example checkpoint (JSON representation):
 
@@ -49,14 +60,15 @@ Example checkpoint (JSON representation):
     "schema_version": 1,
     "source_state": {
         "files": {
-            "s3://bucket/file1.ndjson.gz": "Finished",
-            "s3://bucket/file2.ndjson.gz": { "RecordsRead": 5000 },
-            "s3://bucket/file3.ndjson.gz": "Finished"
-        }
+            "s3://bucket/file3.ndjson.gz": { "RecordsRead": 5000 }
+        },
+        "last_committed_file": "s3://bucket/file2.ndjson.gz"
     },
     "delta_version": 42
 }
 ```
+
+In this example, `file1` and `file2` are finished (at or before high-water mark), while `file3` is in-progress with 5000 records read.
 
 ## Storage Format
 
@@ -70,6 +82,25 @@ Checkpoints are stored in Delta Lake's `Txn` action:
 ```
 Txn.app_id = "blizzard:" + base64(json(CheckpointState))
 ```
+
+## Memory Management
+
+To prevent unbounded memory growth when processing large file sets, the checkpoint system uses a **high-water mark** approach:
+
+1. **During processing**: Files are tracked in a HashMap as `Finished` or `RecordsRead(n)`
+2. **After commit**: The `prune_finished()` method is called:
+   - Updates `last_committed_file` to the latest finished file
+   - Removes all `Finished` entries from the HashMap
+   - Retains only `RecordsRead` entries (in-progress files)
+
+This keeps memory bounded to O(in-progress files) rather than O(total files processed):
+
+| Files Processed | Without Pruning | With Pruning |
+|-----------------|-----------------|--------------|
+| 1,000 | 1,000 entries | ~0-10 entries |
+| 100,000 | 100,000 entries | ~0-10 entries |
+
+The `blizzard_source_state_files` metric tracks the current HashMap size.
 
 ## When Checkpoints Occur
 
@@ -117,16 +148,16 @@ The recovered checkpoint is loaded into the checkpoint coordinator:
 
 When processing resumes:
 
-1. **Filter pending files**: Skip files marked as `Finished`
+1. **Filter pending files**: Skip files at or before `last_committed_file`
 2. **Skip processed records**: For `RecordsRead(n)` files, skip first `n` records
 3. **Continue normally**: Process remaining files and records
 
 ```
 Source files: [file1, file2, file3, file4]
-Checkpoint:   file1=Finished, file2=RecordsRead(5000)
+Checkpoint:   last_committed_file=file1, file2=RecordsRead(5000)
 
 Result:
-  - file1: skipped entirely
+  - file1: skipped (at or before high-water mark)
   - file2: skip first 5000 records, process remainder
   - file3: process from beginning
   - file4: process from beginning

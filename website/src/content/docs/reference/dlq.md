@@ -9,34 +9,34 @@ The Dead Letter Queue (DLQ) captures information about files that fail processin
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Dead Letter Queue Flow                        │
+│                    Dead Letter Queue Flow                       │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  File Processing                                                 │
-│       │                                                          │
-│       ▼                                                          │
-│  ┌─────────────────┐                                             │
-│  │ Error occurs    │                                             │
-│  └─────────────────┘                                             │
-│       │                                                          │
-│       ▼                                                          │
+│                                                                 │
+│  File Processing                                                │
+│       │                                                         │
+│       ▼                                                         │
+│  ┌─────────────────┐                                            │
+│  │ Error occurs    │                                            │
+│  └─────────────────┘                                            │
+│       │                                                         │
+│       ▼                                                         │
 │  ┌─────────────────┐     ┌─────────────────────────────────┐    │
-│  │ DLQ configured? │─Yes─▶│ Record failure to DLQ           │    │
+│  │ DLQ configured? │─Yes─▶│ Record failure to DLQ          │    │
 │  └─────────────────┘     │ (path, error, stage, timestamp) │    │
 │       │                  └─────────────────────────────────┘    │
-│       │ No                          │                            │
-│       ▼                             ▼                            │
-│  Continue processing          Buffer in memory                   │
-│                                     │                            │
-│                                     ▼ (every 100 records)        │
-│                              ┌─────────────────┐                 │
-│                              │ Flush to storage│                 │
-│                              └─────────────────┘                 │
-│                                     │                            │
-│                                     ▼                            │
-│                              s3://bucket/dlq/                    │
-│                              failures-20240126-103000.ndjson     │
-│                                                                  │
+│       │ No                          │                           │
+│       ▼                             ▼                           │
+│  Continue processing          Buffer in memory                  │
+│                                     │                           │
+│                                     ▼ (every 100 records)       │
+│                              ┌─────────────────┐                │
+│                              │ Flush to storage│                │
+│                              └─────────────────┘                │
+│                                     │                           │
+│                                     ▼                           │
+│                              s3://bucket/dlq/                   │
+│                              failures-20240126-103000.ndjson    │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
