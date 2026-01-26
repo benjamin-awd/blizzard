@@ -4,7 +4,8 @@ import starlight from '@astrojs/starlight';
 
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://blizzard.dev',
+	site: 'https://benjamin-awd.github.io',
+	base: '/blizzard',
 	integrations: [
 		starlight({
 			title: '❄️ Blizzard',
@@ -46,7 +47,7 @@ export default defineConfig({
 					tag: 'meta',
 					attrs: {
 						property: 'og:image',
-						content: 'https://blizzard.dev/og.png',
+						content: 'https://benjamin-awd.github.io/blizzard/og.png',
 					},
 				},
 			],
