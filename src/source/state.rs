@@ -19,7 +19,12 @@ pub enum FileReadState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceState {
     /// Map of file path to read state.
+    /// After pruning, only contains `RecordsRead` entries for in-progress files.
     pub files: HashMap<String, FileReadState>,
+    /// High water mark - all files sorting before or equal to this are finished.
+    /// This allows us to avoid storing every finished file path in memory.
+    #[serde(default)]
+    pub last_committed_file: Option<String>,
 }
 
 impl SourceState {

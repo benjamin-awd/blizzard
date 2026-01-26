@@ -7,7 +7,7 @@ export default defineConfig({
 	site: 'https://blizzard.dev',
 	integrations: [
 		starlight({
-			title: 'Blizzard',
+			title: '❄️ Blizzard',
 			social: [
 			],
 			sidebar: [
