@@ -129,10 +129,8 @@ impl DeadLetterQueue {
         };
 
         // Flush if buffer is full
-        if should_flush {
-            if let Err(e) = self.flush().await {
-                error!("Failed to flush DLQ: {}", e);
-            }
+        if should_flush && let Err(e) = self.flush().await {
+            error!("Failed to flush DLQ: {}", e);
         }
     }
 

@@ -311,10 +311,10 @@ impl Pipeline {
                                 if max_failures > 0 && failure_count >= max_failures {
                                     error!("Max failures ({}) reached, stopping pipeline", failure_count);
                                     // Finalize DLQ before returning
-                                    if let Some(dlq) = &dlq {
-                                        if let Err(dlq_err) = dlq.finalize().await {
-                                            error!("Failed to finalize DLQ: {}", dlq_err);
-                                        }
+                                    if let Some(dlq) = &dlq
+                                        && let Err(dlq_err) = dlq.finalize().await
+                                    {
+                                        error!("Failed to finalize DLQ: {}", dlq_err);
                                     }
                                     return MaxFailuresExceededSnafu { count: failure_count }.fail();
                                 }
@@ -409,10 +409,10 @@ impl Pipeline {
                                     if max_failures > 0 && failure_count >= max_failures {
                                         error!("Max failures ({}) reached, stopping pipeline", failure_count);
                                         // Finalize DLQ before returning
-                                        if let Some(dlq) = &dlq {
-                                            if let Err(dlq_err) = dlq.finalize().await {
-                                                error!("Failed to finalize DLQ: {}", dlq_err);
-                                            }
+                                        if let Some(dlq) = &dlq
+                                            && let Err(dlq_err) = dlq.finalize().await
+                                        {
+                                            error!("Failed to finalize DLQ: {}", dlq_err);
                                         }
                                         return MaxFailuresExceededSnafu { count: failure_count }.fail();
                                     }
@@ -462,10 +462,10 @@ impl Pipeline {
         // in the uploader task
 
         // Finalize DLQ if configured
-        if let Some(dlq) = &dlq {
-            if let Err(dlq_err) = dlq.finalize().await {
-                error!("Failed to finalize DLQ: {}", dlq_err);
-            }
+        if let Some(dlq) = &dlq
+            && let Err(dlq_err) = dlq.finalize().await
+        {
+            error!("Failed to finalize DLQ: {}", dlq_err);
         }
 
         if failure_count > 0 {
