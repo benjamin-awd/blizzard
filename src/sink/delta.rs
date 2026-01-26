@@ -154,21 +154,21 @@ impl DeltaSink {
             let actions = get_actions(version, &commit_bytes).context(DeltaLakeSnafu)?;
 
             for action in &actions {
-                if let Action::Txn(txn) = action {
-                    if txn.app_id.starts_with(TXN_APP_ID_PREFIX) {
-                        let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
-                        let json_bytes = base64::engine::general_purpose::STANDARD
-                            .decode(encoded)
-                            .context(Base64DecodeSnafu)?;
-                        let state: CheckpointState =
-                            serde_json::from_slice(&json_bytes).context(CheckpointJsonSnafu)?;
+                if let Action::Txn(txn) = action
+                    && txn.app_id.starts_with(TXN_APP_ID_PREFIX)
+                {
+                    let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
+                    let json_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .context(Base64DecodeSnafu)?;
+                    let state: CheckpointState =
+                        serde_json::from_slice(&json_bytes).context(CheckpointJsonSnafu)?;
 
-                        // Update internal state
-                        self.checkpoint_version = txn.version;
-                        self.last_version = current_version;
+                    // Update internal state
+                    self.checkpoint_version = txn.version;
+                    self.last_version = current_version;
 
-                        return Ok(Some((state, txn.version)));
-                    }
+                    return Ok(Some((state, txn.version)));
                 }
             }
         }
