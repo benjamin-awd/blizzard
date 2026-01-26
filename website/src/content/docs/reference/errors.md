@@ -11,37 +11,37 @@ Errors are organized into categories based on where they occur:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Error Hierarchy                             │
+│                      Error Hierarchy                            │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  PipelineError (top-level)                                       │
 │  ├── StorageError                                                │
 │  │   ├── InvalidUrl                                              │
 │  │   ├── ObjectStore                                             │
-│  │   ├── S3Config / GcsConfig / AzureConfig                     │
+│  │   ├── S3Config / GcsConfig / AzureConfig                      │
 │  │   └── Io                                                      │
 │  ├── ConfigError                                                 │
-│  │   ├── EmptySourcePath / EmptySinkPath / EmptySchema          │
+│  │   ├── EmptySourcePath / EmptySinkPath / EmptySchema           │
 │  │   ├── EnvInterpolation                                        │
 │  │   ├── YamlParse                                               │
 │  │   └── ReadFile                                                │
 │  ├── ReaderError                                                 │
-│  │   ├── GzipDecompression / ZstdDecompression                  │
+│  │   ├── GzipDecompression / ZstdDecompression                   │
 │  │   ├── DecoderBuild                                            │
 │  │   ├── JsonDecode                                              │
 │  │   └── BatchFlush                                              │
 │  ├── DeltaError                                                  │
-│  │   ├── StructType / SchemaConversion                          │
+│  │   ├── StructType / SchemaConversion                           │
 │  │   ├── DeltaLake                                               │
-│  │   ├── CheckpointJson / Base64Decode                          │
+│  │   ├── CheckpointJson / Base64Decode                           │
 │  │   └── UrlParse                                                │
 │  ├── ParquetError                                                │
 │  │   └── Write                                                   │
 │  ├── DlqError                                                    │
-│  │   ├── DlqWrite / DlqSerialize / DlqStorage                   │
+│  │   ├── DlqWrite / DlqSerialize / DlqStorage                    │
 │  └── MaxFailuresExceeded                                         │
 │                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Storage Errors

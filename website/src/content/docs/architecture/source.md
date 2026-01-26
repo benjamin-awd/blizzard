@@ -9,37 +9,37 @@ Blizzard's source layer handles reading compressed NDJSON files from cloud stora
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Source Processing                            │
+│                     Source Processing                           │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Cloud Storage                                                   │
+│                                                                 │
+│  Cloud Storage                                                  │
 │  ┌───────────────────────────────────────────┐                  │
 │  │  s3://bucket/data/*.ndjson.gz             │                  │
 │  │  ├── file1.ndjson.gz                      │                  │
 │  │  ├── file2.ndjson.gz                      │                  │
 │  │  └── file3.ndjson.gz                      │                  │
 │  └───────────────────────────────────────────┘                  │
-│                        │                                         │
-│                        ▼                                         │
-│              ┌──────────────────┐                                │
-│              │  Download (I/O)  │                                │
-│              └──────────────────┘                                │
-│                        │                                         │
-│                        ▼ Bytes                                   │
-│              ┌──────────────────┐                                │
-│              │  Decompress      │  gzip / zstd                   │
-│              └──────────────────┘                                │
-│                        │                                         │
-│                        ▼ NDJSON                                  │
-│              ┌──────────────────┐                                │
-│              │  Parse JSON      │  Arrow JSON decoder            │
-│              └──────────────────┘                                │
-│                        │                                         │
-│                        ▼                                         │
-│              ┌──────────────────┐                                │
-│              │  RecordBatches   │  Columnar Arrow format         │
-│              └──────────────────┘                                │
-│                                                                  │
+│                        │                                        │
+│                        ▼                                        │
+│              ┌──────────────────┐                               │
+│              │  Download (I/O)  │                               │
+│              └──────────────────┘                               │
+│                        │                                        │
+│                        ▼ Bytes                                  │
+│              ┌──────────────────┐                               │
+│              │  Decompress      │  gzip / zstd                  │
+│              └──────────────────┘                               │
+│                        │                                        │
+│                        ▼ NDJSON                                 │
+│              ┌──────────────────┐                               │
+│              │  Parse JSON      │  Arrow JSON decoder           │
+│              └──────────────────┘                               │
+│                        │                                        │
+│                        ▼                                        │
+│              ┌──────────────────┐                               │
+│              │  RecordBatches   │  Columnar Arrow format        │
+│              └──────────────────┘                               │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

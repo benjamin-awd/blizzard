@@ -120,16 +120,16 @@ Files are committed to Delta Lake in batches:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Delta Lake Commit                         │
+│                    Delta Lake Commit                        │
 ├─────────────────────────────────────────────────────────────┤
-│  Commit N:                                                   │
+│  Commit N:                                                  │
 │    ├── Txn { app_id: "blizzard:<checkpoint>", version: N }  │
 │    ├── Add { path: "file1.parquet", size: 128MB, ... }      │
 │    ├── Add { path: "file2.parquet", size: 128MB, ... }      │
 │    └── Add { path: "file3.parquet", size: 128MB, ... }      │
-│                              ▲                               │
-│                              │                               │
-│                    Atomic commit (all or nothing)            │
+│                              ▲                              │
+│                              │                              │
+│                    Atomic commit (all or nothing)           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
