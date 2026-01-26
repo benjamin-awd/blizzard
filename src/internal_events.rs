@@ -157,21 +157,6 @@ impl InternalEvent for DeltaCommitCompleted {
     }
 }
 
-/// Event emitted when a checkpoint save completes.
-pub struct CheckpointSaveCompleted {
-    pub duration: Duration,
-}
-
-impl InternalEvent for CheckpointSaveCompleted {
-    fn emit(self) {
-        trace!(
-            duration_ms = self.duration.as_millis(),
-            "Checkpoint save completed"
-        );
-        histogram!("blizzard_checkpoint_save_duration_seconds").record(self.duration.as_secs_f64());
-    }
-}
-
 // ============================================================================
 // Gauge events for concurrency and backpressure
 // ============================================================================
@@ -246,19 +231,17 @@ pub enum StorageOperation {
     Get,
     Put,
     List,
-    Head,
     CreateMultipart,
     PutPart,
     CompleteMultipart,
 }
 
 impl StorageOperation {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             StorageOperation::Get => "get",
             StorageOperation::Put => "put",
             StorageOperation::List => "list",
-            StorageOperation::Head => "head",
             StorageOperation::CreateMultipart => "create_multipart",
             StorageOperation::PutPart => "put_part",
             StorageOperation::CompleteMultipart => "complete_multipart",
@@ -339,16 +322,6 @@ impl InternalEvent for MultipartUploadCompleted {
 // Checkpointing & recovery events
 // ============================================================================
 
-/// Event emitted when a checkpoint is saved.
-pub struct CheckpointSaved;
-
-impl InternalEvent for CheckpointSaved {
-    fn emit(self) {
-        trace!("Checkpoint saved");
-        counter!("blizzard_checkpoints_saved_total").increment(1);
-    }
-}
-
 /// Event emitted to track time since last checkpoint.
 pub struct CheckpointAge {
     pub seconds: f64,
@@ -361,18 +334,6 @@ impl InternalEvent for CheckpointAge {
     }
 }
 
-/// Event emitted when pending files count changes.
-pub struct PendingFilesCount {
-    pub count: usize,
-}
-
-impl InternalEvent for PendingFilesCount {
-    fn emit(self) {
-        trace!(count = self.count, "Pending files count");
-        gauge!("blizzard_pending_files_count").set(self.count as f64);
-    }
-}
-
 /// Event emitted when records are skipped during recovery.
 pub struct RecoveredRecords {
     pub count: u64,
@@ -382,17 +343,5 @@ impl InternalEvent for RecoveredRecords {
     fn emit(self) {
         trace!(count = self.count, "Recovered records");
         counter!("blizzard_recovered_records_total").increment(self.count);
-    }
-}
-
-/// Event emitted when pending files are committed on startup.
-pub struct RecoveredFiles {
-    pub count: u64,
-}
-
-impl InternalEvent for RecoveredFiles {
-    fn emit(self) {
-        trace!(count = self.count, "Recovered files");
-        counter!("blizzard_recovered_files_total").increment(self.count);
     }
 }

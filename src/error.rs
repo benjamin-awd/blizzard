@@ -131,25 +131,14 @@ pub enum DeltaError {
     /// Decimal precision error.
     #[snafu(display("Decimal precision error: {message}"))]
     DecimalPrecision { message: String },
-}
 
-// ============ Checkpoint Errors ============
+    /// JSON serialization/deserialization error for checkpoint data.
+    #[snafu(display("JSON error in checkpoint"))]
+    CheckpointJson { source: serde_json::Error },
 
-/// Errors that can occur during checkpoint operations.
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum CheckpointError {
-    /// Invalid latest.json format.
-    #[snafu(display("Invalid latest.json: missing checkpoint_path"))]
-    MissingCheckpointPath,
-
-    /// JSON serialization error.
-    #[snafu(display("JSON serialization error"))]
-    Json { source: serde_json::Error },
-
-    /// Storage error during checkpoint.
-    #[snafu(display("Checkpoint storage error"))]
-    CheckpointStorage { source: StorageError },
+    /// Base64 decode error.
+    #[snafu(display("Base64 decode error"))]
+    Base64Decode { source: base64::DecodeError },
 }
 
 // ============ Metrics Errors ============
@@ -199,10 +188,6 @@ pub enum PipelineError {
     /// Delta Lake error.
     #[snafu(display("Delta error"))]
     Delta { source: DeltaError },
-
-    /// Checkpoint error.
-    #[snafu(display("Checkpoint error"))]
-    Checkpoint { source: CheckpointError },
 
     /// Parquet error.
     #[snafu(display("Parquet error"))]

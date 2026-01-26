@@ -1,262 +1,121 @@
 //! Checkpoint coordination for exactly-once processing.
 //!
-//! Manages periodic checkpoints that capture source progress and
-//! pending sink files to enable recovery.
+//! # Atomic Checkpointing with Delta Lake Txn Actions
+//!
+//! Checkpoints are stored atomically alongside data commits using Delta Lake's
+//! `Txn` action. This eliminates the need for separate JSON checkpoint files
+//! and ensures checkpoint state is always consistent with committed data.
+//!
+//! The checkpoint state is embedded in the `Txn.app_id` field as base64-encoded JSON,
+//! with format: `blizzard:{base64_encoded_checkpoint_json}`
 
 pub mod state;
 
-pub use state::{CheckpointState, PendingFile};
+pub use state::CheckpointState;
 
-use snafu::prelude::*;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::emit;
-use crate::error::{
-    CheckpointError, CheckpointStorageSnafu, JsonSnafu, MissingCheckpointPathSnafu,
-};
-use crate::internal_events::{
-    CheckpointAge, CheckpointSaveCompleted, CheckpointSaved, PendingFilesCount,
-};
+use crate::internal_events::CheckpointAge;
 use crate::source::SourceState;
-use crate::storage::StorageProviderRef;
 
-/// Checkpoint manager that coordinates periodic checkpoints.
-pub struct CheckpointManager {
-    storage: StorageProviderRef,
-    checkpoint_interval: Duration,
-    last_checkpoint: Instant,
-    checkpoint_id: u64,
+/// Consolidated checkpoint state protected by a single lock.
+struct CheckpointStateInner {
+    source_state: SourceState,
+    delta_version: i64,
 }
 
-impl CheckpointManager {
-    /// Create a new checkpoint manager.
-    pub fn new(storage: StorageProviderRef, interval_seconds: u64) -> Self {
-        Self {
-            storage,
-            checkpoint_interval: Duration::from_secs(interval_seconds),
-            last_checkpoint: Instant::now(),
-            checkpoint_id: 0,
-        }
-    }
-
-    /// Check if a checkpoint should be triggered.
-    pub fn should_checkpoint(&self) -> bool {
-        let age = self.last_checkpoint.elapsed().as_secs_f64();
-        emit!(CheckpointAge { seconds: age });
-        age >= self.checkpoint_interval.as_secs_f64()
-    }
-
-    /// Save a checkpoint.
-    pub async fn save_checkpoint(
-        &mut self,
-        state: &CheckpointState,
-    ) -> Result<(), CheckpointError> {
-        let start = Instant::now();
-        self.checkpoint_id += 1;
-
-        let checkpoint_path = format!("checkpoint-{:010}.json", self.checkpoint_id);
-
-        // Serialize the checkpoint state
-        let checkpoint_json = serde_json::to_string_pretty(state).context(JsonSnafu)?;
-
-        // Write to storage
-        self.storage
-            .put(checkpoint_path.clone(), checkpoint_json.into_bytes())
-            .await
-            .context(CheckpointStorageSnafu)?;
-
-        // Also write a "latest" pointer
-        let latest_content = serde_json::json!({
-            "checkpoint_id": self.checkpoint_id,
-            "checkpoint_path": checkpoint_path,
-        });
-        self.storage
-            .put(
-                "latest.json",
-                serde_json::to_vec(&latest_content).context(JsonSnafu)?,
-            )
-            .await
-            .context(CheckpointStorageSnafu)?;
-
-        self.last_checkpoint = Instant::now();
-
-        emit!(CheckpointSaveCompleted {
-            duration: start.elapsed()
-        });
-        emit!(CheckpointSaved);
-        emit!(CheckpointAge { seconds: 0.0 });
-
-        info!(
-            "Saved checkpoint {} with {} files tracked",
-            self.checkpoint_id,
-            state.source_state.files.len()
-        );
-
-        Ok(())
-    }
-
-    /// Load the latest checkpoint if available.
-    /// Returns the checkpoint state and the checkpoint ID to restore.
-    pub async fn load_latest_checkpoint(
-        &mut self,
-    ) -> Result<Option<CheckpointState>, CheckpointError> {
-        // Check if checkpoint exists before attempting to read
-        if !self
-            .storage
-            .exists("latest.json")
-            .await
-            .context(CheckpointStorageSnafu)?
-        {
-            debug!("No checkpoint found");
-            return Ok(None);
-        }
-
-        // Try to read the latest pointer
-        let latest_bytes = match self
-            .storage
-            .get_if_present("latest.json")
-            .await
-            .context(CheckpointStorageSnafu)?
-        {
-            Some(bytes) => bytes,
-            None => {
-                debug!("No checkpoint found");
-                return Ok(None);
-            }
-        };
-
-        let latest: serde_json::Value = serde_json::from_slice(&latest_bytes).context(JsonSnafu)?;
-        let checkpoint_path = latest["checkpoint_path"]
-            .as_str()
-            .ok_or_else(|| MissingCheckpointPathSnafu.build())?;
-
-        // Restore the checkpoint ID from the latest.json so new checkpoints continue from the correct sequence
-        let checkpoint_id = latest["checkpoint_id"].as_u64().unwrap_or(0);
-        self.set_checkpoint_id(checkpoint_id);
-
-        // Load the checkpoint
-        let checkpoint_bytes = self
-            .storage
-            .get(checkpoint_path)
-            .await
-            .context(CheckpointStorageSnafu)?;
-        let checkpoint: CheckpointState =
-            serde_json::from_slice(&checkpoint_bytes).context(JsonSnafu)?;
-
-        info!(
-            "Loaded checkpoint {} from {}, version {}",
-            self.checkpoint_id(),
-            checkpoint_path,
-            checkpoint.delta_version
-        );
-
-        Ok(Some(checkpoint))
-    }
-
-    /// Get the current checkpoint ID.
-    pub fn checkpoint_id(&self) -> u64 {
-        self.checkpoint_id
-    }
-
-    /// Set the checkpoint ID (for recovery).
-    pub fn set_checkpoint_id(&mut self, id: u64) {
-        self.checkpoint_id = id;
-    }
-}
-
-/// A coordinator that manages checkpointing with atomic semantics.
+/// A coordinator that manages checkpoint state for atomic commits.
+///
+/// With Txn-based checkpointing, the coordinator no longer writes checkpoints
+/// directly. Instead, it captures state that is then included in Delta commits
+/// via `DeltaSink::commit_files_with_checkpoint()`.
 pub struct CheckpointCoordinator {
-    manager: Arc<Mutex<CheckpointManager>>,
-    source_state: Arc<Mutex<SourceState>>,
-    pending_files: Arc<Mutex<Vec<PendingFile>>>,
-    delta_version: Arc<Mutex<i64>>,
+    state: Arc<Mutex<CheckpointStateInner>>,
+    last_checkpoint: Arc<Mutex<Instant>>,
+}
+
+impl Default for CheckpointCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CheckpointCoordinator {
     /// Create a new checkpoint coordinator.
-    pub fn new(storage: StorageProviderRef, interval_seconds: u64) -> Self {
+    pub fn new() -> Self {
         Self {
-            manager: Arc::new(Mutex::new(CheckpointManager::new(
-                storage,
-                interval_seconds,
-            ))),
-            source_state: Arc::new(Mutex::new(SourceState::new())),
-            pending_files: Arc::new(Mutex::new(Vec::new())),
-            delta_version: Arc::new(Mutex::new(-1)),
+            state: Arc::new(Mutex::new(CheckpointStateInner {
+                source_state: SourceState::new(),
+                delta_version: -1,
+            })),
+            last_checkpoint: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
-    /// Load the latest checkpoint and restore state.
-    pub async fn restore(&self) -> Result<Option<CheckpointState>, CheckpointError> {
-        let mut manager = self.manager.lock().await;
-        if let Some(checkpoint) = manager.load_latest_checkpoint().await? {
-            drop(manager);
+    /// Restore state from a recovered checkpoint.
+    ///
+    /// Called after `DeltaSink::recover_checkpoint_from_log()` successfully
+    /// recovers checkpoint state from the Delta transaction log.
+    pub async fn restore_from_state(&self, checkpoint: CheckpointState) {
+        let mut state = self.state.lock().await;
+        state.source_state = checkpoint.source_state;
+        state.delta_version = checkpoint.delta_version;
 
-            // Restore state
-            *self.source_state.lock().await = checkpoint.source_state.clone();
-            *self.pending_files.lock().await = checkpoint.pending_files.clone();
-            *self.delta_version.lock().await = checkpoint.delta_version;
-
-            Ok(Some(checkpoint))
-        } else {
-            Ok(None)
-        }
+        info!(
+            "Restored checkpoint state: delta_version={}, files={}",
+            state.delta_version,
+            state.source_state.files.len()
+        );
     }
 
     /// Update the source state for a file.
     pub async fn update_source_state(&self, path: &str, records_read: usize, finished: bool) {
-        let mut state = self.source_state.lock().await;
+        let mut state = self.state.lock().await;
         if finished {
-            state.mark_finished(path);
+            state.source_state.mark_finished(path);
         } else {
-            state.update_records(path, records_read);
+            state.source_state.update_records(path, records_read);
         }
     }
 
-    /// Clear pending files (after successful commit).
-    pub async fn clear_pending_files(&self) {
-        let mut files = self.pending_files.lock().await;
-        files.clear();
-        emit!(PendingFilesCount { count: 0 });
-    }
-
-    /// Update the Delta version.
+    /// Update the Delta version after a successful commit.
     pub async fn update_delta_version(&self, version: i64) {
-        *self.delta_version.lock().await = version;
+        let mut state = self.state.lock().await;
+        state.delta_version = version;
     }
 
-    /// Check if a checkpoint should be triggered.
-    pub async fn should_checkpoint(&self) -> bool {
-        let manager = self.manager.lock().await;
-        manager.should_checkpoint()
+    /// Mark that a checkpoint was just committed.
+    ///
+    /// Called after a successful `DeltaSink::commit_files_with_checkpoint()`
+    /// to reset the checkpoint timer.
+    pub async fn mark_checkpoint_committed(&self) {
+        let mut last = self.last_checkpoint.lock().await;
+        *last = Instant::now();
+        emit!(CheckpointAge { seconds: 0.0 });
+        debug!("Checkpoint committed, timer reset");
     }
 
-    /// Trigger a checkpoint.
-    pub async fn checkpoint(&self) -> Result<(), CheckpointError> {
-        let pending_files = self.pending_files.lock().await.clone();
-        emit!(PendingFilesCount {
-            count: pending_files.len()
-        });
-
-        let state = CheckpointState {
-            source_state: self.source_state.lock().await.clone(),
-            pending_files,
-            in_progress_writes: Vec::new(),
-            delta_version: *self.delta_version.lock().await,
-        };
-
-        let mut manager = self.manager.lock().await;
-        manager.save_checkpoint(&state).await?;
-
-        Ok(())
+    /// Capture the current state for checkpointing.
+    ///
+    /// Returns a snapshot of the checkpoint state that can be included
+    /// in a Delta commit via `DeltaSink::commit_files_with_checkpoint()`.
+    pub async fn capture_state(&self) -> CheckpointState {
+        let state = self.state.lock().await;
+        CheckpointState {
+            schema_version: 1,
+            source_state: state.source_state.clone(),
+            delta_version: state.delta_version,
+        }
     }
 
     /// Get the current source state.
     pub async fn get_source_state(&self) -> SourceState {
-        self.source_state.lock().await.clone()
+        let state = self.state.lock().await;
+        state.source_state.clone()
     }
 }
 
@@ -271,20 +130,38 @@ mod tests {
         source_state.mark_finished("file2.ndjson.gz");
 
         let state = CheckpointState {
+            schema_version: 1,
             source_state,
-            pending_files: vec![PendingFile {
-                filename: "pending.parquet".to_string(),
-                record_count: 50,
-            }],
-            in_progress_writes: Vec::new(),
             delta_version: 5,
         };
 
         let json = serde_json::to_string(&state).unwrap();
         let restored: CheckpointState = serde_json::from_str(&json).unwrap();
 
+        assert_eq!(restored.schema_version, 1);
         assert_eq!(restored.delta_version, 5);
-        assert_eq!(restored.pending_files.len(), 1);
         assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_capture_state() {
+        let coordinator = CheckpointCoordinator::new();
+
+        // Update some state
+        coordinator
+            .update_source_state("file1.ndjson.gz", 100, false)
+            .await;
+        coordinator
+            .update_source_state("file2.ndjson.gz", 200, true)
+            .await;
+        coordinator.update_delta_version(5).await;
+
+        // Capture state
+        let captured = coordinator.capture_state().await;
+
+        assert_eq!(captured.schema_version, 1);
+        assert_eq!(captured.delta_version, 5);
+        assert!(captured.source_state.is_file_finished("file2.ndjson.gz"));
+        assert!(!captured.source_state.is_file_finished("file1.ndjson.gz"));
     }
 }

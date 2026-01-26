@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::checkpoint::CheckpointCoordinator;
 use crate::emit;
 use crate::error::StorageError;
 use crate::internal_events::{
@@ -88,10 +89,14 @@ async fn upload_file(
 }
 
 /// Run the uploader task that handles concurrent file uploads and Delta commits.
+///
+/// Commits include atomic checkpoints - the checkpoint state is captured and
+/// committed alongside file Add actions in a single Delta transaction.
 pub(super) async fn run_uploader(
     mut upload_rx: mpsc::Receiver<FinishedFile>,
     mut delta_sink: DeltaSink,
     sink_storage: StorageProviderRef,
+    checkpoint_coordinator: Arc<CheckpointCoordinator>,
     shutdown: CancellationToken,
     config: UploaderConfig,
 ) -> (DeltaSink, usize, usize) {
@@ -106,43 +111,6 @@ pub(super) async fn run_uploader(
     let mut util_timer = UtilizationTimer::new("uploader");
 
     const COMMIT_BATCH_SIZE: usize = 10;
-
-    // Helper to commit accumulated files
-    async fn commit_files(
-        delta_sink: &mut DeltaSink,
-        files_to_commit: &mut Vec<FinishedFile>,
-    ) -> usize {
-        if files_to_commit.is_empty() {
-            return 0;
-        }
-
-        let commit_files: Vec<FinishedFile> = files_to_commit
-            .drain(..)
-            .map(|f| FinishedFile {
-                filename: f.filename,
-                size: f.size,
-                record_count: f.record_count,
-                bytes: None, // Clear bytes for commit
-            })
-            .collect();
-
-        let count = commit_files.len();
-        match delta_sink.commit_files(&commit_files).await {
-            Ok(Some(version)) => {
-                info!(
-                    "Committed {} files to Delta Lake, version {}",
-                    count, version
-                );
-            }
-            Ok(None) => {
-                debug!("No commit needed (duplicate files)");
-            }
-            Err(e) => {
-                error!("Failed to commit {} files to Delta: {}", count, e);
-            }
-        }
-        count
-    }
 
     loop {
         // Check if we're done: channel closed, no pending uploads, no files to commit
@@ -185,9 +153,14 @@ pub(super) async fn run_uploader(
                             bytes: None,
                         });
 
-                        // Batch commit every N files
+                        // Batch commit every N files with atomic checkpoint
                         if files_to_commit.len() >= COMMIT_BATCH_SIZE {
-                            commit_files(&mut delta_sink, &mut files_to_commit).await;
+                            commit_files_with_checkpoint(
+                                &mut delta_sink,
+                                &mut files_to_commit,
+                                &checkpoint_coordinator,
+                            )
+                            .await;
                         }
                     }
                     Err(e) => {
@@ -244,8 +217,13 @@ pub(super) async fn run_uploader(
         }
     }
 
-    // Final commit
-    commit_files(&mut delta_sink, &mut files_to_commit).await;
+    // Final commit with checkpoint
+    commit_files_with_checkpoint(
+        &mut delta_sink,
+        &mut files_to_commit,
+        &checkpoint_coordinator,
+    )
+    .await;
 
     // Reset gauge to 0 on completion
     emit!(ActiveUploads { count: 0 });
@@ -255,6 +233,58 @@ pub(super) async fn run_uploader(
         files_uploaded, bytes_uploaded
     );
     (delta_sink, files_uploaded, bytes_uploaded)
+}
+
+/// Commit files with atomic checkpoint.
+///
+/// Captures the current checkpoint state and commits it atomically
+/// with the file Add actions in a single Delta transaction.
+async fn commit_files_with_checkpoint(
+    delta_sink: &mut DeltaSink,
+    files_to_commit: &mut Vec<FinishedFile>,
+    checkpoint_coordinator: &CheckpointCoordinator,
+) -> usize {
+    if files_to_commit.is_empty() {
+        return 0;
+    }
+
+    let commit_files: Vec<FinishedFile> = files_to_commit
+        .drain(..)
+        .map(|f| FinishedFile {
+            filename: f.filename,
+            size: f.size,
+            record_count: f.record_count,
+            bytes: None, // Clear bytes for commit
+        })
+        .collect();
+
+    let count = commit_files.len();
+
+    // Capture current checkpoint state
+    let checkpoint_state = checkpoint_coordinator.capture_state().await;
+
+    // Commit with atomic checkpoint
+    match delta_sink
+        .commit_files_with_checkpoint(&commit_files, &checkpoint_state)
+        .await
+    {
+        Ok(Some(version)) => {
+            info!(
+                "Committed {} files with checkpoint to Delta Lake, version {}",
+                count, version
+            );
+            // Update coordinator with new delta version and mark checkpoint committed
+            checkpoint_coordinator.update_delta_version(version).await;
+            checkpoint_coordinator.mark_checkpoint_committed().await;
+        }
+        Ok(None) => {
+            debug!("No commit needed (duplicate files)");
+        }
+        Err(e) => {
+            error!("Failed to commit {} files to Delta: {}", count, e);
+        }
+    }
+    count
 }
 
 /// Run the downloader task that manages concurrent file downloads.

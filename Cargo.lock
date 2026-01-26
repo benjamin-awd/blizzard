@@ -990,6 +990,7 @@ dependencies = [
  "arrow 55.2.0",
  "arrow-json 55.2.0",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "criterion",

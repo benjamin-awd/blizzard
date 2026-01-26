@@ -18,7 +18,7 @@ mod utilization;
 use clap::Parser;
 use snafu::prelude::*;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
@@ -66,7 +66,7 @@ async fn main() -> Result<(), PipelineError> {
     if config.metrics.enabled {
         let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
         metrics::init(addr).context(MetricsSnafu)?;
-        info!(
+        debug!(
             "Metrics endpoint listening on http://{}/metrics",
             config.metrics.address
         );

@@ -2,32 +2,43 @@
 //!
 //! Handles creating/opening Delta Lake tables and committing
 //! Parquet files with exactly-once semantics.
+//!
+//! # Atomic Checkpointing
+//!
+//! This module uses Delta Lake's `Txn` action to achieve atomic checkpointing.
+//! The checkpoint state is embedded in the `Txn.app_id` field as base64-encoded JSON,
+//! and committed atomically with Add actions in a single Delta commit.
 
 use arrow::datatypes::Schema;
+use base64::Engine;
 use deltalake::DeltaTable;
 use deltalake::kernel::Action;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::protocol::SaveMode;
 use object_store::path::Path;
 use snafu::prelude::*;
-use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use url::Url;
 
 use super::FinishedFile;
-use crate::checkpoint::PendingFile;
+use crate::checkpoint::CheckpointState;
 use crate::emit;
 use crate::error::{
-    DeltaError, DeltaLakeSnafu, StructTypeSnafu, UnsupportedArrowTypeSnafu, UrlParseSnafu,
+    Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, StructTypeSnafu,
+    UnsupportedArrowTypeSnafu, UrlParseSnafu,
 };
 use crate::internal_events::DeltaCommitCompleted;
 use crate::storage::{BackendConfig, StorageProvider, StorageProviderRef};
+
+/// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
+const TXN_APP_ID_PREFIX: &str = "blizzard:";
 
 /// Delta Lake sink for committing Parquet files.
 pub struct DeltaSink {
     table: DeltaTable,
     last_version: i64,
+    checkpoint_version: i64,
 }
 
 impl DeltaSink {
@@ -43,32 +54,49 @@ impl DeltaSink {
         Ok(Self {
             table,
             last_version,
+            checkpoint_version: 0,
         })
     }
 
-    /// Commit a set of finished files to the Delta Lake table.
+    /// Commit files with an atomic checkpoint.
+    ///
+    /// The checkpoint state is embedded in a `Txn` action and committed
+    /// atomically with the Add actions for the files. This ensures that
+    /// file commits and checkpoint state are always consistent.
     ///
     /// Returns the new version number if a commit was made.
-    pub async fn commit_files(
+    pub async fn commit_files_with_checkpoint(
         &mut self,
         files: &[FinishedFile],
+        checkpoint: &CheckpointState,
     ) -> Result<Option<i64>, DeltaError> {
-        if files.is_empty() {
-            return Ok(None);
-        }
+        // Increment checkpoint version
+        self.checkpoint_version += 1;
 
-        let new_version = commit_files_to_delta(files, &mut self.table, self.last_version).await?;
+        // Create add actions for files
+        let add_actions: Vec<Action> = files.iter().map(create_add_action).collect();
 
-        if let Some(version) = new_version {
-            self.last_version = version;
-            info!(
-                "Committed {} files to Delta Lake, version {}",
-                files.len(),
-                version
-            );
-        }
+        // Create checkpoint state with current delta version
+        let mut checkpoint_with_version = checkpoint.clone();
+        checkpoint_with_version.delta_version = self.last_version;
 
-        Ok(new_version)
+        // Commit with checkpoint
+        let new_version = commit_to_delta_with_checkpoint(
+            &mut self.table,
+            add_actions,
+            Some((&checkpoint_with_version, self.checkpoint_version)),
+        )
+        .await?;
+
+        self.last_version = new_version;
+        info!(
+            "Committed {} files with checkpoint v{} to Delta Lake, version {}",
+            files.len(),
+            self.checkpoint_version,
+            new_version
+        );
+
+        Ok(Some(new_version))
     }
 
     /// Get the current table version.
@@ -76,29 +104,85 @@ impl DeltaSink {
         self.last_version
     }
 
-    /// Recover pending files from checkpoint by committing to Delta.
+    /// Get the current checkpoint version.
+    pub fn checkpoint_version(&self) -> i64 {
+        self.checkpoint_version
+    }
+
+    /// Recover checkpoint state from the Delta transaction log.
     ///
-    /// These files were uploaded but not committed (e.g., crash after upload).
-    /// Returns new version if files were committed.
-    pub async fn recover_pending_files(
+    /// Scans the transaction log backwards from the latest version looking for
+    /// a `Txn` action with app_id starting with "blizzard:" and decodes the
+    /// embedded checkpoint state.
+    ///
+    /// Returns `Some((checkpoint_state, checkpoint_version))` if found.
+    pub async fn recover_checkpoint_from_log(
         &mut self,
-        pending: &[PendingFile],
-    ) -> Result<Option<i64>, DeltaError> {
-        if pending.is_empty() {
+    ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
+        use deltalake::logstore::{get_actions, read_commit_entry};
+
+        // Reload table to get latest state
+        self.table.load().await.context(DeltaLakeSnafu)?;
+
+        let current_version = self.table.version().unwrap_or(-1);
+        info!(
+            "Recovering checkpoint from Delta log, current_version={}",
+            current_version
+        );
+        if current_version < 0 {
+            debug!("Empty Delta table, no checkpoint to recover");
             return Ok(None);
         }
 
-        let finished_files: Vec<FinishedFile> = pending
-            .iter()
-            .map(|pf| FinishedFile {
-                filename: pf.filename.clone(),
-                size: 0,
-                record_count: pf.record_count,
-                bytes: None,
-            })
-            .collect();
+        let log_store = self.table.log_store();
+        // Use object_store() (prefixed) instead of root_object_store() (unprefixed)
+        let object_store = log_store.object_store(None);
 
-        self.commit_files(&finished_files).await
+        // Scan backwards through commit logs looking for our Txn action
+        // Limit search to last 100 commits to avoid scanning entire history
+        let start_version = (current_version - 100).max(0);
+
+        for version in (start_version..=current_version).rev() {
+            let commit_bytes = match read_commit_entry(object_store.as_ref(), version)
+                .await
+                .context(DeltaLakeSnafu)?
+            {
+                Some(bytes) => bytes,
+                None => continue,
+            };
+
+            let actions = get_actions(version, &commit_bytes).context(DeltaLakeSnafu)?;
+
+            for action in &actions {
+                if let Action::Txn(txn) = action {
+                    if txn.app_id.starts_with(TXN_APP_ID_PREFIX) {
+                        let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
+                        let json_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .context(Base64DecodeSnafu)?;
+                        let state: CheckpointState =
+                            serde_json::from_slice(&json_bytes).context(CheckpointJsonSnafu)?;
+
+                        info!(
+                            "Recovered checkpoint from Delta log: checkpoint_version={}, delta_version={}, at commit version {}",
+                            txn.version, state.delta_version, version
+                        );
+
+                        // Update internal state
+                        self.checkpoint_version = txn.version;
+                        self.last_version = current_version;
+
+                        return Ok(Some((state, txn.version)));
+                    }
+                }
+            }
+        }
+
+        debug!(
+            "No Blizzard checkpoint found in Delta transaction log (scanned versions {}..{})",
+            start_version, current_version
+        );
+        Ok(None)
     }
 }
 
@@ -239,89 +323,10 @@ pub async fn load_or_create_table(
     }
 }
 
-/// Check if any of the finished files already exist in the table.
-///
-/// This uses version comparison to skip the check if the table hasn't changed,
-/// then falls back to checking existing file URIs if needed.
-///
-/// Returns `Some(version)` if files were already committed,
-/// or `None` if files are new.
-async fn check_existing_files(
-    table: &DeltaTable,
-    last_version: i64,
-    finished_files: &[FinishedFile],
-) -> Result<Option<i64>, DeltaError> {
-    let current_version = table.version().unwrap_or_default();
-
-    // If table version hasn't changed since our last commit, files can't be duplicates
-    if last_version >= current_version {
-        debug!(
-            "Table version {} hasn't changed since last commit {}, skipping duplicate check",
-            current_version, last_version
-        );
-        return Ok(None);
-    }
-
-    // Table has new commits - check if our files exist
-    let files: HashSet<_> = finished_files
-        .iter()
-        .map(|f| f.filename.trim_start_matches('/').to_string())
-        .collect();
-
-    // Check current table files for duplicates
-    let existing_files: HashSet<String> = table
-        .get_file_uris()
-        .context(DeltaLakeSnafu)?
-        .map(|p| p.to_string())
-        .collect();
-
-    for file in &files {
-        if existing_files.contains(file) {
-            debug!(
-                "File {} already exists in table at version {}",
-                file, current_version
-            );
-            return Ok(Some(current_version));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Commit files to a Delta Lake table with duplicate detection.
-pub async fn commit_files_to_delta(
-    finished_files: &[FinishedFile],
-    table: &mut DeltaTable,
-    last_version: i64,
-) -> Result<Option<i64>, DeltaError> {
-    if finished_files.is_empty() {
-        return Ok(None);
-    }
-
-    // Check for duplicate files using version range check
-    if let Some(existing_version) =
-        check_existing_files(table, last_version, finished_files).await?
-    {
-        debug!(
-            "Files already committed at version {}, skipping",
-            existing_version
-        );
-        return Ok(Some(existing_version));
-    }
-
-    // Create add actions for new files
-    let add_actions: Vec<Action> = finished_files.iter().map(create_add_action).collect();
-
-    // Commit the actions
-    let new_version = commit_to_delta(table, add_actions).await?;
-    Ok(Some(new_version))
-}
-
 /// Create a Delta Lake Add action for a finished file.
 fn create_add_action(file: &FinishedFile) -> Action {
     use deltalake::kernel::Add;
     use std::collections::HashMap;
-    use std::time::SystemTime;
 
     debug!("Creating add action for file {:?}", file);
 
@@ -332,7 +337,7 @@ fn create_add_action(file: &FinishedFile) -> Action {
         size: file.size as i64,
         partition_values: HashMap::new(),
         modification_time: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64,
         data_change: true,
@@ -340,16 +345,62 @@ fn create_add_action(file: &FinishedFile) -> Action {
     })
 }
 
-/// Commit add actions to the Delta table.
-async fn commit_to_delta(
+/// Create a Delta Lake Txn action with embedded checkpoint state.
+///
+/// The checkpoint state is serialized to JSON and base64-encoded in the app_id field.
+/// Format: `blizzard:{base64_encoded_checkpoint_json}`
+fn create_txn_action(
+    checkpoint_state: &CheckpointState,
+    version: i64,
+) -> Result<Action, DeltaError> {
+    use deltalake::kernel::Transaction;
+
+    let checkpoint_json = serde_json::to_string(checkpoint_state).context(CheckpointJsonSnafu)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&checkpoint_json);
+    let app_id = format!("{}{}", TXN_APP_ID_PREFIX, encoded);
+
+    Ok(Action::Txn(Transaction {
+        app_id,
+        version,
+        last_updated: Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64,
+        ),
+    }))
+}
+
+/// Commit actions to Delta table with optional checkpoint.
+///
+/// When checkpoint is provided, a Txn action is prepended to the add actions
+/// and committed atomically in a single transaction.
+async fn commit_to_delta_with_checkpoint(
     table: &mut DeltaTable,
     add_actions: Vec<Action>,
+    checkpoint: Option<(&CheckpointState, i64)>,
 ) -> Result<i64, DeltaError> {
     use deltalake::kernel::transaction::CommitBuilder;
 
     let start = Instant::now();
+
+    // Build the complete action list
+    let mut all_actions = Vec::with_capacity(add_actions.len() + 1);
+
+    // Add Txn action first if checkpoint provided
+    if let Some((state, version)) = checkpoint {
+        all_actions.push(create_txn_action(state, version)?);
+        debug!(
+            "Including checkpoint v{} in commit ({} files)",
+            version,
+            add_actions.len()
+        );
+    }
+
+    all_actions.extend(add_actions);
+
     let version = CommitBuilder::default()
-        .with_actions(add_actions)
+        .with_actions(all_actions)
         .build(
             Some(table.snapshot().context(DeltaLakeSnafu)?),
             table.log_store(),
@@ -376,6 +427,7 @@ async fn commit_to_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::SourceState;
 
     #[test]
     fn test_create_add_action() {
@@ -418,37 +470,56 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_file_to_finished_file_conversion() {
-        // Test the conversion logic used in recover_pending_files
-        let pending = vec![
-            PendingFile {
-                filename: "file1.parquet".to_string(),
-                record_count: 100,
-            },
-            PendingFile {
-                filename: "/path/to/file2.parquet".to_string(),
-                record_count: 200,
-            },
-        ];
+    fn test_create_txn_action() {
+        let mut source_state = SourceState::new();
+        source_state.update_records("file1.ndjson.gz", 100);
 
-        let finished: Vec<FinishedFile> = pending
-            .iter()
-            .map(|pf| FinishedFile {
-                filename: pf.filename.clone(),
-                size: 0,
-                record_count: pf.record_count,
-                bytes: None,
-            })
-            .collect();
+        let checkpoint = CheckpointState {
+            schema_version: 1,
+            source_state,
+            delta_version: 5,
+        };
 
-        assert_eq!(finished.len(), 2);
+        let action = create_txn_action(&checkpoint, 42).unwrap();
 
-        assert_eq!(finished[0].filename, "file1.parquet");
-        assert_eq!(finished[0].size, 0);
-        assert_eq!(finished[0].record_count, 100);
-        assert!(finished[0].bytes.is_none());
+        match action {
+            Action::Txn(txn) => {
+                assert!(txn.app_id.starts_with(TXN_APP_ID_PREFIX));
+                assert_eq!(txn.version, 42);
+                assert!(txn.last_updated.is_some());
+            }
+            _ => panic!("Expected Txn action"),
+        }
+    }
 
-        assert_eq!(finished[1].filename, "/path/to/file2.parquet");
-        assert_eq!(finished[1].record_count, 200);
+    #[test]
+    fn test_txn_action_roundtrip() {
+        let mut source_state = SourceState::new();
+        source_state.update_records("file1.ndjson.gz", 100);
+        source_state.mark_finished("file2.ndjson.gz");
+
+        let original = CheckpointState {
+            schema_version: 1,
+            source_state,
+            delta_version: 10,
+        };
+
+        // Create Txn action
+        let action = create_txn_action(&original, 1).unwrap();
+
+        // Extract and decode
+        if let Action::Txn(txn) = action {
+            let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
+            let json_bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            let restored: CheckpointState = serde_json::from_slice(&json_bytes).unwrap();
+
+            assert_eq!(restored.schema_version, original.schema_version);
+            assert_eq!(restored.delta_version, original.delta_version);
+            assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
+        } else {
+            panic!("Expected Txn action");
+        }
     }
 }
