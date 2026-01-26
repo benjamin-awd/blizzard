@@ -28,7 +28,7 @@ use crate::error::{
     Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, SchemaConversionSnafu,
     StructTypeSnafu, UrlParseSnafu,
 };
-use crate::internal_events::DeltaCommitCompleted;
+use crate::metrics::events::DeltaCommitCompleted;
 use crate::storage::{BackendConfig, StorageProvider, StorageProviderRef};
 
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.

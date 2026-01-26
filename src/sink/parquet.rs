@@ -19,7 +19,7 @@ use super::FinishedFile;
 use crate::config::{MB, ParquetCompression};
 use crate::emit;
 use crate::error::{ParquetError, WriteSnafu};
-use crate::internal_events::ParquetWriteCompleted;
+use crate::metrics::events::ParquetWriteCompleted;
 
 /// Statistics for tracking writer state.
 #[derive(Debug, Clone, Copy)]

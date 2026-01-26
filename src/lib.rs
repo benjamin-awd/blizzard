@@ -22,13 +22,11 @@ pub mod checkpoint;
 pub mod config;
 pub mod dlq;
 pub mod error;
-pub mod internal_events;
 pub mod metrics;
 pub mod pipeline;
 pub mod sink;
 pub mod source;
 pub mod storage;
-pub mod utilization;
 
 // Re-export main types
 pub use config::Config;

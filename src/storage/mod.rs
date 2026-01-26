@@ -3,15 +3,16 @@
 //! Provides a unified interface for working with S3, GCS, Azure Blob Storage,
 //! and local filesystem.
 
+mod azure;
+mod gcs;
+mod local;
+mod s3;
+
 use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::ready};
-use object_store::aws::AmazonS3Builder;
-use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::GoogleCloudStorageBuilder;
-use object_store::local::LocalFileSystem;
 use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
-use object_store::{ObjectStore, PutPayload, RetryConfig};
+use object_store::{ObjectStore, PutPayload};
 use regex::Regex;
 use snafu::prelude::*;
 use std::borrow::Cow;
@@ -22,14 +23,17 @@ use std::time::Instant;
 use tracing::debug;
 
 use crate::emit;
-use crate::error::{
-    AzureConfigSnafu, GcsConfigSnafu, InvalidUrlSnafu, IoSnafu, ObjectStoreSnafu, S3ConfigSnafu,
-    StorageError,
-};
-use crate::internal_events::{
+use crate::error::{InvalidUrlSnafu, ObjectStoreSnafu, StorageError};
+use crate::metrics::events::{
     ActiveMultipartParts, MultipartUploadCompleted, RequestStatus, StorageOperation,
     StorageRequest, StorageRequestDuration,
 };
+
+// Re-export config types
+pub use azure::AzureConfig;
+pub use gcs::GcsConfig;
+pub use local::LocalConfig;
+pub use s3::S3Config;
 
 /// A reference-counted storage provider.
 pub type StorageProviderRef = Arc<StorageProvider>;
@@ -37,13 +41,13 @@ pub type StorageProviderRef = Arc<StorageProvider>;
 /// Storage provider that abstracts over different cloud storage backends.
 #[derive(Clone)]
 pub struct StorageProvider {
-    config: BackendConfig,
-    object_store: Arc<dyn ObjectStore>,
+    pub(crate) config: BackendConfig,
+    pub(crate) object_store: Arc<dyn ObjectStore>,
     /// MultipartStore for parallel part uploads with explicit part numbering.
     /// Some backends (S3, GCS, Azure) support this; local filesystem does not.
-    multipart_store: Option<Arc<dyn MultipartStore>>,
-    canonical_url: String,
-    storage_options: HashMap<String, String>,
+    pub(crate) multipart_store: Option<Arc<dyn MultipartStore>>,
+    pub(crate) canonical_url: String,
+    pub(crate) storage_options: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for StorageProvider {
@@ -79,15 +83,6 @@ enum Backend {
     Gcs,
     Azure,
     Local,
-}
-
-/// Create a standard retry configuration for cloud storage operations.
-///
-/// Handles transient errors like 500s, rate limits, and network timeouts
-/// with exponential backoff. Uses object_store defaults (max_retries: 10,
-/// retry_timeout: 3 minutes).
-fn default_retry_config() -> RetryConfig {
-    RetryConfig::default()
 }
 
 fn matchers() -> &'static HashMap<Backend, Vec<Regex>> {
@@ -133,37 +128,6 @@ fn matchers() -> &'static HashMap<Backend, Vec<Regex>> {
 
         m
     })
-}
-
-/// S3 storage configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct S3Config {
-    pub endpoint: Option<String>,
-    pub region: Option<String>,
-    pub bucket: String,
-    pub key: Option<Path>,
-}
-
-/// Google Cloud Storage configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GcsConfig {
-    pub bucket: String,
-    pub key: Option<Path>,
-}
-
-/// Azure Blob Storage configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AzureConfig {
-    pub account: String,
-    pub container: String,
-    pub key: Option<Path>,
-}
-
-/// Local filesystem configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalConfig {
-    pub path: String,
-    pub key: Option<Path>,
 }
 
 /// Backend configuration enum.
@@ -292,7 +256,7 @@ impl BackendConfig {
         }))
     }
 
-    fn key(&self) -> Option<&Path> {
+    pub(crate) fn key(&self) -> Option<&Path> {
         match self {
             BackendConfig::S3(s3) => s3.key.as_ref(),
             BackendConfig::Gcs(gcs) => gcs.key.as_ref(),
@@ -316,128 +280,6 @@ impl StorageProvider {
             BackendConfig::Azure(config) => Self::construct_azure(config).await,
             BackendConfig::Local(config) => Self::construct_local(config).await,
         }
-    }
-
-    async fn construct_s3(
-        config: S3Config,
-        options: HashMap<String, String>,
-    ) -> Result<Self, StorageError> {
-        let mut builder = AmazonS3Builder::from_env().with_bucket_name(&config.bucket);
-
-        for (key, value) in &options {
-            builder = builder.with_config(key.parse().context(S3ConfigSnafu)?, value.clone());
-        }
-
-        builder = builder.with_retry(default_retry_config());
-
-        if let Some(region) = &config.region {
-            builder = builder.with_region(region);
-        }
-
-        if let Some(endpoint) = &config.endpoint {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_virtual_hosted_style_request(false)
-                .with_allow_http(true);
-        }
-
-        let canonical_url = match (&config.region, &config.endpoint) {
-            (_, Some(endpoint)) => format!("s3::{}/{}", endpoint, config.bucket),
-            (Some(region), _) => format!("https://s3.{}.amazonaws.com/{}", region, config.bucket),
-            _ => format!("https://s3.amazonaws.com/{}", config.bucket),
-        };
-
-        let canonical_url = if let Some(key) = &config.key {
-            format!("{}/{}", canonical_url, key)
-        } else {
-            canonical_url
-        };
-
-        let s3_store = Arc::new(builder.build().context(S3ConfigSnafu)?);
-        // S3 supports MultipartStore for parallel part uploads
-        let multipart_store: Option<Arc<dyn MultipartStore>> = Some(s3_store.clone());
-        let object_store: Arc<dyn ObjectStore> = s3_store;
-
-        Ok(Self {
-            config: BackendConfig::S3(config),
-            object_store,
-            multipart_store,
-            canonical_url,
-            storage_options: options,
-        })
-    }
-
-    async fn construct_gcs(config: GcsConfig) -> Result<Self, StorageError> {
-        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&config.bucket);
-
-        builder = builder.with_retry(default_retry_config());
-
-        if let Ok(service_account_key) = std::env::var("GOOGLE_SERVICE_ACCOUNT_KEY") {
-            debug!("Constructing GCS builder with service account key");
-            builder = builder.with_service_account_key(&service_account_key);
-        }
-
-        let mut canonical_url = format!("https://{}.storage.googleapis.com", config.bucket);
-        if let Some(key) = &config.key {
-            canonical_url = format!("{}/{}", canonical_url, key);
-        }
-
-        let gcs_store = Arc::new(builder.build().context(GcsConfigSnafu)?);
-        // GCS supports MultipartStore for parallel part uploads
-        let multipart_store: Option<Arc<dyn MultipartStore>> = Some(gcs_store.clone());
-        let object_store: Arc<dyn ObjectStore> = gcs_store;
-
-        Ok(Self {
-            config: BackendConfig::Gcs(config),
-            object_store,
-            multipart_store,
-            canonical_url,
-            storage_options: HashMap::new(),
-        })
-    }
-
-    async fn construct_azure(config: AzureConfig) -> Result<Self, StorageError> {
-        let builder = MicrosoftAzureBuilder::from_env()
-            .with_container_name(&config.container)
-            .with_retry(default_retry_config());
-
-        let canonical_url = format!(
-            "https://{}.blob.core.windows.net/{}",
-            config.account, config.container
-        );
-
-        let azure_store = Arc::new(builder.build().context(AzureConfigSnafu)?);
-        // Azure supports MultipartStore for parallel part uploads
-        let multipart_store: Option<Arc<dyn MultipartStore>> = Some(azure_store.clone());
-        let object_store: Arc<dyn ObjectStore> = azure_store;
-
-        Ok(Self {
-            config: BackendConfig::Azure(config),
-            object_store,
-            multipart_store,
-            canonical_url,
-            storage_options: HashMap::new(),
-        })
-    }
-
-    async fn construct_local(config: LocalConfig) -> Result<Self, StorageError> {
-        tokio::fs::create_dir_all(&config.path)
-            .await
-            .context(IoSnafu)?;
-
-        let object_store: Arc<dyn ObjectStore> =
-            Arc::new(LocalFileSystem::new_with_prefix(&config.path).context(ObjectStoreSnafu)?);
-
-        let canonical_url = format!("file://{}", config.path);
-
-        Ok(Self {
-            config: BackendConfig::Local(config),
-            object_store,
-            // Local filesystem does not support MultipartStore
-            multipart_store: None,
-            canonical_url,
-            storage_options: HashMap::new(),
-        })
     }
 
     /// List files in the storage location.

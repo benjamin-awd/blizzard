@@ -19,7 +19,7 @@ use crate::error::{
     BatchFlushSnafu, DecoderBuildSnafu, GzipDecompressionSnafu, JsonDecodeSnafu, ReaderError,
     ZstdDecompressionSnafu,
 };
-use crate::internal_events::{BytesRead, FileDecompressionCompleted};
+use crate::metrics::events::{BytesRead, FileDecompressionCompleted};
 
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]

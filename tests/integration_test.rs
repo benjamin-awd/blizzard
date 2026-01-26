@@ -304,7 +304,7 @@ mod sink_tests {
 mod dlq_tests {
     use blizzard::config::ErrorHandlingConfig;
     use blizzard::dlq::{DeadLetterQueue, FailedFile};
-    use blizzard::internal_events::FailureStage;
+    use blizzard::metrics::events::FailureStage;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
