@@ -9,9 +9,9 @@
 //! The checkpoint state is embedded in the `Txn.app_id` field as base64-encoded JSON,
 //! and committed atomically with Add actions in a single Delta commit.
 
-use arrow::datatypes::Schema;
 use base64::Engine;
 use deltalake::DeltaTable;
+use deltalake::arrow::datatypes::Schema;
 use deltalake::kernel::Action;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::protocol::SaveMode;
@@ -25,8 +25,8 @@ use super::FinishedFile;
 use crate::checkpoint::CheckpointState;
 use crate::emit;
 use crate::error::{
-    Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, StructTypeSnafu,
-    UnsupportedArrowTypeSnafu, UrlParseSnafu,
+    Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, SchemaConversionSnafu,
+    StructTypeSnafu, UrlParseSnafu,
 };
 use crate::internal_events::DeltaCommitCompleted;
 use crate::storage::{BackendConfig, StorageProvider, StorageProviderRef};
@@ -188,13 +188,17 @@ impl DeltaSink {
 
 /// Convert an Arrow schema to a Delta schema.
 fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructType, DeltaError> {
-    use deltalake::kernel::{StructField, StructType};
+    use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
+    use deltalake::kernel::{DataType as DeltaType, StructField, StructType};
 
     let fields: Vec<StructField> = schema
         .fields()
         .iter()
         .map(|field| {
-            let delta_type = arrow_type_to_delta(field.data_type())?;
+            let delta_type: DeltaType = field
+                .data_type()
+                .try_into_kernel()
+                .context(SchemaConversionSnafu)?;
             Ok(StructField::new(
                 field.name(),
                 delta_type,
@@ -209,50 +213,6 @@ fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructTyp
         }
         .build()
     })
-}
-
-/// Convert an Arrow data type to a Delta data type.
-fn arrow_type_to_delta(
-    arrow_type: &arrow::datatypes::DataType,
-) -> Result<deltalake::kernel::DataType, DeltaError> {
-    use arrow::datatypes::DataType as ArrowType;
-    use deltalake::kernel::DataType as DeltaType;
-
-    let delta_type = match arrow_type {
-        ArrowType::Boolean => DeltaType::BOOLEAN,
-        ArrowType::Int8 => DeltaType::BYTE,
-        ArrowType::Int16 => DeltaType::SHORT,
-        ArrowType::Int32 => DeltaType::INTEGER,
-        ArrowType::Int64 => DeltaType::LONG,
-        ArrowType::Float32 => DeltaType::FLOAT,
-        ArrowType::Float64 => DeltaType::DOUBLE,
-        ArrowType::Utf8 | ArrowType::LargeUtf8 => DeltaType::STRING,
-        ArrowType::Binary | ArrowType::LargeBinary => DeltaType::BINARY,
-        ArrowType::Date32 | ArrowType::Date64 => DeltaType::DATE,
-        ArrowType::Timestamp(_, _) => DeltaType::TIMESTAMP,
-        ArrowType::Decimal128(precision, scale) => DeltaType::decimal(*precision, *scale as u8)
-            .map_err(|e| {
-                crate::error::DecimalPrecisionSnafu {
-                    message: e.to_string(),
-                }
-                .build()
-            })?,
-        ArrowType::Decimal256(precision, scale) => DeltaType::decimal(*precision, *scale as u8)
-            .map_err(|e| {
-                crate::error::DecimalPrecisionSnafu {
-                    message: e.to_string(),
-                }
-                .build()
-            })?,
-        other => {
-            return UnsupportedArrowTypeSnafu {
-                arrow_type: other.clone(),
-            }
-            .fail();
-        }
-    };
-
-    Ok(delta_type)
 }
 
 /// Load or create a Delta Lake table with the given schema.

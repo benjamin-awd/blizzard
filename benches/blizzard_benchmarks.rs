@@ -9,8 +9,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 mod bench_utils;
 
-use arrow_json::reader::ReaderBuilder;
 use blizzard::sink::parquet::{ParquetWriter, ParquetWriterConfig};
+use deltalake::arrow::json::ReaderBuilder;
 
 /// Benchmarks for JSON line parsing.
 ///

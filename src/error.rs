@@ -114,10 +114,10 @@ pub enum DeltaError {
     #[snafu(display("Failed to create struct type: {message}"))]
     StructType { message: String },
 
-    /// Unsupported Arrow type for Delta conversion.
-    #[snafu(display("Unsupported Arrow type: {arrow_type:?}"))]
-    UnsupportedArrowType {
-        arrow_type: arrow::datatypes::DataType,
+    /// Schema conversion error.
+    #[snafu(display("Schema conversion failed"))]
+    SchemaConversion {
+        source: deltalake::arrow::error::ArrowError,
     },
 
     /// Delta Lake operation failed.
@@ -127,10 +127,6 @@ pub enum DeltaError {
     /// Failed to parse URL.
     #[snafu(display("Failed to parse URL"))]
     UrlParse { source: url::ParseError },
-
-    /// Decimal precision error.
-    #[snafu(display("Decimal precision error: {message}"))]
-    DecimalPrecision { message: String },
 
     /// JSON serialization/deserialization error for checkpoint data.
     #[snafu(display("JSON error in checkpoint"))]
@@ -163,7 +159,7 @@ pub enum ParquetError {
     /// Parquet write error.
     #[snafu(display("Parquet write error"))]
     Write {
-        source: parquet::errors::ParquetError,
+        source: deltalake::parquet::errors::ParquetError,
     },
 }
 

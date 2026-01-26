@@ -3,12 +3,12 @@
 //! Writes Arrow RecordBatches to Parquet files with configurable
 //! compression and file rolling based on size.
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
 use bytes::{BufMut, BytesMut};
-use parquet::arrow::ArrowWriter;
-use parquet::basic::{GzipLevel, ZstdLevel};
-use parquet::file::properties::WriterProperties;
+use deltalake::arrow::array::RecordBatch;
+use deltalake::arrow::datatypes::SchemaRef;
+use deltalake::parquet::arrow::ArrowWriter;
+use deltalake::parquet::basic::{GzipLevel, ZstdLevel};
+use deltalake::parquet::file::properties::WriterProperties;
 use snafu::prelude::*;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -219,11 +219,17 @@ impl ParquetWriter {
         let mut builder = WriterProperties::builder();
 
         builder = builder.set_compression(match config.compression {
-            ParquetCompression::Uncompressed => parquet::basic::Compression::UNCOMPRESSED,
-            ParquetCompression::Snappy => parquet::basic::Compression::SNAPPY,
-            ParquetCompression::Gzip => parquet::basic::Compression::GZIP(GzipLevel::default()),
-            ParquetCompression::Zstd => parquet::basic::Compression::ZSTD(ZstdLevel::default()),
-            ParquetCompression::Lz4 => parquet::basic::Compression::LZ4,
+            ParquetCompression::Uncompressed => {
+                deltalake::parquet::basic::Compression::UNCOMPRESSED
+            }
+            ParquetCompression::Snappy => deltalake::parquet::basic::Compression::SNAPPY,
+            ParquetCompression::Gzip => {
+                deltalake::parquet::basic::Compression::GZIP(GzipLevel::default())
+            }
+            ParquetCompression::Zstd => {
+                deltalake::parquet::basic::Compression::ZSTD(ZstdLevel::default())
+            }
+            ParquetCompression::Lz4 => deltalake::parquet::basic::Compression::LZ4,
         });
 
         builder.build()
@@ -376,8 +382,8 @@ impl ParquetWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::array::{Int64Array, StringArray};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
