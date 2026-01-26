@@ -16,7 +16,7 @@ pub use state::CheckpointState;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::emit;
 use crate::metrics::events::CheckpointAge;
@@ -64,12 +64,6 @@ impl CheckpointCoordinator {
         let mut state = self.state.lock().await;
         state.source_state = checkpoint.source_state;
         state.delta_version = checkpoint.delta_version;
-
-        info!(
-            "Restored checkpoint state: delta_version={}, files={}",
-            state.delta_version,
-            state.source_state.files.len()
-        );
     }
 
     /// Update the source state for a file.
