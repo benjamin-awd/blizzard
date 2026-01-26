@@ -5,7 +5,7 @@ help: ## Show this help
 .PHONY: all build build-release check test clean
 
 # Docker configuration
-DOCKER_REGISTRY ?= asia-northeast1-docker.pkg.dev/data-dev-596660/flowdesk/blizzard
+DOCKER_REGISTRY ?= asia-northeast1-docker.pkg.dev/data-dev-596660/main-asia/flowdesk/blizzard
 TAG ?= latest
 
 .PHONY: docker-build docker-push docker-run

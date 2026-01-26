@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 
 # This makes the package standalone, not part of the arroyo workspace
 [workspace]
+members = ["lib/tracing-limit"]
 
 [dependencies]
 # Delta Lake
@@ -38,7 +39,8 @@ snafu = { version = "0.8", default-features = false, features = ["std"] }
 
 # Logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "ansi", "registry"] }
+tracing-limit = { path = "lib/tracing-limit" }
 
 # URL parsing
 url = { version = "2", default-features = false }

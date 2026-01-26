@@ -18,7 +18,10 @@ use clap::Parser;
 use snafu::prelude::*;
 use std::path::PathBuf;
 use tracing::{debug, info};
-use tracing_subscriber::EnvFilter;
+use tracing_limit::RateLimitedLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use config::Config;
 use error::{AddressParseSnafu, ConfigSnafu, MetricsSnafu, PipelineError};
@@ -40,6 +43,10 @@ struct Args {
     /// Dry run - validate configuration without processing.
     #[arg(long)]
     dry_run: bool,
+
+    /// Internal log rate limit window in seconds (0 to disable).
+    #[arg(long, default_value = "10")]
+    internal_log_rate_secs: u64,
 }
 
 #[snafu::report]
@@ -51,10 +58,20 @@ async fn main() -> Result<(), PipelineError> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    if args.internal_log_rate_secs > 0 {
+        let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+        let rate_limited =
+            RateLimitedLayer::new(fmt_layer).with_default_limit(args.internal_log_rate_secs);
+
+        tracing_subscriber::registry()
+            .with(rate_limited.with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     info!("blizzard starting");
 

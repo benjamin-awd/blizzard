@@ -177,11 +177,6 @@ impl Pipeline {
         let reader_config = NdjsonReaderConfig::new(batch_size, compression);
         let reader = Arc::new(NdjsonReader::new(schema.clone(), reader_config));
 
-        info!(
-            "Processing files with max_concurrent_files={} (download-then-decompress mode)",
-            max_concurrent
-        );
-
         // Channel for downloaded files ready for CPU processing
         // Buffer size matches max_concurrent to allow downloads to stay ahead
         let (download_tx, mut download_rx) =
