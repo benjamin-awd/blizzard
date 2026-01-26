@@ -95,12 +95,12 @@ impl RateLimitState {
 
     /// Increment count and return the new value.
     fn increment(&self) -> u64 {
-        self.count.fetch_add(1, Ordering::SeqCst) + 1
+        self.count.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Get the current count.
     fn get_count(&self) -> u64 {
-        self.count.load(Ordering::SeqCst)
+        self.count.load(Ordering::Relaxed)
     }
 }
 
@@ -218,7 +218,7 @@ impl<L> RateLimitedLayer<L> {
 
             // Reset state
             state.window_start = Instant::now();
-            state.count.store(1, Ordering::SeqCst);
+            state.count.store(1, Ordering::Relaxed);
             state.limit_secs = limit_secs;
 
             if suppressed > 0 {
@@ -375,7 +375,7 @@ impl RateLimitedFilter {
         if state.is_expired() {
             // Reset state
             state.window_start = Instant::now();
-            state.count.store(1, Ordering::SeqCst);
+            state.count.store(1, Ordering::Relaxed);
             state.limit_secs = limit_secs;
             return true;
         }
