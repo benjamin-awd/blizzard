@@ -1,5 +1,5 @@
 # Stage 1: Generate a recipe file for dependencies
-FROM rust:1.92.0 AS chef
+FROM rust:1.93.0 AS chef
 RUN cargo install cargo-chef
 WORKDIR /app
 
