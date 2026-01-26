@@ -250,7 +250,7 @@ pub struct DecompressionQueueDepth {
 impl InternalEvent for DecompressionQueueDepth {
     fn emit(self) {
         trace!(count = self.count, "Decompression queue depth");
-        gauge!("blizzard_rayon_queue_depth").set(self.count as f64);
+        gauge!("blizzard_decompression_queue_depth").set(self.count as f64);
     }
 }
 
