@@ -32,7 +32,14 @@ use crate::error::{MetricsError, PrometheusInitSnafu};
 /// metrics::init(addr).expect("Failed to initialize metrics");
 /// ```
 pub fn init(addr: SocketAddr) -> Result<(), MetricsError> {
+    // Default histogram buckets for duration metrics (in seconds)
+    const DURATION_BUCKETS: &[f64] = &[
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+    ];
+
     let handle = PrometheusBuilder::new()
+        .set_buckets(DURATION_BUCKETS)
+        .expect("valid bucket configuration")
         .install_recorder()
         .context(PrometheusInitSnafu)?;
 
