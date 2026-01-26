@@ -378,3 +378,82 @@ impl InternalEvent for RecoveredRecords {
         counter!("blizzard_recovered_records_total").increment(self.count);
     }
 }
+
+// ============================================================================
+// Memory tracking events
+// ============================================================================
+
+/// Event emitted when the source state file count changes.
+///
+/// This tracks the number of files in the SourceState HashMap, which grows
+/// unbounded as files are processed. Useful for diagnosing memory growth.
+pub struct SourceStateFiles {
+    pub count: usize,
+}
+
+impl InternalEvent for SourceStateFiles {
+    fn emit(self) {
+        trace!(count = self.count, "Source state files tracked");
+        gauge!("blizzard_source_state_files").set(self.count as f64);
+    }
+}
+
+/// Event emitted to track checkpoint state size in bytes.
+///
+/// This measures the serialized size of the checkpoint state, which includes
+/// all tracked file paths. Useful for diagnosing memory and I/O overhead.
+pub struct CheckpointStateSize {
+    pub bytes: usize,
+}
+
+impl InternalEvent for CheckpointStateSize {
+    fn emit(self) {
+        trace!(bytes = self.bytes, "Checkpoint state size");
+        gauge!("blizzard_checkpoint_state_bytes").set(self.bytes as f64);
+    }
+}
+
+/// Event emitted when the number of files pending Delta commit changes.
+///
+/// These are files that have been uploaded but not yet committed to Delta Lake.
+/// Files accumulate up to COMMIT_BATCH_SIZE before being committed together.
+pub struct PendingCommitFiles {
+    pub count: usize,
+}
+
+impl InternalEvent for PendingCommitFiles {
+    fn emit(self) {
+        trace!(count = self.count, "Pending commit files");
+        gauge!("blizzard_pending_commit_files").set(self.count as f64);
+    }
+}
+
+/// Event emitted to track bytes waiting in the upload queue.
+///
+/// This measures the total size of Parquet files waiting to be uploaded,
+/// which can be a significant memory consumer (~128 MB per file).
+pub struct UploadQueueBytes {
+    pub bytes: usize,
+}
+
+impl InternalEvent for UploadQueueBytes {
+    fn emit(self) {
+        trace!(bytes = self.bytes, "Upload queue bytes");
+        gauge!("blizzard_upload_queue_bytes").set(self.bytes as f64);
+    }
+}
+
+/// Event emitted when the upload queue depth changes.
+///
+/// Tracks the number of files waiting in the upload channel plus
+/// files currently being uploaded.
+pub struct UploadQueueDepth {
+    pub count: usize,
+}
+
+impl InternalEvent for UploadQueueDepth {
+    fn emit(self) {
+        trace!(count = self.count, "Upload queue depth");
+        gauge!("blizzard_upload_queue_depth").set(self.count as f64);
+    }
+}

@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::emit;
-use crate::metrics::events::CheckpointAge;
+use crate::metrics::events::{CheckpointAge, SourceStateFiles};
 use crate::source::SourceState;
 
 /// Consolidated checkpoint state protected by a single lock.
@@ -62,8 +62,10 @@ impl CheckpointCoordinator {
     /// recovers checkpoint state from the Delta transaction log.
     pub async fn restore_from_state(&self, checkpoint: CheckpointState) {
         let mut state = self.state.lock().await;
+        let file_count = checkpoint.source_state.files.len();
         state.source_state = checkpoint.source_state;
         state.delta_version = checkpoint.delta_version;
+        emit!(SourceStateFiles { count: file_count });
     }
 
     /// Update the source state for a file.
@@ -74,6 +76,9 @@ impl CheckpointCoordinator {
         } else {
             state.source_state.update_records(path, records_read);
         }
+        emit!(SourceStateFiles {
+            count: state.source_state.files.len()
+        });
     }
 
     /// Update the Delta version after a successful commit.
