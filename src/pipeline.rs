@@ -19,7 +19,7 @@
 
 mod tasks;
 
-use arrow::array::RecordBatch;
+use deltalake::arrow::array::RecordBatch;
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::prelude::*;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ struct ProcessedFile {
 struct InitializedState {
     pending_files: Vec<String>,
     source_state: crate::source::SourceState,
-    schema: Arc<arrow::datatypes::Schema>,
+    schema: Arc<deltalake::arrow::datatypes::Schema>,
     writer: ParquetWriter,
     delta_sink: DeltaSink,
     max_concurrent: usize,

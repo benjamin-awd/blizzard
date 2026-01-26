@@ -1,7 +1,7 @@
 //! Benchmark utilities for generating test data.
 
-use arrow::array::{BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use deltalake::arrow::array::{BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use rand::Rng;
 use std::io::Write;
 use std::sync::Arc;

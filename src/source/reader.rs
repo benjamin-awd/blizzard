@@ -3,10 +3,10 @@
 //! Reads gzip-compressed newline-delimited JSON files and converts them
 //! to Arrow RecordBatches using a user-provided schema.
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
-use arrow_json::reader::ReaderBuilder;
 use bytes::Bytes;
+use deltalake::arrow::array::RecordBatch;
+use deltalake::arrow::datatypes::SchemaRef;
+use deltalake::arrow::json::ReaderBuilder;
 use snafu::prelude::*;
 use std::io::Read;
 use std::sync::Arc;

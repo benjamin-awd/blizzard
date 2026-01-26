@@ -26,7 +26,7 @@ use blizzard::storage::StorageProvider;
 /// checkpoint data.
 #[tokio::test]
 async fn test_atomic_checkpoint_prevents_data_loss() {
-    use arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -167,7 +167,7 @@ async fn test_schema_versioning_present() {
 /// to find the most recent checkpoint.
 #[tokio::test]
 async fn test_recovery_scans_commits() {
-    use arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
@@ -255,7 +255,7 @@ async fn test_recovery_scans_commits() {
 /// When there are no files to commit, no commit should be made.
 #[tokio::test]
 async fn test_empty_files_with_checkpoint() {
-    use arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();

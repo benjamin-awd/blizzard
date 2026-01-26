@@ -1,8 +1,8 @@
 //! Integration tests for blizzard
 
-use arrow::array::{Int64Array, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use deltalake::arrow::array::{Int64Array, StringArray};
+use deltalake::arrow::datatypes::{DataType, Field, Schema};
+use deltalake::arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
 mod config_tests {
@@ -313,12 +313,12 @@ mod sink_tests {
 }
 
 mod delta_atomic_checkpoint_tests {
-    use arrow::datatypes::{DataType, Field, Schema};
     use blizzard::checkpoint::CheckpointState;
     use blizzard::sink::FinishedFile;
     use blizzard::sink::delta::DeltaSink;
     use blizzard::source::SourceState;
     use blizzard::storage::StorageProvider;
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;

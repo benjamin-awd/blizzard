@@ -4,7 +4,7 @@
 //! and converts user-defined schemas to Arrow schemas.
 
 mod vars;
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use deltalake::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use std::collections::HashMap;
