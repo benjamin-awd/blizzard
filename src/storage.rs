@@ -510,67 +510,8 @@ impl StorageProvider {
         Ok(bytes)
     }
 
-    /// Get file contents if present, returning None if not found.
-    pub async fn get_if_present(
-        &self,
-        path: impl Into<Path>,
-    ) -> Result<Option<Bytes>, StorageError> {
-        let path: Path = path.into();
-        let start = Instant::now();
-        let result = self.object_store.get(&self.qualify_path(&path)).await;
-
-        let status = match &result {
-            Ok(_) => RequestStatus::Success,
-            Err(object_store::Error::NotFound { .. }) => RequestStatus::Success, // Not found is expected
-            Err(_) => RequestStatus::Error,
-        };
-        emit!(StorageRequest {
-            operation: StorageOperation::Get,
-            status,
-        });
-        emit!(StorageRequestDuration {
-            operation: StorageOperation::Get,
-            duration: start.elapsed(),
-        });
-
-        match result {
-            Ok(obj) => {
-                let bytes = obj.bytes().await.context(ObjectStoreSnafu)?;
-                Ok(Some(bytes))
-            }
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(err) => Err(err).context(ObjectStoreSnafu),
-        }
-    }
-
-    /// Check if a file exists.
-    pub async fn exists<P: Into<Path>>(&self, path: P) -> Result<bool, StorageError> {
-        let path: Path = path.into();
-        let start = Instant::now();
-        let result = self.object_store.head(&self.qualify_path(&path)).await;
-
-        let status = match &result {
-            Ok(_) => RequestStatus::Success,
-            Err(object_store::Error::NotFound { .. }) => RequestStatus::Success, // Not found is expected
-            Err(_) => RequestStatus::Error,
-        };
-        emit!(StorageRequest {
-            operation: StorageOperation::Head,
-            status,
-        });
-        emit!(StorageRequestDuration {
-            operation: StorageOperation::Head,
-            duration: start.elapsed(),
-        });
-
-        match result {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e).context(ObjectStoreSnafu),
-        }
-    }
-
     /// Put bytes to a path.
+    #[cfg(test)]
     pub async fn put(&self, path: impl Into<Path>, bytes: Vec<u8>) -> Result<(), StorageError> {
         let bytes = PutPayload::from(Bytes::from(bytes));
         let path = path.into();

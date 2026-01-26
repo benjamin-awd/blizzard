@@ -312,10 +312,12 @@ mod sink_tests {
     }
 }
 
-mod delta_recovery_tests {
+mod delta_atomic_checkpoint_tests {
     use arrow::datatypes::{DataType, Field, Schema};
-    use blizzard::checkpoint::PendingFile;
+    use blizzard::checkpoint::CheckpointState;
+    use blizzard::sink::FinishedFile;
     use blizzard::sink::delta::DeltaSink;
+    use blizzard::source::SourceState;
     use blizzard::storage::StorageProvider;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -329,83 +331,102 @@ mod delta_recovery_tests {
     }
 
     #[tokio::test]
-    async fn test_recover_pending_files_commits_to_delta() {
+    async fn test_commit_files_with_checkpoint() {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
 
-        // Create storage provider for local path
         let storage = Arc::new(
             StorageProvider::for_url_with_options(table_path, HashMap::new())
                 .await
                 .unwrap(),
         );
 
-        // Create Delta sink (creates the table)
         let schema = test_schema();
         let mut delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
 
-        // Initial version should be 0 (newly created table)
-        let initial_version = delta_sink.version();
+        // Create checkpoint state
+        let mut source_state = SourceState::new();
+        source_state.update_records("file1.ndjson.gz", 100);
 
-        // Simulate pending files from checkpoint recovery
-        let pending_files = vec![
-            PendingFile {
-                filename: "part-00000.parquet".to_string(),
-                record_count: 100,
-            },
-            PendingFile {
-                filename: "part-00001.parquet".to_string(),
-                record_count: 200,
-            },
-        ];
+        let checkpoint = CheckpointState {
+            schema_version: 1,
+            source_state,
+            delta_version: 0,
+        };
 
-        // Recover pending files
-        let result = delta_sink.recover_pending_files(&pending_files).await;
-        assert!(result.is_ok(), "Recovery should succeed");
+        // Create test files
+        let files = vec![FinishedFile {
+            filename: "part-00000.parquet".to_string(),
+            size: 1024,
+            record_count: 100,
+            bytes: None,
+        }];
 
-        let new_version = result.unwrap();
-        assert!(new_version.is_some(), "Should return new version");
-        assert!(
-            new_version.unwrap() > initial_version,
-            "Version should increase after commit"
+        // Commit with checkpoint
+        let result = delta_sink
+            .commit_files_with_checkpoint(&files, &checkpoint)
+            .await;
+        assert!(result.is_ok(), "Commit should succeed");
+        assert!(result.unwrap().is_some(), "Should return new version");
+        assert!(delta_sink.version() > 0);
+        assert_eq!(delta_sink.checkpoint_version(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_recover_checkpoint_from_log() {
+        let temp_dir = TempDir::new().unwrap();
+        let table_path = temp_dir.path().to_str().unwrap();
+
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(table_path, HashMap::new())
+                .await
+                .unwrap(),
         );
 
-        // Verify delta_sink's internal version was updated
-        assert_eq!(delta_sink.version(), new_version.unwrap());
+        let schema = test_schema();
+        let mut delta_sink = DeltaSink::new(storage.clone(), &schema).await.unwrap();
 
-        // Independently verify files were committed by opening the table directly
-        let table_url = url::Url::parse(&format!("file://{}", table_path)).unwrap();
-        let table = deltalake::open_table(table_url).await.unwrap();
+        // Create and commit checkpoint
+        let mut source_state = SourceState::new();
+        source_state.update_records("file1.ndjson.gz", 500);
+        source_state.mark_finished("file2.ndjson.gz");
 
-        let committed_files: Vec<String> = table
-            .get_file_uris()
-            .unwrap()
-            .map(|p| p.to_string())
-            .collect();
+        let checkpoint = CheckpointState {
+            schema_version: 1,
+            source_state: source_state.clone(),
+            delta_version: 0,
+        };
 
-        assert_eq!(
-            committed_files.len(),
-            2,
-            "Should have exactly 2 committed files"
-        );
+        let files = vec![FinishedFile {
+            filename: "part-00000.parquet".to_string(),
+            size: 1024,
+            record_count: 500,
+            bytes: None,
+        }];
+
+        delta_sink
+            .commit_files_with_checkpoint(&files, &checkpoint)
+            .await
+            .unwrap();
+
+        // Now create a new delta sink (simulating restart) and recover
+        let mut new_delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
+        let recovered = new_delta_sink.recover_checkpoint_from_log().await.unwrap();
+
+        assert!(recovered.is_some(), "Should recover checkpoint");
+        let (recovered_state, recovered_version) = recovered.unwrap();
+
+        assert_eq!(recovered_version, 1);
+        assert_eq!(recovered_state.schema_version, 1);
         assert!(
-            committed_files
-                .iter()
-                .any(|f| f.ends_with("part-00000.parquet")),
-            "part-00000.parquet should be in committed files, got: {:?}",
-            committed_files
-        );
-        assert!(
-            committed_files
-                .iter()
-                .any(|f| f.ends_with("part-00001.parquet")),
-            "part-00001.parquet should be in committed files, got: {:?}",
-            committed_files
+            recovered_state
+                .source_state
+                .is_file_finished("file2.ndjson.gz")
         );
     }
 
     #[tokio::test]
-    async fn test_recover_empty_pending_files_returns_none() {
+    async fn test_no_checkpoint_in_empty_table() {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path().to_str().unwrap();
 
@@ -414,20 +435,11 @@ mod delta_recovery_tests {
                 .await
                 .unwrap(),
         );
+
         let schema = test_schema();
         let mut delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
 
-        let initial_version = delta_sink.version();
-
-        // Recover with empty list
-        let result = delta_sink.recover_pending_files(&[]).await;
-        assert!(result.is_ok());
-        assert!(
-            result.unwrap().is_none(),
-            "Empty recovery should return None"
-        );
-
-        // Version should not change
-        assert_eq!(delta_sink.version(), initial_version);
+        let recovered = delta_sink.recover_checkpoint_from_log().await.unwrap();
+        assert!(recovered.is_none(), "Empty table should have no checkpoint");
     }
 }

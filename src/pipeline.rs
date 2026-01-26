@@ -10,6 +10,12 @@
 //! - **Tokio's blocking thread pool**: Decompress and parse files in parallel (CPU bound)
 //!
 //! This enables full CPU utilization during gzip decompression.
+//!
+//! # Atomic Checkpointing
+//!
+//! Checkpoints are stored atomically in Delta Lake using `Txn` actions.
+//! Each Delta commit includes the checkpoint state, ensuring file commits
+//! and checkpoint state are always consistent.
 
 mod tasks;
 
@@ -26,12 +32,11 @@ use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{CompressionFormat, Config, MB};
 use crate::emit;
 use crate::error::{
-    CheckpointSnafu, DeltaSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, ReaderSnafu,
-    TaskJoinSnafu,
+    DeltaSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, ReaderSnafu, TaskJoinSnafu,
 };
 use crate::internal_events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FileProcessed, FileStatus,
-    PendingBatches, RecordsProcessed, RecoveredFiles,
+    PendingBatches, RecordsProcessed,
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
@@ -82,7 +87,7 @@ pub struct Pipeline {
     config: Config,
     source_storage: StorageProviderRef,
     sink_storage: StorageProviderRef,
-    checkpoint_coordinator: CheckpointCoordinator,
+    checkpoint_coordinator: Arc<CheckpointCoordinator>,
     stats: PipelineStats,
     shutdown: CancellationToken,
 }
@@ -109,17 +114,7 @@ impl Pipeline {
             .context(PipelineStorageSnafu)?,
         );
 
-        let checkpoint_storage = Arc::new(
-            StorageProvider::for_url_with_options(
-                &config.checkpoint.path,
-                config.checkpoint.storage_options.clone(),
-            )
-            .await
-            .context(PipelineStorageSnafu)?,
-        );
-
-        let checkpoint_coordinator =
-            CheckpointCoordinator::new(checkpoint_storage, config.checkpoint.interval_seconds);
+        let checkpoint_coordinator = Arc::new(CheckpointCoordinator::new());
 
         Ok(Self {
             config,
@@ -193,6 +188,7 @@ impl Pipeline {
         // Spawn background uploader task with concurrent file uploads
         let sink_storage = self.sink_storage.clone();
         let upload_shutdown = self.shutdown.clone();
+        let checkpoint_coordinator = self.checkpoint_coordinator.clone();
         let uploader_config = UploaderConfig {
             part_size: self.config.sink.part_size_mb * MB,
             min_multipart_size: self.config.sink.min_multipart_size_mb * MB,
@@ -204,6 +200,7 @@ impl Pipeline {
             upload_rx,
             delta_sink,
             sink_storage,
+            checkpoint_coordinator,
             upload_shutdown,
             uploader_config,
         ));
@@ -259,10 +256,7 @@ impl Pipeline {
 
             if self.shutdown.is_cancelled() {
                 info!("Shutdown requested, stopping processing");
-                self.checkpoint_coordinator
-                    .checkpoint()
-                    .await
-                    .context(CheckpointSnafu)?;
+                // Note: checkpoint state will be committed with final files
                 break;
             }
 
@@ -302,10 +296,7 @@ impl Pipeline {
                             } else {
                                 error!("Error downloading file: {}", e);
                                 emit!(FileProcessed { status: FileStatus::Failed });
-                                self.checkpoint_coordinator
-                                    .checkpoint()
-                                    .await
-                                    .context(CheckpointSnafu)?;
+                                // Note: checkpoint state is committed with uploads
                                 return Err(e).context(PipelineStorageSnafu);
                             }
                         }
@@ -377,10 +368,7 @@ impl Pipeline {
                                 } else {
                                     error!("Error processing file: {}", e);
                                     emit!(FileProcessed { status: FileStatus::Failed });
-                                    self.checkpoint_coordinator
-                                        .checkpoint()
-                                        .await
-                                        .context(CheckpointSnafu)?;
+                                    // Note: checkpoint state is committed with uploads
                                     return Err(e);
                                 }
                             }
@@ -389,14 +377,8 @@ impl Pipeline {
                 }
             }
 
-            // Check if we should checkpoint
-            if self.checkpoint_coordinator.should_checkpoint().await {
-                self.checkpoint_coordinator
-                    .checkpoint()
-                    .await
-                    .context(CheckpointSnafu)?;
-                self.stats.checkpoints_saved += 1;
-            }
+            // Note: checkpoints are committed atomically with file uploads
+            // The uploader task handles checkpoint timing internally
         }
 
         // Drop the receiver to unblock the download task (it will see channel closed)
@@ -430,41 +412,28 @@ impl Pipeline {
         );
         self.stats.delta_commits = files_uploaded;
 
-        // Save final checkpoint
-        self.checkpoint_coordinator
-            .checkpoint()
-            .await
-            .context(CheckpointSnafu)?;
-        self.stats.checkpoints_saved += 1;
+        // Note: final checkpoint is committed atomically with the last file batch
+        // in the uploader task
 
         info!("Pipeline completed: {:?}", self.stats);
         info!("Final Delta table version: {}", delta_sink.version());
+        info!(
+            "Final checkpoint version: {}",
+            delta_sink.checkpoint_version()
+        );
 
         Ok(self.stats.clone())
     }
 
     /// Prepare the pipeline for processing.
     ///
-    /// Performs all initialization: checkpoint restoration, Delta sink creation,
-    /// file listing, and writer setup. Returns `None` if there are no files to process.
+    /// Performs all initialization: checkpoint restoration from Delta log,
+    /// Delta sink creation, file listing, and writer setup.
+    /// Returns `None` if there are no files to process.
     ///
     /// This method is designed to be cancellation-safe - it can be dropped at any
     /// `.await` point without leaving the system in an inconsistent state.
     async fn prepare_pipeline(&mut self) -> Result<Option<InitializedState>, PipelineError> {
-        // Restore from checkpoint
-        let checkpoint = self
-            .checkpoint_coordinator
-            .restore()
-            .await
-            .context(CheckpointSnafu)?;
-        if let Some(ref cp) = checkpoint {
-            info!(
-                "Restored from checkpoint, delta version: {}, pending files: {}",
-                cp.delta_version,
-                cp.pending_files.len()
-            );
-        }
-
         // Create the Arrow schema from config
         let schema = self.config.to_arrow_schema();
 
@@ -473,26 +442,25 @@ impl Pipeline {
             .await
             .context(DeltaSnafu)?;
 
-        // Handle pending files from checkpoint
-        if let Some(ref cp) = checkpoint {
-            if !cp.pending_files.is_empty() {
-                let pending_count = cp.pending_files.len();
-                info!("Committing {} pending files from checkpoint", pending_count);
-                if let Some(version) = delta_sink
-                    .recover_pending_files(&cp.pending_files)
-                    .await
-                    .context(DeltaSnafu)?
-                {
-                    self.checkpoint_coordinator
-                        .update_delta_version(version)
-                        .await;
-                    self.stats.delta_commits += 1;
-                    emit!(RecoveredFiles {
-                        count: pending_count as u64
-                    });
-                }
-                self.checkpoint_coordinator.clear_pending_files().await;
-            }
+        // Recover checkpoint from Delta transaction log
+        if let Some((checkpoint, checkpoint_version)) = delta_sink
+            .recover_checkpoint_from_log()
+            .await
+            .context(DeltaSnafu)?
+        {
+            info!(
+                "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
+                checkpoint_version,
+                checkpoint.delta_version,
+                checkpoint.source_state.files.len()
+            );
+
+            // Restore checkpoint coordinator state
+            self.checkpoint_coordinator
+                .restore_from_state(checkpoint)
+                .await;
+        } else {
+            info!("No checkpoint found in Delta log, starting fresh");
         }
 
         // List source files
