@@ -78,7 +78,7 @@ When metrics are enabled, blizzard exposes:
 
 ## Documentation
 
-For detailed configuration options, architecture, and API reference, visit the [documentation site](https://blizzard.dev).
+For detailed configuration options, architecture, and API reference, visit the [documentation site](https://benjamin-awd.github.io/blizzard/).
 
 ## Development
 
