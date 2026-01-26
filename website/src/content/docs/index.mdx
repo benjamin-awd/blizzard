@@ -1,0 +1,30 @@
+---
+title: Blizzard
+description: A high-performance data pipeline for writing to Delta Lake.
+template: splash
+hero:
+  tagline: High-performance data pipeline for writing to Delta Lake.
+  actions:
+    - text: Get Started
+      link: /architecture/pipeline/
+      icon: right-arrow
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Features
+
+<CardGrid>
+	<Card title="Delta Lake Native" icon="document">
+		Write directly to Delta Lake tables with ACID transactions and exactly-once semantics.
+	</Card>
+	<Card title="Crash Recovery" icon="setting">
+		Atomic checkpointing ensures no data loss or duplication, even after failures.
+	</Card>
+	<Card title="High Throughput" icon="rocket">
+		Built in Rust for maximum performance. Process terabytes of data efficiently.
+	</Card>
+	<Card title="Source Flexibility" icon="add-document">
+		Ingest from S3, GCS, Azure Blob, or local files in various formats.
+	</Card>
+</CardGrid>
