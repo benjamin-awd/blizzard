@@ -800,6 +800,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "chrono",
  "clap",
  "criterion",
  "deltalake",

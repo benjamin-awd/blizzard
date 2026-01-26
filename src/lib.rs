@@ -20,6 +20,7 @@
 
 pub mod checkpoint;
 pub mod config;
+pub mod dlq;
 pub mod error;
 pub mod internal_events;
 pub mod metrics;

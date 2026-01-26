@@ -21,10 +21,6 @@ sink:
   file_size_mb: 64
   compression: zstd
 
-checkpoint:
-  path: "s3://bucket/checkpoints/"
-  interval_seconds: 60
-
 schema:
   fields:
     - name: id
@@ -42,7 +38,6 @@ schema:
         assert_eq!(config.source.path, "s3://bucket/input/*.ndjson.gz");
         assert_eq!(config.source.batch_size, 4096);
         assert_eq!(config.sink.file_size_mb, 64);
-        assert_eq!(config.checkpoint.interval_seconds, 60);
         assert_eq!(config.schema.fields.len(), 4);
 
         // Test schema conversion
@@ -61,9 +56,6 @@ source:
 sink:
   path: "/output/table"
 
-checkpoint:
-  path: "/checkpoints/"
-
 schema:
   fields:
     - name: data
@@ -74,7 +66,6 @@ schema:
         // Check defaults
         assert_eq!(config.source.batch_size, 8192);
         assert_eq!(config.sink.file_size_mb, 128);
-        assert_eq!(config.checkpoint.interval_seconds, 30);
     }
 
     #[test]
@@ -97,8 +88,6 @@ source:
   path: "/input"
 sink:
   path: "/output"
-checkpoint:
-  path: "/checkpoint"
 schema:
   fields:
     - name: test_field
@@ -309,6 +298,212 @@ mod sink_tests {
         assert_eq!(file.filename, "data-001.parquet");
         assert_eq!(file.size, 1024 * 1024);
         assert_eq!(file.record_count, 10000);
+    }
+}
+
+mod dlq_tests {
+    use blizzard::config::ErrorHandlingConfig;
+    use blizzard::dlq::{DeadLetterQueue, FailedFile};
+    use blizzard::internal_events::FailureStage;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_dlq_end_to_end() {
+        let temp_dir = TempDir::new().unwrap();
+        let dlq_path = temp_dir.path().to_str().unwrap().to_string();
+
+        let config = ErrorHandlingConfig {
+            max_failures: 0,
+            dlq_path: Some(dlq_path.clone()),
+            dlq_storage_options: HashMap::new(),
+        };
+
+        // Create DLQ
+        let dlq = DeadLetterQueue::from_config(&config)
+            .await
+            .expect("Failed to create DLQ")
+            .expect("DLQ should be Some when path is configured");
+        let dlq = Arc::new(dlq);
+
+        // Simulate various failure scenarios
+        dlq.record_failure(
+            "s3://bucket/data/file1.ndjson.gz",
+            "Connection timeout after 30s",
+            FailureStage::Download,
+        )
+        .await;
+
+        dlq.record_failure(
+            "s3://bucket/data/file2.ndjson.gz",
+            "invalid gzip header",
+            FailureStage::Decompress,
+        )
+        .await;
+
+        dlq.record_failure(
+            "s3://bucket/data/file3.ndjson.gz",
+            "JSON parse error at line 42: unexpected token",
+            FailureStage::Parse,
+        )
+        .await;
+
+        dlq.record_failure(
+            "s3://bucket/data/file4.ndjson.gz",
+            "S3 PutObject failed: Access Denied",
+            FailureStage::Upload,
+        )
+        .await;
+
+        // Finalize and verify stats
+        let stats = dlq.finalize().await.expect("Failed to finalize DLQ");
+        assert_eq!(stats.download, 1);
+        assert_eq!(stats.decompress, 1);
+        assert_eq!(stats.parse, 1);
+        assert_eq!(stats.upload, 1);
+        assert_eq!(stats.total(), 4);
+
+        // Verify file was written
+        let entries: Vec<_> = std::fs::read_dir(&dlq_path)
+            .expect("Failed to read DLQ directory")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "ndjson")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert_eq!(entries.len(), 1, "Should have exactly one NDJSON file");
+
+        // Read and parse the NDJSON file
+        let content = std::fs::read_to_string(entries[0].path()).expect("Failed to read DLQ file");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4, "Should have 4 failure records");
+
+        // Parse each line and verify structure
+        let mut stages_seen = Vec::new();
+        for line in lines {
+            let record: FailedFile =
+                serde_json::from_str(line).expect("Each line should be valid JSON");
+            assert!(!record.path.is_empty());
+            assert!(!record.error.is_empty());
+            assert_eq!(record.retry_count, 0);
+            stages_seen.push(record.stage);
+        }
+
+        // Verify all stages are represented
+        assert!(
+            stages_seen
+                .iter()
+                .any(|s| matches!(s, FailureStage::Download))
+        );
+        assert!(
+            stages_seen
+                .iter()
+                .any(|s| matches!(s, FailureStage::Decompress))
+        );
+        assert!(stages_seen.iter().any(|s| matches!(s, FailureStage::Parse)));
+        assert!(
+            stages_seen
+                .iter()
+                .any(|s| matches!(s, FailureStage::Upload))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dlq_not_created_without_path() {
+        let config = ErrorHandlingConfig {
+            max_failures: 10,
+            dlq_path: None,
+            dlq_storage_options: HashMap::new(),
+        };
+
+        let dlq = DeadLetterQueue::from_config(&config)
+            .await
+            .expect("Should not error");
+        assert!(dlq.is_none(), "DLQ should be None when no path configured");
+    }
+
+    #[tokio::test]
+    async fn test_dlq_handles_special_characters_in_errors() {
+        let temp_dir = TempDir::new().unwrap();
+        let dlq_path = temp_dir.path().to_str().unwrap().to_string();
+
+        let config = ErrorHandlingConfig {
+            max_failures: 0,
+            dlq_path: Some(dlq_path.clone()),
+            dlq_storage_options: HashMap::new(),
+        };
+
+        let dlq = DeadLetterQueue::from_config(&config)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Test with special characters that might break JSON
+        dlq.record_failure(
+            "file with \"quotes\" and \\ backslashes.ndjson.gz",
+            "Error with\nnewlines\tand\ttabs",
+            FailureStage::Parse,
+        )
+        .await;
+
+        dlq.finalize().await.unwrap();
+
+        // Read and verify it's valid JSON
+        let entries: Vec<_> = std::fs::read_dir(&dlq_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "ndjson")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let record: FailedFile = serde_json::from_str(content.trim()).unwrap();
+
+        assert!(record.path.contains("quotes"));
+        assert!(record.error.contains("newlines"));
+    }
+
+    #[tokio::test]
+    async fn test_error_handling_config_defaults() {
+        let config = ErrorHandlingConfig::default();
+        assert_eq!(config.max_failures, 0);
+        assert!(config.dlq_path.is_none());
+        assert!(config.dlq_storage_options.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_error_handling_config_yaml_parsing() {
+        let yaml = r#"
+source:
+  path: "/input/*.ndjson.gz"
+
+sink:
+  path: "/output/table"
+
+schema:
+  fields:
+    - name: id
+      type: string
+
+error_handling:
+  max_failures: 100
+  dlq_path: "/var/log/blizzard/dlq"
+"#;
+        let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.error_handling.max_failures, 100);
+        assert_eq!(
+            config.error_handling.dlq_path,
+            Some("/var/log/blizzard/dlq".to_string())
+        );
     }
 }
 

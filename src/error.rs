@@ -36,6 +36,18 @@ pub enum StorageError {
     AzureConfig { source: object_store::Error },
 }
 
+impl StorageError {
+    /// Check if this error represents a "not found" condition (404, NoSuchKey, etc.)
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            StorageError::ObjectStore { source } => {
+                matches!(source, object_store::Error::NotFound { .. })
+            }
+            _ => false,
+        }
+    }
+}
+
 // ============ Config Errors ============
 
 /// Errors that can occur during configuration parsing and validation.
@@ -49,10 +61,6 @@ pub enum ConfigError {
     /// Sink path is empty.
     #[snafu(display("Sink path cannot be empty"))]
     EmptySinkPath,
-
-    /// Checkpoint path is empty.
-    #[snafu(display("Checkpoint path cannot be empty"))]
-    EmptyCheckpointPath,
 
     /// Schema has no fields.
     #[snafu(display("Schema must have at least one field"))]
@@ -163,6 +171,27 @@ pub enum ParquetError {
     },
 }
 
+// ============ DLQ Errors ============
+
+/// Errors that can occur during Dead Letter Queue operations.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+// Prefix is intentional to avoid snafu selector conflicts (e.g., WriteSnafu)
+#[allow(clippy::enum_variant_names)]
+pub enum DlqError {
+    /// Failed to write to DLQ.
+    #[snafu(display("Failed to write to DLQ"))]
+    DlqWrite { source: StorageError },
+
+    /// Failed to serialize failed file record.
+    #[snafu(display("Failed to serialize DLQ record"))]
+    DlqSerialize { source: serde_json::Error },
+
+    /// Failed to create DLQ storage provider.
+    #[snafu(display("Failed to create DLQ storage"))]
+    DlqStorage { source: StorageError },
+}
+
 // ============ Pipeline Error (top-level) ============
 
 /// Top-level pipeline errors that aggregate all error types.
@@ -204,4 +233,22 @@ pub enum PipelineError {
     /// Metrics error.
     #[snafu(display("Metrics error"))]
     Metrics { source: MetricsError },
+
+    /// DLQ error.
+    #[snafu(display("DLQ error"))]
+    Dlq { source: DlqError },
+
+    /// Max failures exceeded.
+    #[snafu(display("Max failures exceeded: {count} failures"))]
+    MaxFailuresExceeded { count: usize },
+}
+
+impl PipelineError {
+    /// Check if this error represents a "not found" condition (404, NoSuchKey, etc.)
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            PipelineError::PipelineStorage { source } => source.is_not_found(),
+            _ => false,
+        }
+    }
 }

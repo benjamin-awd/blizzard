@@ -8,6 +8,7 @@ A high-performance Rust tool for streaming NDJSON.gz files to Delta Lake with ch
 - **Exactly-once processing**: Checkpoint-based recovery ensures no duplicates or data loss
 - **High throughput**: Concurrent file downloads, parallel decompression, and multipart uploads
 - **Delta Lake integration**: Transactional writes with ACID guarantees
+- **Resilient error handling**: Skip failed files and continue processing, with Dead Letter Queue support
 - **Prometheus metrics**: Built-in metrics endpoint with health checks
 
 ## Requirements
@@ -40,10 +41,6 @@ sink:
   path: "s3://my-bucket/output/my-table"
   file_size_mb: 128
   compression: snappy
-
-checkpoint:
-  path: "s3://my-bucket/checkpoints/my-table"
-  interval_seconds: 30
 
 schema:
   fields:
@@ -93,14 +90,6 @@ blizzard --config config.yaml
 | `min_multipart_size_mb` | int | `5` | Minimum size before using multipart |
 | `storage_options` | map | `{}` | Cloud-specific credentials/settings |
 
-### Checkpoint
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `path` | string | required | Checkpoint storage path |
-| `interval_seconds` | int | `30` | Checkpoint frequency |
-| `storage_options` | map | `{}` | Cloud-specific credentials/settings |
-
 ### Schema
 
 Define the structure of your NDJSON data. Supported types:
@@ -117,6 +106,34 @@ Define the structure of your NDJSON data. Supported types:
 | `date` | Date32 | Date without time |
 | `json` | Utf8 | Raw JSON stored as string |
 | `binary` | Binary | Base64-encoded binary |
+
+### Error Handling
+
+Configure resilient error handling and Dead Letter Queue (DLQ) for failed files:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_failures` | int | `0` | Maximum failures before stopping (0 = unlimited) |
+| `dlq_path` | string | none | Path to write failed file records (enables DLQ) |
+| `dlq_storage_options` | map | `{}` | Cloud-specific credentials for DLQ storage |
+
+`max_failures` acts as a circuit breaker for systemic issues (schema mismatch, expired credentials, corrupted source). Without it, the pipeline could "succeed" while silently skipping all files. The default (`0`) disables this check.
+
+Example:
+
+```yaml
+error_handling:
+  max_failures: 100        # Stop after 100 failures
+  dlq_path: "s3://my-bucket/dlq/pipeline-name/"
+```
+
+**DLQ Output Format**: Failed files are written as NDJSON to `{dlq_path}/failures-{timestamp}.ndjson`:
+
+```json
+{"path":"s3://bucket/file.ndjson.gz","error":"invalid JSON at line 42","stage":"parse","timestamp":"2025-01-26T10:30:00Z","retry_count":0}
+```
+
+Failure stages: `download`, `decompress`, `parse`, `upload`
 
 ### Metrics
 
@@ -160,6 +177,15 @@ When metrics are enabled, blizzard exposes:
 
 - **`GET /metrics`** - Prometheus metrics endpoint
 - **`GET /health`** - Health check endpoint (returns 200 OK)
+
+Key metrics include:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `blizzard_files_processed_total` | counter | `status` | Files processed (success/skipped/failed) |
+| `blizzard_files_failed_total` | counter | `stage` | Failed files by stage (download/decompress/parse/upload) |
+| `blizzard_records_processed_total` | counter | - | Total records processed |
+| `blizzard_bytes_written_total` | counter | - | Total bytes written to Parquet |
 
 ## Storage Backends
 

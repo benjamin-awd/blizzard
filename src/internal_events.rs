@@ -68,6 +68,39 @@ impl FileStatus {
     }
 }
 
+/// Stage at which a file failure occurred.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FailureStage {
+    Download,
+    Decompress,
+    Parse,
+    Upload,
+}
+
+impl FailureStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FailureStage::Download => "download",
+            FailureStage::Decompress => "decompress",
+            FailureStage::Parse => "parse",
+            FailureStage::Upload => "upload",
+        }
+    }
+}
+
+/// Event emitted when a file fails processing.
+pub struct FileFailed {
+    pub stage: FailureStage,
+}
+
+impl InternalEvent for FileFailed {
+    fn emit(self) {
+        trace!(stage = self.stage.as_str(), "File failed");
+        counter!("blizzard_files_failed_total", "stage" => self.stage.as_str()).increment(1);
+    }
+}
+
 /// Event emitted when an input file is processed.
 pub struct FileProcessed {
     pub status: FileStatus,
