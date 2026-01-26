@@ -163,11 +163,6 @@ impl DeltaSink {
                         let state: CheckpointState =
                             serde_json::from_slice(&json_bytes).context(CheckpointJsonSnafu)?;
 
-                        info!(
-                            "Recovered checkpoint from Delta log: checkpoint_version={}, delta_version={}, at commit version {}",
-                            txn.version, state.delta_version, version
-                        );
-
                         // Update internal state
                         self.checkpoint_version = txn.version;
                         self.last_version = current_version;
