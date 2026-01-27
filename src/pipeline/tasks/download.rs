@@ -129,12 +129,8 @@ impl Downloader {
                     true
                 }
                 Err(e) => {
-                    let error_str = e.to_string();
                     // Skip 404 errors, propagate others
-                    if error_str.contains("not found")
-                        || error_str.contains("404")
-                        || error_str.contains("NoSuchKey")
-                    {
+                    if e.is_not_found() {
                         warn!("[download] Skipping missing file: {}", e);
                         false // Don't send error, just skip
                     } else {
