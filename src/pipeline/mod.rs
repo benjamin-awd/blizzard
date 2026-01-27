@@ -82,6 +82,69 @@ enum IterationResult {
     Shutdown,
 }
 
+/// Tracks failures and handles DLQ recording with max_failures enforcement.
+struct FailureTracker {
+    count: usize,
+    max_failures: usize,
+    dlq: Option<Arc<DeadLetterQueue>>,
+}
+
+impl FailureTracker {
+    fn new(max_failures: usize, dlq: Option<Arc<DeadLetterQueue>>) -> Self {
+        Self {
+            count: 0,
+            max_failures,
+            dlq,
+        }
+    }
+
+    /// Record a failure, emit metrics, and check max_failures limit.
+    ///
+    /// Returns `Err` if max_failures has been reached (after finalizing DLQ).
+    async fn record_failure(
+        &mut self,
+        error: &str,
+        stage: FailureStage,
+    ) -> Result<(), PipelineError> {
+        self.count += 1;
+        emit!(FileProcessed {
+            status: FileStatus::Failed
+        });
+        emit!(FileFailed { stage });
+
+        if let Some(dlq) = &self.dlq {
+            dlq.record_failure("unknown", error, stage).await;
+        }
+
+        if self.max_failures > 0 && self.count >= self.max_failures {
+            error!("Max failures ({}) reached, stopping pipeline", self.count);
+            self.finalize_dlq().await;
+            return MaxFailuresExceededSnafu { count: self.count }.fail();
+        }
+
+        Ok(())
+    }
+
+    /// Finalize DLQ, logging any errors.
+    async fn finalize_dlq(&self) {
+        if let Some(dlq) = &self.dlq {
+            if let Err(e) = dlq.finalize().await {
+                error!("Failed to finalize DLQ: {}", e);
+            }
+        }
+    }
+
+    /// Returns true if any failures were recorded.
+    fn has_failures(&self) -> bool {
+        self.count > 0
+    }
+
+    /// Returns the failure count.
+    fn count(&self) -> usize {
+        self.count
+    }
+}
+
 /// Initialized pipeline state ready for processing.
 struct InitializedState {
     pending_files: Vec<String>,
@@ -233,9 +296,11 @@ impl Pipeline {
             dlq,
         } = state;
 
-        // Track failure count for max_failures limit
-        let mut failure_count = 0usize;
-        let max_failures = self.config.error_handling.max_failures;
+        // Track failures with DLQ support
+        let mut failures = FailureTracker::new(
+            self.config.error_handling.max_failures,
+            dlq.clone(),
+        );
 
         // Create the NDJSON reader for decompression and parsing
         let reader_config = NdjsonReaderConfig::new(batch_size, compression);
@@ -355,35 +420,15 @@ impl Pipeline {
                             });
                         }
                         Some(Err(e)) => {
+                            files_remaining -= 1;
                             if e.is_not_found() {
                                 warn!("Skipping file with download error (not found): {}", e);
-                                files_remaining -= 1;
                                 emit!(FileProcessed { status: FileStatus::Skipped });
                             } else {
-                                // Record failure and continue processing
-                                let error_str = e.to_string();
                                 warn!("Skipping failed file (download error): {}", e);
-                                files_remaining -= 1;
-                                failure_count += 1;
-                                emit!(FileProcessed { status: FileStatus::Failed });
-                                emit!(FileFailed { stage: FailureStage::Download });
-
-                                // Record to DLQ if configured
-                                if let Some(dlq) = &dlq {
-                                    dlq.record_failure("unknown", &error_str, FailureStage::Download).await;
-                                }
-
-                                // Check max_failures limit
-                                if max_failures > 0 && failure_count >= max_failures {
-                                    error!("Max failures ({}) reached, stopping pipeline", failure_count);
-                                    // Finalize DLQ before returning
-                                    if let Some(dlq) = &dlq
-                                        && let Err(dlq_err) = dlq.finalize().await
-                                    {
-                                        error!("Failed to finalize DLQ: {}", dlq_err);
-                                    }
-                                    return MaxFailuresExceededSnafu { count: failure_count }.fail();
-                                }
+                                failures
+                                    .record_failure(&e.to_string(), FailureStage::Download)
+                                    .await?;
                             }
                         }
                         None => {
@@ -443,9 +488,9 @@ impl Pipeline {
                                 }
                             }
                             Err(e) => {
+                                files_remaining -= 1;
                                 if e.is_not_found() {
                                     warn!("Skipping file with processing error (not found): {}", e);
-                                    files_remaining -= 1;
                                     emit!(FileProcessed { status: FileStatus::Skipped });
                                 } else {
                                     // Determine failure stage based on error type.
@@ -460,30 +505,8 @@ impl Pipeline {
                                         _ => FailureStage::Parse,
                                     };
 
-                                    // Record failure and continue processing
-                                    let error_str = e.to_string();
                                     warn!("Skipping failed file (processing error): {}", e);
-                                    files_remaining -= 1;
-                                    failure_count += 1;
-                                    emit!(FileProcessed { status: FileStatus::Failed });
-                                    emit!(FileFailed { stage });
-
-                                    // Record to DLQ if configured
-                                    if let Some(dlq) = &dlq {
-                                        dlq.record_failure("unknown", &error_str, stage).await;
-                                    }
-
-                                    // Check max_failures limit
-                                    if max_failures > 0 && failure_count >= max_failures {
-                                        error!("Max failures ({}) reached, stopping pipeline", failure_count);
-                                        // Finalize DLQ before returning
-                                        if let Some(dlq) = &dlq
-                                            && let Err(dlq_err) = dlq.finalize().await
-                                        {
-                                            error!("Failed to finalize DLQ: {}", dlq_err);
-                                        }
-                                        return MaxFailuresExceededSnafu { count: failure_count }.fail();
-                                    }
+                                    failures.record_failure(&e.to_string(), stage).await?;
                                 }
                             }
                         }
@@ -530,16 +553,12 @@ impl Pipeline {
         // in the uploader task
 
         // Finalize DLQ if configured
-        if let Some(dlq) = &dlq
-            && let Err(dlq_err) = dlq.finalize().await
-        {
-            error!("Failed to finalize DLQ: {}", dlq_err);
-        }
+        failures.finalize_dlq().await;
 
-        if failure_count > 0 {
+        if failures.has_failures() {
             warn!(
                 "Iteration completed with {} failures (recorded to DLQ if configured)",
-                failure_count
+                failures.count()
             );
         }
 
