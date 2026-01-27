@@ -1,12 +1,11 @@
-//! Dead Letter Queue for failed file tracking.
+//! Dead Letter Queue implementation.
 //!
 //! Records failed files to a configurable location for later inspection
 //! and reprocessing. Writes failures as NDJSON for easy parsing.
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use object_store::PutPayload;
-use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -17,46 +16,7 @@ use crate::error::{DlqError, DlqSerializeSnafu, DlqStorageSnafu, DlqWriteSnafu};
 use crate::metrics::events::FailureStage;
 use crate::storage::StorageProvider;
 
-/// A record representing a failed file in the DLQ.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FailedFile {
-    /// Path to the file that failed.
-    pub path: String,
-    /// Error message describing the failure.
-    pub error: String,
-    /// Stage at which the failure occurred.
-    pub stage: FailureStage,
-    /// Timestamp when the failure was recorded.
-    pub timestamp: DateTime<Utc>,
-    /// Number of retry attempts (for future use).
-    pub retry_count: usize,
-}
-
-/// Statistics about failures by stage.
-#[derive(Debug, Clone, Default)]
-pub struct FailureStats {
-    pub download: usize,
-    pub decompress: usize,
-    pub parse: usize,
-    pub upload: usize,
-}
-
-impl FailureStats {
-    /// Increment the count for a specific stage.
-    pub fn increment(&mut self, stage: FailureStage) {
-        match stage {
-            FailureStage::Download => self.download += 1,
-            FailureStage::Decompress => self.decompress += 1,
-            FailureStage::Parse => self.parse += 1,
-            FailureStage::Upload => self.upload += 1,
-        }
-    }
-
-    /// Get total failure count.
-    pub fn total(&self) -> usize {
-        self.download + self.decompress + self.parse + self.upload
-    }
-}
+use super::types::{FailedFile, FailureStats};
 
 /// Dead Letter Queue for recording failed files.
 ///
@@ -169,15 +129,10 @@ impl DeadLetterQueue {
         Ok(())
     }
 
-    /// Get current failure statistics.
-    pub async fn get_stats(&self) -> FailureStats {
-        self.stats.lock().await.clone()
-    }
-
     /// Finalize the DLQ, flushing any remaining records.
-    pub async fn finalize(&self) -> Result<FailureStats, DlqError> {
+    pub async fn finalize(&self) -> Result<(), DlqError> {
         self.flush().await?;
-        let stats = self.get_stats().await;
+        let stats = self.stats.lock().await;
         info!(
             "DLQ finalized: {} total failures (download={}, decompress={}, parse={}, upload={})",
             stats.total(),
@@ -186,7 +141,7 @@ impl DeadLetterQueue {
             stats.parse,
             stats.upload
         );
-        Ok(stats)
+        Ok(())
     }
 }
 
@@ -195,44 +150,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_failure_stats_increment() {
-        let mut stats = FailureStats::default();
-        stats.increment(FailureStage::Download);
-        stats.increment(FailureStage::Download);
-        stats.increment(FailureStage::Parse);
-
-        assert_eq!(stats.download, 2);
-        assert_eq!(stats.parse, 1);
-        assert_eq!(stats.total(), 3);
-    }
-
-    #[test]
-    fn test_failed_file_serialization() {
-        let failed = FailedFile {
-            path: "s3://bucket/file.ndjson.gz".to_string(),
-            error: "invalid JSON at line 42".to_string(),
-            stage: FailureStage::Parse,
-            timestamp: Utc::now(),
-            retry_count: 0,
-        };
-
-        let json = serde_json::to_string(&failed).unwrap();
-        assert!(json.contains("parse"));
-        assert!(json.contains("s3://bucket/file.ndjson.gz"));
-    }
-
-    #[test]
-    fn test_failed_file_deserialization() {
-        let json = r#"{"path":"s3://bucket/file.ndjson.gz","error":"invalid JSON","stage":"decompress","timestamp":"2025-01-26T10:30:00Z","retry_count":1}"#;
-        let failed: FailedFile = serde_json::from_str(json).unwrap();
-
-        assert_eq!(failed.path, "s3://bucket/file.ndjson.gz");
-        assert_eq!(failed.error, "invalid JSON");
-        assert!(matches!(failed.stage, FailureStage::Decompress));
-        assert_eq!(failed.retry_count, 1);
-    }
 
     #[tokio::test]
     async fn test_dlq_from_config_none_when_no_path() {
@@ -247,13 +164,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dlq_records_and_tracks_failures() {
+    async fn test_dlq_records_failures() {
         let temp_dir = TempDir::new().unwrap();
         let dlq_path = temp_dir.path().to_str().unwrap().to_string();
 
         let config = ErrorHandlingConfig {
             max_failures: 0,
-            dlq_path: Some(dlq_path),
+            dlq_path: Some(dlq_path.clone()),
             dlq_storage_options: HashMap::new(),
         };
 
@@ -274,13 +191,16 @@ mod tests {
         dlq.record_failure("file3.ndjson.gz", "malformed JSON", FailureStage::Parse)
             .await;
 
-        // Check stats
-        let stats = dlq.get_stats().await;
-        assert_eq!(stats.download, 1);
-        assert_eq!(stats.decompress, 1);
-        assert_eq!(stats.parse, 1);
-        assert_eq!(stats.upload, 0);
-        assert_eq!(stats.total(), 3);
+        // Finalize and verify output
+        dlq.finalize().await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(&dlq_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
     }
 
     #[tokio::test]
@@ -304,8 +224,7 @@ mod tests {
             .await;
 
         // Finalize to flush
-        let stats = dlq.finalize().await.unwrap();
-        assert_eq!(stats.total(), 1);
+        dlq.finalize().await.unwrap();
 
         // Verify file was written
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
@@ -357,9 +276,13 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
 
-        // Each line should parse as a valid FailedFile
+        // Each line should parse as valid JSON with expected fields
         for line in lines {
-            let _: FailedFile = serde_json::from_str(line).unwrap();
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(record.get("path").is_some());
+            assert!(record.get("error").is_some());
+            assert!(record.get("stage").is_some());
+            assert!(record.get("timestamp").is_some());
         }
     }
 }
