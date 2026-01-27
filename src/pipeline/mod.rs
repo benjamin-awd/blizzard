@@ -17,6 +17,7 @@
 //! Each Delta commit includes the checkpoint state, ensuring file commits
 //! and checkpoint state are always consistent.
 
+mod signal;
 mod tasks;
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -41,7 +42,7 @@ use crate::metrics::events::{
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
-use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig, RollingPolicy};
+use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
 
@@ -569,7 +570,7 @@ impl Pipeline {
             return Ok(None);
         }
 
-        let rolling_policies = self.build_rolling_policies();
+        let rolling_policies = self.config.sink.rolling_policies();
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(self.config.sink.file_size_mb)
             .with_row_group_size_bytes(self.config.sink.row_group_size_bytes)
@@ -596,29 +597,6 @@ impl Pipeline {
         }))
     }
 
-    /// Build rolling policies from configuration.
-    fn build_rolling_policies(&self) -> Vec<RollingPolicy> {
-        let mut policies = Vec::new();
-
-        // Always include size-based rolling
-        let size_bytes = self.config.sink.file_size_mb * MB;
-        policies.push(RollingPolicy::SizeLimit(size_bytes));
-
-        // Add inactivity timeout if configured
-        if let Some(secs) = self.config.sink.inactivity_timeout_secs {
-            policies.push(RollingPolicy::InactivityDuration(Duration::from_secs(secs)));
-            debug!("Added inactivity rolling policy: {} seconds", secs);
-        }
-
-        // Add rollover timeout if configured
-        if let Some(secs) = self.config.sink.rollover_timeout_secs {
-            policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
-            debug!("Added rollover rolling policy: {} seconds", secs);
-        }
-
-        policies
-    }
-
     /// List source NDJSON files.
     async fn list_source_files(&self) -> Result<Vec<String>, PipelineError> {
         list_ndjson_files(&self.source_storage)
@@ -635,35 +613,13 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
     tokio::spawn({
         let shutdown = shutdown.clone();
         async move {
-            shutdown_signal().await;
+            signal::shutdown_signal().await;
             shutdown.cancel();
         }
     });
 
     let mut pipeline = Pipeline::new(config, shutdown).await?;
     pipeline.run().await
-}
-
-/// Wait for a shutdown signal (SIGINT, SIGTERM, or SIGQUIT on Unix).
-#[cfg(unix)]
-async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to set up SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to set up SIGTERM handler");
-    let mut sigquit = signal(SignalKind::quit()).expect("Failed to set up SIGQUIT handler");
-
-    tokio::select! {
-        _ = sigint.recv() => {
-            info!(message = "Signal received.", signal = "SIGINT");
-        }
-        _ = sigterm.recv() => {
-            info!(message = "Signal received.", signal = "SIGTERM");
-        }
-        _ = sigquit.recv() => {
-            info!(message = "Signal received.", signal = "SIGQUIT");
-        }
-    }
 }
 
 #[cfg(test)]

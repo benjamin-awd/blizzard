@@ -30,7 +30,7 @@ struct CheckpointStateInner {
 
 /// A coordinator that manages checkpoint state for atomic commits.
 ///
-/// With Txn-based checkpointing, the coordinator captures state 
+/// With Txn-based checkpointing, the coordinator captures state
 /// that is then included in Delta commits via `DeltaSink::commit_files_with_checkpoint()`.
 pub struct CheckpointCoordinator {
     state: Arc<Mutex<CheckpointStateInner>>,

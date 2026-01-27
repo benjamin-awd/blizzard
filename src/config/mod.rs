@@ -10,6 +10,9 @@ use snafu::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+use crate::sink::parquet::RollingPolicy;
 
 use crate::error::{
     ConfigError, EmptySchemaSnafu, EmptySinkPathSnafu, EmptySourcePathSnafu, EnvInterpolationSnafu,
@@ -189,6 +192,29 @@ fn default_max_concurrent_uploads() -> usize {
 
 fn default_max_concurrent_parts() -> usize {
     8
+}
+
+impl SinkConfig {
+    /// Build rolling policies from this sink configuration.
+    pub fn rolling_policies(&self) -> Vec<RollingPolicy> {
+        let mut policies = Vec::new();
+
+        // Always include size-based rolling
+        let size_bytes = self.file_size_mb * MB;
+        policies.push(RollingPolicy::SizeLimit(size_bytes));
+
+        // Add inactivity timeout if configured
+        if let Some(secs) = self.inactivity_timeout_secs {
+            policies.push(RollingPolicy::InactivityDuration(Duration::from_secs(secs)));
+        }
+
+        // Add rollover timeout if configured
+        if let Some(secs) = self.rollover_timeout_secs {
+            policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
+        }
+
+        policies
+    }
 }
 
 /// Schema configuration defining the structure of input data.
