@@ -349,7 +349,7 @@ impl Pipeline {
                         });
                         match result {
                             Ok(processed) => {
-                                let short_name = processed.path.split('/').next_back().unwrap_or(&processed.path);
+                                let short_name = processed.short_name();
 
                                 // Track pending batches before writing
                                 emit!(PendingBatches {

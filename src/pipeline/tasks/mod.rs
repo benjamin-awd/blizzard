@@ -25,6 +25,13 @@ pub(super) struct ProcessedFile {
     pub total_records: usize,
 }
 
+impl ProcessedFile {
+    /// Returns the filename portion of the path (after the last '/').
+    pub fn short_name(&self) -> &str {
+        self.path.split('/').next_back().unwrap_or(&self.path)
+    }
+}
+
 /// Future type for file processing operations.
 pub(super) type ProcessFuture =
     Pin<Box<dyn Future<Output = Result<ProcessedFile, PipelineError>> + Send>>;
