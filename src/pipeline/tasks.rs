@@ -4,7 +4,9 @@
 //! concurrently while the main loop processes files.
 
 use bytes::Bytes;
+use deltalake::arrow::array::RecordBatch;
 use futures::stream::{FuturesUnordered, StreamExt};
+use snafu::ResultExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::checkpoint::CheckpointCoordinator;
 use crate::dlq::DeadLetterQueue;
 use crate::emit;
-use crate::error::StorageError;
+use crate::error::{PipelineError, ReaderSnafu, StorageError, TaskJoinSnafu};
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
     ActiveDownloads, ActiveUploads, FailureStage, FileDownloadCompleted, FileFailed,
@@ -24,7 +26,7 @@ use crate::metrics::events::{
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
-use crate::source::SourceState;
+use crate::source::{NdjsonReader, SourceState};
 use crate::storage::{StorageProvider, StorageProviderRef};
 
 /// Future type for upload operations.
@@ -38,6 +40,40 @@ pub(super) struct DownloadedFile {
     pub path: String,
     pub compressed_data: Bytes,
     pub skip_records: usize,
+}
+
+/// Result of processing a downloaded file.
+pub(super) struct ProcessedFile {
+    pub path: String,
+    pub batches: Vec<RecordBatch>,
+    pub total_records: usize,
+}
+
+/// Future type for file processing operations.
+pub(super) type ProcessFuture =
+    Pin<Box<dyn Future<Output = Result<ProcessedFile, PipelineError>> + Send>>;
+
+/// Spawn a blocking task to decompress and parse a downloaded file.
+pub(super) fn spawn_read_task(
+    downloaded: DownloadedFile,
+    reader: Arc<NdjsonReader>,
+) -> ProcessFuture {
+    let path = downloaded.path.clone();
+    let path_for_result = path.clone();
+    Box::pin(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            reader.read(downloaded.compressed_data, downloaded.skip_records, &path)
+        })
+        .await
+        .context(TaskJoinSnafu)?
+        .context(ReaderSnafu)?;
+
+        Ok(ProcessedFile {
+            path: path_for_result,
+            batches: result.batches,
+            total_records: result.total_records,
+        })
+    })
 }
 
 /// Result of uploading a file.
