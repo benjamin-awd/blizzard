@@ -481,7 +481,6 @@ impl StorageProvider {
 
         // Upload parts in parallel using explicit part numbers
         let multipart_id = Arc::new(multipart_id);
-        let multipart_store = multipart_store.clone();
         let qualified_path = Arc::new(qualified_path);
         let active_parts = Arc::new(AtomicUsize::new(0));
 

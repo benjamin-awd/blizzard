@@ -95,9 +95,9 @@ mod tests {
             "file3.ndjson.gz".to_string(),
         ];
 
-        let pending = state.pending_files(&all_files);
+        let pending = state.filter_pending_files(all_files);
         assert_eq!(pending.len(), 2);
-        assert!(pending.contains(&"file2.ndjson.gz"));
-        assert!(pending.contains(&"file3.ndjson.gz"));
+        assert!(pending.contains(&"file2.ndjson.gz".to_string()));
+        assert!(pending.contains(&"file3.ndjson.gz".to_string()));
     }
 }
