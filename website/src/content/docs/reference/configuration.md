@@ -12,7 +12,7 @@ source:
   path: "s3://my-bucket/input/*.ndjson.gz"
   compression: gzip
   batch_size: 8192
-  max_concurrent_files: 16
+  max_concurrent_files: 4
   storage_options:
     AWS_REGION: "us-east-1"
 
@@ -65,7 +65,7 @@ Syntax:
 | `path` | string | **required** | Path to source files (supports cloud URLs) |
 | `compression` | string | `gzip` | Compression format: `gzip`, `zstd`, `none` |
 | `batch_size` | integer | `8192` | Records per Arrow batch |
-| `max_concurrent_files` | integer | `16` | Concurrent file downloads |
+| `max_concurrent_files` | integer | `4` | Concurrent file downloads |
 | `storage_options` | map | `{}` | Cloud provider credentials and options |
 
 ### Source Storage Options
@@ -217,7 +217,7 @@ source:
   path: "s3://data-lake/raw/events/2024"
   compression: gzip
   batch_size: 8192
-  max_concurrent_files: 16
+  max_concurrent_files: 4
   storage_options:
     AWS_REGION: "us-east-1"
 
