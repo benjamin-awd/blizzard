@@ -90,21 +90,12 @@ impl CheckpointCoordinator {
     /// Mark that a checkpoint was just committed.
     ///
     /// Called after a successful `DeltaSink::commit_files_with_checkpoint()`
-    /// to reset the checkpoint timer and prune finished file entries from memory.
+    /// to reset the checkpoint timer.
     pub async fn mark_checkpoint_committed(&self) {
-        // Prune finished entries to bound memory usage
-        {
-            let mut state = self.state.lock().await;
-            state.source_state.prune_finished();
-            emit!(SourceStateFiles {
-                count: state.source_state.files.len()
-            });
-        }
-
         let mut last = self.last_checkpoint.lock().await;
         *last = Instant::now();
         emit!(CheckpointAge { seconds: 0.0 });
-        debug!("Checkpoint committed, timer reset, finished entries pruned");
+        debug!("Checkpoint committed, timer reset");
     }
 
     /// Capture the current state for checkpointing.
