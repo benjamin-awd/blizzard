@@ -24,31 +24,25 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::checkpoint::CheckpointCoordinator;
-use crate::config::{CompressionFormat, Config, MB};
+use crate::config::{CompressionFormat, Config};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::emit;
-use crate::error::{
-    DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, TaskJoinSnafu,
-};
+use crate::error::{DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu};
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileProcessed,
     FileStatus, PendingBatches, RecordsProcessed,
 };
-use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
 use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
 
-use tasks::{
-    DownloadedFile, ProcessFuture, UploaderConfig, run_downloader, run_uploader, spawn_read_task,
-};
+use tasks::{Downloader, ProcessFuture, Uploader, spawn_read_task};
 
 /// Statistics about the pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -279,52 +273,24 @@ impl Pipeline {
         let reader_config = NdjsonReaderConfig::new(batch_size, compression);
         let reader = Arc::new(NdjsonReader::new(schema.clone(), reader_config));
 
-        // Channel for downloaded files ready for CPU processing
-        // Buffer size matches max_concurrent to allow downloads to stay ahead
-        let (download_tx, mut download_rx) =
-            mpsc::channel::<Result<DownloadedFile, crate::error::StorageError>>(max_concurrent);
-
-        // Channel for finished parquet files ready for upload
-        // Larger buffer to allow more queuing and avoid blocking the writer
-        let max_concurrent_uploads = self.config.sink.max_concurrent_uploads;
-        let buffer_size = max_concurrent_uploads * 4;
-        let (upload_tx, upload_rx) = mpsc::channel::<FinishedFile>(buffer_size);
-
-        // Spawn background uploader task with concurrent file uploads
-        let sink_storage = self.sink_storage.clone();
-        let upload_shutdown = self.shutdown.clone();
-        let checkpoint_coordinator = self.checkpoint_coordinator.clone();
-        let uploader_config = UploaderConfig {
-            part_size: self.config.sink.part_size_mb * MB,
-            min_multipart_size: self.config.sink.min_multipart_size_mb * MB,
-            max_concurrent_uploads,
-            max_concurrent_parts: self.config.sink.max_concurrent_parts,
-        };
-
-        let upload_handle = tokio::spawn(run_uploader(
-            upload_rx,
+        // Spawn background uploader task
+        let uploader = Uploader::spawn(
             delta_sink,
-            sink_storage,
-            checkpoint_coordinator,
-            upload_shutdown,
-            uploader_config,
+            self.sink_storage.clone(),
+            self.checkpoint_coordinator.clone(),
+            self.shutdown.clone(),
+            &self.config.sink,
             dlq.clone(),
-        ));
+        );
 
-        // Spawn download tasks concurrently using FuturesUnordered
-        let storage = self.source_storage.clone();
-        let source_state_clone = source_state.clone();
-        let pending_files_clone = pending_files.clone();
-        let shutdown = self.shutdown.clone();
-
-        let download_handle = tokio::spawn(run_downloader(
-            pending_files_clone,
-            source_state_clone,
-            storage,
-            download_tx,
-            shutdown,
+        // Spawn background downloader task
+        let mut downloader = Downloader::spawn(
+            pending_files.clone(),
+            source_state.clone(),
+            self.source_storage.clone(),
+            self.shutdown.clone(),
             max_concurrent,
-        ));
+        );
 
         // Consumer: Process downloaded files with parallel decompression
         let mut state = ProcessingState::new(pending_files.len());
@@ -346,7 +312,7 @@ impl Pipeline {
 
             tokio::select! {
                 // Only poll for new downloads if we have processing capacity
-                result = download_rx.recv(), if has_capacity => {
+                result = downloader.rx.recv(), if has_capacity => {
                     match result {
                         Some(Ok(downloaded)) => {
                             state.start_processing();
@@ -417,7 +383,7 @@ impl Pipeline {
                                     self.stats.parquet_files_written += 1;
                                     self.stats.bytes_written += file.size;
                                     emit!(BytesWritten { bytes: file.size as u64 });
-                                    if upload_tx.send(file).await.is_err() {
+                                    if uploader.tx.send(file).await.is_err() {
                                         error!("Upload channel closed unexpectedly");
                                         break;
                                     }
@@ -454,11 +420,8 @@ impl Pipeline {
             // The uploader task handles checkpoint timing internally
         }
 
-        // Drop the receiver to unblock the download task (it will see channel closed)
-        drop(download_rx);
-
-        // Cancel the download task - don't wait for it since it may be blocked
-        download_handle.abort();
+        // Abort downloader - we don't need to wait for it
+        downloader.abort();
 
         // Send remaining parquet files to uploader
         info!("Final flush - closing writer");
@@ -469,16 +432,14 @@ impl Pipeline {
             emit!(BytesWritten {
                 bytes: file.size as u64
             });
-            if upload_tx.send(file).await.is_err() {
+            if uploader.tx.send(file).await.is_err() {
                 error!("Upload channel closed unexpectedly during final flush");
             }
         }
 
-        // Close upload channel and wait for uploader to finish
-        drop(upload_tx);
+        // Wait for uploader to finish
         info!("Waiting for uploads to complete...");
-        let (delta_sink, files_uploaded, bytes_uploaded) =
-            upload_handle.await.context(TaskJoinSnafu)?;
+        let (delta_sink, files_uploaded, bytes_uploaded) = uploader.finish().await?;
         info!(
             "All uploads complete: {} files, {} bytes",
             files_uploaded, bytes_uploaded
