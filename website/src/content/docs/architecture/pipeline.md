@@ -8,27 +8,43 @@ Blizzard's pipeline connects sources, sinks, and checkpoints into a streaming da
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Blizzard Pipeline                                 │
-├─────────────────────────────────────────────────────────────────────────────┤
+                      ┌──────────────────┐
+                      │   Source Files   │
+                      │  (S3/GCS/Azure)  │
+                      │    NDJSON.gz     │
+                      └────────┬─────────┘
+                               │
+┌──────────────────────────────┼──────────────────────────────────────────────┐
+│  Blizzard Pipeline           ▼                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐   │    │
+│  │  │  Downloader  │        │  Processor   │        │   Uploader   │   │    │
+│  │  │  (I/O bound) │───────▶│  (CPU bound) │───────▶│  (I/O bound) │   │    │
+│  │  │ async tokio  │ channel│   blocking   │ channel│ async tokio  │   │    │
+│  │  └──────────────┘        └──────────────┘        └──────────────┘   │    │
+│  │         │                       │                       │           │    │
+│  │         │ download              │ decompress            │ upload    │    │
+│  │         │ files                 │ parse NDJSON          │ parquet   │    │
+│  │         │                       │ write parquet         │ files     │    │
+│  │         │                       │                       │           │    │
+│  └─────────┼───────────────────────┼───────────────────────┼───────────┘    │
+│            │                       │                       │                │
+│            │                       │                       ▼                │
+│            │                       │              ┌──────────────────┐      │
+│            │                       │              │   Delta Lake     │      │
+│            │                       └─────────────▶│     Table        │      │
+│            │                         parquet      │                  │      │
+│            │                         schema       └────────┬─────────┘      │
+│            │                                               │                │
+│            │                       ┌───────────────────────┘                │
+│            │                       │  atomic commit                         │
+│            │                       ▼                                        │
+│            │              ┌──────────────────┐                              │
+│            └─────────────▶│    Checkpoint    │◀── tracks file + record      │
+│              file state   │   Coordinator    │    positions for recovery    │
+│                           └──────────────────┘                              │
 │                                                                             │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                 │
-│  │   Downloader │     │  Processor   │     │   Uploader   │                 │
-│  │  (I/O bound) │────▶│ (CPU bound)  │────▶│  (I/O bound) │                 │
-│  └──────────────┘     └──────────────┘     └──────────────┘                 │
-│         │                    │                    │                         │
-│         ▼                    ▼                    ▼                         │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                 │
-│  │ Source Files │     │   Parquet    │     │  Delta Lake  │                 │
-│  │ (S3/GCS/etc) │     │   Writer     │     │    Table     │                 │
-│  └──────────────┘     └──────────────┘     └──────────────┘                 │
-│                                                   │                         │
-│                              ┌────────────────────┘                         │
-│                              ▼                                              │
-│                       ┌──────────────┐                                      │
-│                       │  Checkpoint  │                                      │
-│                       │  Coordinator │                                      │
-│                       └──────────────┘                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,10 +71,10 @@ The downloader task manages concurrent file downloads:
 Source Files: [file1, file2, file3, file4, ...]
                     │
                     ▼
-        ┌───────────────────────┐
+        ┌────────────────────────┐
         │   Concurrent Download  │
         │   (max_concurrent=16)  │
-        └───────────────────────┘
+        └────────────────────────┘
                     │
                     ▼
           mpsc channel (buffered)
