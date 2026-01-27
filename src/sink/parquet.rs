@@ -18,7 +18,10 @@ use uuid::Uuid;
 use super::FinishedFile;
 use crate::config::{MB, ParquetCompression};
 use crate::emit;
-use crate::error::{ParquetError, WriteSnafu};
+use crate::error::{
+    BufferInUseSnafu, BufferLockSnafu, ParquetError, WriteSnafu, WriterCreateSnafu,
+    WriterUnavailableSnafu,
+};
 use crate::metrics::events::ParquetWriteCompleted;
 
 /// Statistics for tracking writer state.
@@ -85,22 +88,23 @@ impl SharedBuffer {
         }
     }
 
-    fn into_inner(self) -> BytesMut {
-        Arc::into_inner(self.buffer)
-            .unwrap()
-            .into_inner()
-            .unwrap()
-            .into_inner()
+    fn into_inner(self) -> Result<BytesMut, ParquetError> {
+        let mutex = Arc::into_inner(self.buffer).context(BufferInUseSnafu)?;
+        let writer = mutex.into_inner().map_err(|_| BufferLockSnafu.build())?;
+        Ok(writer.into_inner())
     }
 
-    fn len(&self) -> usize {
-        self.buffer.lock().unwrap().get_ref().len()
+    fn len(&self) -> Result<usize, ParquetError> {
+        let guard = self.buffer.lock().map_err(|_| BufferLockSnafu.build())?;
+        Ok(guard.get_ref().len())
     }
 }
 
 impl Write for SharedBuffer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut buffer = self.buffer.try_lock().unwrap();
+        let mut buffer = self.buffer.try_lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "buffer lock contention")
+        })?;
         Write::write(&mut *buffer, buf)
     }
 
@@ -179,7 +183,7 @@ pub struct ParquetWriter {
 
 impl ParquetWriter {
     /// Create a new Parquet writer.
-    pub fn new(schema: SchemaRef, config: ParquetWriterConfig) -> Self {
+    pub fn new(schema: SchemaRef, config: ParquetWriterConfig) -> Result<Self, ParquetError> {
         tracing::info!(
             "Creating ParquetWriter with config: target_file_size={} bytes ({:.2} MB), row_group_size_bytes={} ({:.2} MB), rolling_policies={:?}",
             config.target_file_size,
@@ -189,10 +193,10 @@ impl ParquetWriter {
             config.rolling_policies
         );
         let buffer = SharedBuffer::new(64 * MB);
-        let writer = Self::create_writer(&schema, &config, buffer.clone());
+        let writer = Self::create_writer(&schema, &config, buffer.clone())?;
         let current_file_name = Self::generate_filename();
 
-        Self {
+        Ok(Self {
             schema,
             config,
             writer: Some(writer),
@@ -201,18 +205,18 @@ impl ParquetWriter {
             stats: WriterStats::new(),
             row_group_records: 0,
             finished_files: Vec::new(),
-        }
+        })
     }
 
     fn create_writer(
         schema: &SchemaRef,
         config: &ParquetWriterConfig,
         buffer: SharedBuffer,
-    ) -> ArrowWriter<SharedBuffer> {
+    ) -> Result<ArrowWriter<SharedBuffer>, ParquetError> {
         let writer_properties = Self::writer_properties(config);
 
         ArrowWriter::try_new(buffer, schema.clone(), Some(writer_properties))
-            .expect("Failed to create Parquet writer")
+            .context(WriterCreateSnafu)
     }
 
     fn writer_properties(config: &ParquetWriterConfig) -> WriterProperties {
@@ -242,7 +246,7 @@ impl ParquetWriter {
 
     /// Write a batch to the current file.
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), ParquetError> {
-        let writer = self.writer.as_mut().expect("Writer should be available");
+        let writer = self.writer.as_mut().context(WriterUnavailableSnafu)?;
 
         writer.write(batch).context(WriteSnafu)?;
         self.stats.records_written += batch.num_rows();
@@ -252,6 +256,7 @@ impl ParquetWriter {
         // Flush row group based on byte size
         let in_progress_size = writer.in_progress_size();
         if in_progress_size > self.config.row_group_size_bytes {
+            let buffer_len = self.buffer.len()?;
             tracing::info!(
                 "Flushing row group: in_progress_size={} bytes ({:.2} MB), threshold={} bytes ({:.2} MB), total_records={}, row_group_records={}",
                 in_progress_size,
@@ -264,11 +269,11 @@ impl ParquetWriter {
             writer.flush().context(WriteSnafu)?;
             self.row_group_records = 0;
             // Update bytes_written after flush
-            self.stats.bytes_written = self.buffer.len();
+            self.stats.bytes_written = self.buffer.len()?;
             tracing::info!(
                 "After flush: buffer={} bytes ({:.2} MB), bytes_written={}",
-                self.buffer.len(),
-                self.buffer.len() as f64 / 1024.0 / 1024.0,
+                buffer_len,
+                buffer_len as f64 / 1024.0 / 1024.0,
                 self.stats.bytes_written
             );
         }
@@ -299,7 +304,7 @@ impl ParquetWriter {
     /// Roll the current file and start a new one.
     fn roll_file(&mut self) -> Result<(), ParquetError> {
         let start = Instant::now();
-        let writer = self.writer.take().expect("Writer should be available");
+        let writer = self.writer.take().context(WriterUnavailableSnafu)?;
         writer.close().context(WriteSnafu)?;
 
         // Capture the bytes before replacing the buffer
@@ -307,7 +312,7 @@ impl ParquetWriter {
             &mut self.buffer,
             SharedBuffer::new(64 * 1024 * 1024), // 64MB initial capacity
         )
-        .into_inner()
+        .into_inner()?
         .freeze();
 
         emit!(ParquetWriteCompleted {
@@ -328,7 +333,7 @@ impl ParquetWriter {
             &self.schema,
             &self.config,
             self.buffer.clone(),
-        ));
+        )?);
         self.current_file_name = Self::generate_filename();
         self.stats = WriterStats::new();
         self.row_group_records = 0;
@@ -341,10 +346,10 @@ impl ParquetWriter {
     pub fn close(mut self) -> Result<Vec<FinishedFile>, ParquetError> {
         if self.stats.records_written > 0 {
             let start = Instant::now();
-            let writer = self.writer.take().expect("Writer should be available");
+            let writer = self.writer.take().context(WriterUnavailableSnafu)?;
             writer.close().context(WriteSnafu)?;
 
-            let bytes = self.buffer.into_inner().freeze();
+            let bytes = self.buffer.into_inner()?.freeze();
 
             emit!(ParquetWriteCompleted {
                 duration: start.elapsed()
@@ -369,7 +374,7 @@ impl ParquetWriter {
 
     /// Get the current file size in bytes (including in-progress data).
     pub fn current_file_size(&self) -> usize {
-        let buffer_size = self.buffer.len();
+        let buffer_size = self.buffer.len().unwrap_or(0);
         let in_progress_size = self
             .writer
             .as_ref()
@@ -410,7 +415,7 @@ mod tests {
     fn test_parquet_writer_basic() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config);
+        let mut writer = ParquetWriter::new(schema, config).unwrap();
 
         let batch = test_batch(100);
         writer.write_batch(&batch).unwrap();

@@ -568,11 +568,11 @@ pub async fn list_ndjson_files(storage: &StorageProvider) -> Result<Vec<String>,
 
     while let Some(result) = stream.next().await {
         let path = result.context(ObjectStoreSnafu)?;
-        let path_str = path.to_string();
         total_listed += 1;
 
-        if path_str.ends_with(".ndjson.gz") {
-            files.push(path_str);
+        // Check extension without allocating for non-matching files
+        if path.as_ref().ends_with(".ndjson.gz") {
+            files.push(path.to_string());
         }
     }
 

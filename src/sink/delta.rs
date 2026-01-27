@@ -25,8 +25,8 @@ use super::FinishedFile;
 use crate::checkpoint::CheckpointState;
 use crate::emit;
 use crate::error::{
-    Base64DecodeSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu, SchemaConversionSnafu,
-    StructTypeSnafu, UrlParseSnafu,
+    Base64DecodeSnafu, CheckpointCorruptedSnafu, CheckpointJsonSnafu, DeltaError, DeltaLakeSnafu,
+    PathParseSnafu, SchemaConversionSnafu, StructTypeSnafu, UrlParseSnafu,
 };
 use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted};
 use crate::storage::{BackendConfig, StorageProvider, StorageProviderRef};
@@ -157,7 +157,10 @@ impl DeltaSink {
                 if let Action::Txn(txn) = action
                     && txn.app_id.starts_with(TXN_APP_ID_PREFIX)
                 {
-                    let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
+                    let encoded = txn
+                        .app_id
+                        .strip_prefix(TXN_APP_ID_PREFIX)
+                        .context(CheckpointCorruptedSnafu)?;
                     let json_bytes = base64::engine::general_purpose::STANDARD
                         .decode(encoded)
                         .context(Base64DecodeSnafu)?;
@@ -215,7 +218,12 @@ pub async fn load_or_create_table(
     storage_provider: &StorageProvider,
     schema: &Schema,
 ) -> Result<DeltaTable, DeltaError> {
-    let empty_path = &Path::parse("").unwrap();
+    let empty_path = &Path::parse("").map_err(|_| {
+        PathParseSnafu {
+            path: "".to_string(),
+        }
+        .build()
+    })?;
 
     let table_url: String = match storage_provider.config() {
         BackendConfig::S3(s3) => {
@@ -293,8 +301,8 @@ fn create_add_action(file: &FinishedFile) -> Action {
         partition_values: HashMap::new(),
         modification_time: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64,
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
         data_change: true,
         ..Default::default()
     })
@@ -326,8 +334,8 @@ fn create_txn_action(
         last_updated: Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
         ),
     }))
 }

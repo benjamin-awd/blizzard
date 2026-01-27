@@ -518,15 +518,13 @@ impl Pipeline {
         }
 
         let source_files = self.list_source_files().await?;
-        info!("Found {} source files", source_files.len());
+        let source_file_count = source_files.len();
+        info!("Found {} source files", source_file_count);
 
         let source_state = self.checkpoint_coordinator.get_source_state().await;
 
-        let pending_files: Vec<String> = source_state
-            .pending_files(&source_files)
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
+        // Filter to pending files, consuming source_files to avoid re-allocation
+        let pending_files = source_state.filter_pending_files(source_files);
         info!("{} files remaining to process", pending_files.len());
 
         if pending_files.is_empty() {
@@ -540,7 +538,7 @@ impl Pipeline {
             .with_compression(self.config.sink.compression)
             .with_rolling_policies(rolling_policies);
 
-        let writer = ParquetWriter::new(schema.clone(), writer_config);
+        let writer = ParquetWriter::new(schema.clone(), writer_config).context(ParquetSnafu)?;
 
         let dlq = DeadLetterQueue::from_config(&self.config.error_handling)
             .await

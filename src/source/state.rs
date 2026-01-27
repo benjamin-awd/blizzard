@@ -54,12 +54,13 @@ impl SourceState {
         }
     }
 
-    /// Get all files that need processing (not finished).
-    pub fn pending_files<'a>(&'a self, all_files: &'a [String]) -> Vec<&'a str> {
+    /// Filter and return owned files that need processing.
+    ///
+    /// Takes ownership of the input to avoid re-allocating strings.
+    pub fn filter_pending_files(&self, all_files: Vec<String>) -> Vec<String> {
         all_files
-            .iter()
+            .into_iter()
             .filter(|f| !self.is_file_finished(f))
-            .map(|s| s.as_str())
             .collect()
     }
 }
