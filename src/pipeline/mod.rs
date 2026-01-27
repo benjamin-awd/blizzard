@@ -71,6 +71,58 @@ enum IterationResult {
     Shutdown,
 }
 
+/// Mutable state for the file processing loop.
+struct ProcessingState {
+    /// Number of files still to be processed.
+    files_remaining: usize,
+    /// In-flight decompression/parsing futures.
+    processing: FuturesUnordered<ProcessFuture>,
+    /// Whether the download channel is still open.
+    channel_open: bool,
+    /// Tracks processor utilization for metrics.
+    util_timer: UtilizationTimer,
+    /// Whether a shutdown was requested during processing.
+    shutdown_requested: bool,
+}
+
+impl ProcessingState {
+    fn new(files_count: usize) -> Self {
+        Self {
+            files_remaining: files_count,
+            processing: FuturesUnordered::new(),
+            channel_open: true,
+            util_timer: UtilizationTimer::new("processor"),
+            shutdown_requested: false,
+        }
+    }
+
+    /// Returns true if we should continue the processing loop.
+    fn should_continue(&self) -> bool {
+        // Continue if channel is open or there are still processing tasks
+        self.channel_open || !self.processing.is_empty()
+    }
+
+    /// Returns true if we have capacity to receive more downloads.
+    fn has_capacity(&self, max_concurrent: usize) -> bool {
+        self.processing.len() < max_concurrent && self.channel_open
+    }
+
+    /// Update utilization metrics at the start of each loop iteration.
+    fn update_utilization(&mut self) {
+        if self.processing.is_empty() {
+            self.util_timer.start_wait();
+        }
+        self.util_timer.maybe_update();
+    }
+
+    /// Transition to working state when processing starts.
+    fn start_processing(&mut self) {
+        if self.processing.is_empty() {
+            self.util_timer.stop_wait();
+        }
+    }
+}
+
 /// Tracks failures and handles DLQ recording with max_failures enforcement.
 struct FailureTracker {
     count: usize,
@@ -343,53 +395,36 @@ impl Pipeline {
         ));
 
         // Consumer: Process downloaded files with parallel decompression
-        // Use FuturesUnordered to process multiple files concurrently
-        let mut files_remaining = pending_files.len();
-        let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
-        let mut channel_open = true;
-        let mut util_timer = UtilizationTimer::new("processor");
-        let mut shutdown_requested = false;
+        let mut state = ProcessingState::new(pending_files.len());
 
         loop {
-            // Update utilization state: waiting if no processing tasks
-            if processing.is_empty() {
-                util_timer.start_wait();
-            }
-            util_timer.maybe_update();
+            state.update_utilization();
 
             if self.shutdown.is_cancelled() {
                 info!("Shutdown requested, stopping processing");
-                shutdown_requested = true;
-                // Note: checkpoint state will be committed with final files
+                state.shutdown_requested = true;
                 break;
             }
 
-            // If no processing tasks and channel closed, we're done
-            if processing.is_empty() && !channel_open {
+            if !state.should_continue() {
                 break;
             }
 
-            // Use select! to simultaneously:
-            // 1. Receive new downloads (if we have capacity)
-            // 2. Wait for processing tasks to complete
-            let has_capacity = processing.len() < max_concurrent && channel_open;
+            let has_capacity = state.has_capacity(max_concurrent);
 
             tokio::select! {
                 // Only poll for new downloads if we have processing capacity
                 result = download_rx.recv(), if has_capacity => {
                     match result {
                         Some(Ok(downloaded)) => {
-                            // Transition to working state when we have processing tasks
-                            if processing.is_empty() {
-                                util_timer.stop_wait();
-                            }
-                            processing.push(spawn_read_task(downloaded, reader.clone()));
+                            state.start_processing();
+                            state.processing.push(spawn_read_task(downloaded, reader.clone()));
                             emit!(DecompressionQueueDepth {
-                                count: processing.len()
+                                count: state.processing.len()
                             });
                         }
                         Some(Err(e)) => {
-                            files_remaining -= 1;
+                            state.files_remaining -= 1;
                             if e.is_not_found() {
                                 warn!("Skipping file with download error (not found): {}", e);
                                 emit!(FileProcessed { status: FileStatus::Skipped });
@@ -401,16 +436,16 @@ impl Pipeline {
                             }
                         }
                         None => {
-                            channel_open = false;
+                            state.channel_open = false;
                         }
                     }
                 }
 
                 // Wait for processing tasks to complete
-                result = processing.next(), if !processing.is_empty() => {
+                result = state.processing.next(), if !state.processing.is_empty() => {
                     if let Some(result) = result {
                         emit!(DecompressionQueueDepth {
-                            count: processing.len()
+                            count: state.processing.len()
                         });
                         match result {
                             Ok(processed) => {
@@ -437,11 +472,11 @@ impl Pipeline {
                                     .await;
 
                                 self.stats.files_processed += 1;
-                                files_remaining -= 1;
+                                state.files_remaining -= 1;
                                 emit!(FileProcessed { status: FileStatus::Success });
                                 debug!(
                                     "[-] Finished file (remaining: {}): {} ({} records)",
-                                    files_remaining, short_name, processed.total_records
+                                    state.files_remaining, short_name, processed.total_records
                                 );
 
                                 // Queue finished parquet files for background upload
@@ -457,7 +492,7 @@ impl Pipeline {
                                 }
                             }
                             Err(e) => {
-                                files_remaining -= 1;
+                                state.files_remaining -= 1;
                                 if e.is_not_found() {
                                     warn!("Skipping file with processing error (not found): {}", e);
                                     emit!(FileProcessed { status: FileStatus::Skipped });
@@ -537,7 +572,7 @@ impl Pipeline {
         );
         info!("Checkpoint version: {}", delta_sink.checkpoint_version());
 
-        if shutdown_requested {
+        if state.shutdown_requested {
             Ok(IterationResult::Shutdown)
         } else {
             Ok(IterationResult::ProcessedFiles)
