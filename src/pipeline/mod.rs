@@ -465,7 +465,10 @@ impl Pipeline {
             "Iteration complete, Delta table version: {}",
             result.delta_sink.version()
         );
-        info!("Checkpoint version: {}", result.delta_sink.checkpoint_version());
+        info!(
+            "Checkpoint version: {}",
+            result.delta_sink.checkpoint_version()
+        );
 
         if state.shutdown_requested {
             Ok(IterationResult::Shutdown)
@@ -496,23 +499,10 @@ impl Pipeline {
             .context(DeltaSnafu)?;
 
         if cold_start {
-            if let Some((checkpoint, checkpoint_version)) = delta_sink
-                .recover_checkpoint_from_log()
+            self.checkpoint_coordinator
+                .restore_from_delta_log(&mut delta_sink)
                 .await
-                .context(DeltaSnafu)?
-            {
-                info!(
-                    "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
-                    checkpoint_version,
-                    checkpoint.delta_version,
-                    checkpoint.source_state.files.len()
-                );
-                self.checkpoint_coordinator
-                    .restore_from_state(checkpoint)
-                    .await;
-            } else {
-                info!("No checkpoint found in Delta log, starting fresh");
-            }
+                .context(DeltaSnafu)?;
         } else {
             info!("Preparing next iteration (using in-memory checkpoint state)");
         }
