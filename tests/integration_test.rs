@@ -211,13 +211,13 @@ mod checkpoint_tests {
             "file3.ndjson.gz".to_string(),
         ];
 
-        let pending = state.pending_files(&all_files);
+        let pending = state.filter_pending_files(all_files);
 
         // file1 is finished, so only file2 and file3 should be pending
         assert_eq!(pending.len(), 2);
-        assert!(pending.contains(&"file2.ndjson.gz"));
-        assert!(pending.contains(&"file3.ndjson.gz"));
-        assert!(!pending.contains(&"file1.ndjson.gz"));
+        assert!(pending.contains(&"file2.ndjson.gz".to_string()));
+        assert!(pending.contains(&"file3.ndjson.gz".to_string()));
+        assert!(!pending.contains(&"file1.ndjson.gz".to_string()));
     }
 }
 
@@ -251,7 +251,7 @@ mod parquet_tests {
     fn test_parquet_writer_basic() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config);
+        let mut writer = ParquetWriter::new(schema, config).unwrap();
 
         let batch = create_test_batch(100);
         writer.write_batch(&batch).unwrap();
@@ -263,7 +263,7 @@ mod parquet_tests {
     fn test_parquet_writer_multiple_batches() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config);
+        let mut writer = ParquetWriter::new(schema, config).unwrap();
 
         for _ in 0..5 {
             let batch = create_test_batch(100);
