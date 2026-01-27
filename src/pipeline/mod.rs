@@ -26,7 +26,7 @@ use crate::emit;
 use crate::error::{
     DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, StorageError,
 };
-use crate::metrics::UtilizationTimer;
+use crate::metrics::{MemoryTracker, UtilizationTimer, log_memory_stats};
 use crate::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileProcessed,
     FileStatus, PendingBatches, RecordsProcessed,
@@ -36,7 +36,7 @@ use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
 
-use tasks::{DownloadedFile, Downloader, ProcessFuture, Uploader, spawn_read_task};
+use tasks::{DownloadedFile, Downloader, ProcessFuture, ProcessedFile, Uploader, spawn_read_task};
 
 /// Statistics about the pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -140,6 +140,57 @@ impl ProcessingState {
         }
         Ok(())
     }
+
+    /// Handle a download channel result.
+    async fn handle_download(
+        &mut self,
+        result: Option<Result<DownloadedFile, StorageError>>,
+        reader: &Arc<NdjsonReader>,
+        failures: &mut FailureTracker,
+    ) -> Result<(), PipelineError> {
+        match result {
+            Some(Ok(downloaded)) => {
+                self.queue_for_decompression(downloaded, reader);
+            }
+            Some(Err(e)) => {
+                self.record_download_error(e, failures).await?;
+            }
+            None => {
+                self.channel_open = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle a processing error, classifying the failure stage.
+    async fn handle_processing_error(
+        &mut self,
+        error: PipelineError,
+        failures: &mut FailureTracker,
+    ) -> Result<(), PipelineError> {
+        self.files_remaining -= 1;
+        if error.is_not_found() {
+            warn!("Skipping file with processing error (not found): {}", error);
+            emit!(FileProcessed {
+                status: FileStatus::Skipped
+            });
+        } else {
+            // Determine failure stage based on error type.
+            // Note: With streaming decompression, gzip errors surface
+            // through the JSON reader and are classified as Parse failures.
+            // Only zstd decoder creation errors are caught as Decompress.
+            let stage = match &error {
+                PipelineError::Reader {
+                    source: crate::error::ReaderError::ZstdDecompression { .. },
+                } => FailureStage::Decompress,
+                _ => FailureStage::Parse,
+            };
+
+            warn!("Skipping failed file (processing error): {}", error);
+            failures.record_failure(&error.to_string(), stage).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Initialized pipeline state ready for processing.
@@ -208,11 +259,17 @@ impl Pipeline {
     /// The pipeline continuously polls for new files at the configured interval.
     pub async fn run(&mut self) -> Result<PipelineStats, PipelineError> {
         info!("Starting pipeline");
+        log_memory_stats("pipeline_start");
 
         let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
         let mut first_iteration = true;
+        let mut iteration_count = 0u64;
+        // Log memory every 50 MiB change
+        let mut memory_tracker = MemoryTracker::new(50);
 
         loop {
+            iteration_count += 1;
+            log_memory_stats(&format!("iteration_{}_start", iteration_count));
             // Race initialization against shutdown signal
             let shutdown = self.shutdown.clone();
             let state = tokio::select! {
@@ -237,6 +294,9 @@ impl Pipeline {
                     IterationResult::NoFiles
                 }
             };
+
+            // Log memory after each iteration
+            memory_tracker.maybe_log(&format!("iteration_{}_end", iteration_count));
 
             // Exit on shutdown, otherwise wait and poll again
             match result {
@@ -340,91 +400,20 @@ impl Pipeline {
             tokio::select! {
                 // Only poll for new downloads if we have processing capacity
                 result = downloader.rx.recv(), if has_capacity => {
-                    match result {
-                        Some(Ok(downloaded)) => {
-                            state.queue_for_decompression(downloaded, &reader);
-                        }
-                        Some(Err(e)) => {
-                            state.record_download_error(e, &mut failures).await?;
-                        }
-                        None => {
-                            state.channel_open = false;
-                        }
-                    }
+                    state.handle_download(result, &reader, &mut failures).await?;
                 }
 
                 // Wait for processing tasks to complete
-                result = state.processing.next(), if !state.processing.is_empty() => {
-                    if let Some(result) = result {
-                        emit!(DecompressionQueueDepth {
-                            count: state.processing.len()
-                        });
-                        match result {
-                            Ok(processed) => {
-                                let short_name = processed.short_name();
-
-                                // Track pending batches before writing
-                                emit!(PendingBatches {
-                                    count: processed.batches.len()
-                                });
-
-                                // Write all batches from this file
-                                for batch in &processed.batches {
-                                    debug!("[batch] {}: {} rows", short_name, batch.num_rows());
-                                    writer.write_batch(batch).context(ParquetSnafu)?;
-                                    self.stats.records_processed += batch.num_rows();
-                                    emit!(RecordsProcessed { count: batch.num_rows() as u64 });
-                                    emit!(BatchesProcessed { count: 1 });
-                                }
-                                emit!(PendingBatches { count: 0 });
-
-                                // Update checkpoint state
-                                self.checkpoint_coordinator
-                                    .update_source_state(&processed.path, processed.total_records, true)
-                                    .await;
-
-                                self.stats.files_processed += 1;
-                                state.files_remaining -= 1;
-                                emit!(FileProcessed { status: FileStatus::Success });
-                                debug!(
-                                    "[-] Finished file (remaining: {}): {} ({} records)",
-                                    state.files_remaining, short_name, processed.total_records
-                                );
-
-                                // Queue finished parquet files for background upload
-                                let finished = writer.take_finished_files();
-                                for file in finished {
-                                    self.stats.parquet_files_written += 1;
-                                    self.stats.bytes_written += file.size;
-                                    emit!(BytesWritten { bytes: file.size as u64 });
-                                    if uploader.tx.send(file).await.is_err() {
-                                        error!("Upload channel closed unexpectedly");
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                state.files_remaining -= 1;
-                                if e.is_not_found() {
-                                    warn!("Skipping file with processing error (not found): {}", e);
-                                    emit!(FileProcessed { status: FileStatus::Skipped });
-                                } else {
-                                    // Determine failure stage based on error type.
-                                    // Note: With streaming decompression, gzip errors surface
-                                    // through the JSON reader and are classified as Parse failures.
-                                    // Only zstd decoder creation errors are caught as Decompress.
-                                    let stage = match &e {
-                                        PipelineError::Reader {
-                                            source:
-                                                crate::error::ReaderError::ZstdDecompression { .. },
-                                        } => FailureStage::Decompress,
-                                        _ => FailureStage::Parse,
-                                    };
-
-                                    warn!("Skipping failed file (processing error): {}", e);
-                                    failures.record_failure(&e.to_string(), stage).await?;
-                                }
-                            }
+                Some(result) = state.processing.next(), if !state.processing.is_empty() => {
+                    emit!(DecompressionQueueDepth {
+                        count: state.processing.len()
+                    });
+                    match result {
+                        Ok(processed) => {
+                            self.handle_processed_file(processed, &mut state, &mut writer, &uploader).await?;
+                        }
+                        Err(e) => {
+                            state.handle_processing_error(e, &mut failures).await?;
                         }
                     }
                 }
@@ -487,6 +476,64 @@ impl Pipeline {
         } else {
             Ok(IterationResult::ProcessedFiles)
         }
+    }
+
+    /// Handle a successfully processed file: write batches, update checkpoint, queue uploads.
+    async fn handle_processed_file(
+        &mut self,
+        processed: ProcessedFile,
+        state: &mut ProcessingState,
+        writer: &mut ParquetWriter,
+        uploader: &Uploader,
+    ) -> Result<(), PipelineError> {
+        let short_name = processed.short_name();
+
+        // Track pending batches before writing
+        emit!(PendingBatches {
+            count: processed.batches.len()
+        });
+
+        // Write all batches from this file
+        for batch in &processed.batches {
+            debug!("[batch] {}: {} rows", short_name, batch.num_rows());
+            writer.write_batch(batch).context(ParquetSnafu)?;
+            self.stats.records_processed += batch.num_rows();
+            emit!(RecordsProcessed {
+                count: batch.num_rows() as u64
+            });
+            emit!(BatchesProcessed { count: 1 });
+        }
+        emit!(PendingBatches { count: 0 });
+
+        // Update checkpoint state
+        self.checkpoint_coordinator
+            .update_source_state(&processed.path, processed.total_records, true)
+            .await;
+
+        self.stats.files_processed += 1;
+        state.files_remaining -= 1;
+        emit!(FileProcessed {
+            status: FileStatus::Success
+        });
+        debug!(
+            "[-] Finished file (remaining: {}): {} ({} records)",
+            state.files_remaining, short_name, processed.total_records
+        );
+
+        // Queue finished parquet files for background upload
+        for file in writer.take_finished_files() {
+            self.stats.parquet_files_written += 1;
+            self.stats.bytes_written += file.size;
+            emit!(BytesWritten {
+                bytes: file.size as u64
+            });
+            if uploader.tx.send(file).await.is_err() {
+                error!("Upload channel closed unexpectedly");
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     /// Prepares the pipeline for a processing iteration.
