@@ -87,9 +87,9 @@ impl NdjsonReader {
         // Create a streaming reader based on compression format.
         // This avoids loading the entire decompressed file into memory.
         let reader: Box<dyn BufRead> = match self.config.compression {
-            CompressionFormat::Gzip => Box::new(BufReader::new(
-                flate2::read::GzDecoder::new(&compressed[..]),
-            )),
+            CompressionFormat::Gzip => Box::new(BufReader::new(flate2::read::GzDecoder::new(
+                &compressed[..],
+            ))),
             CompressionFormat::Zstd => Box::new(BufReader::new(
                 zstd::stream::Decoder::new(&compressed[..]).context(ZstdDecompressionSnafu {
                     path: path.to_string(),

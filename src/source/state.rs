@@ -99,5 +99,4 @@ mod tests {
         assert!(pending.contains(&"file2.ndjson.gz"));
         assert!(pending.contains(&"file3.ndjson.gz"));
     }
-
 }
