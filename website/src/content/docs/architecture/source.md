@@ -147,7 +147,7 @@ Files are downloaded concurrently to maximize I/O throughput:
 
 ```yaml
 source:
-  max_concurrent_files: 16  # Concurrent downloads (default: 16)
+  max_concurrent_files: 4  # Concurrent downloads (default: 4)
 ```
 
 The downloader task:
@@ -211,7 +211,7 @@ source:
   path: "s3://my-bucket/events/2024"
   compression: gzip
   batch_size: 8192
-  max_concurrent_files: 16
+  max_concurrent_files: 4
   storage_options:
     AWS_REGION: "us-east-1"
 ```
