@@ -72,6 +72,16 @@ struct ProcessedFile {
     total_records: usize,
 }
 
+/// Result of a single processing iteration.
+enum IterationResult {
+    /// Files were processed successfully.
+    ProcessedFiles,
+    /// No files were available to process.
+    NoFiles,
+    /// Shutdown was requested.
+    Shutdown,
+}
+
 /// Initialized pipeline state ready for processing.
 struct InitializedState {
     pending_files: Vec<String>,
@@ -134,28 +144,82 @@ impl Pipeline {
     /// Uses a producer-consumer pattern to maximize parallelism:
     /// - **Producer**: Tokio tasks download compressed files concurrently (I/O bound)
     /// - **Consumer**: Tokio's blocking thread pool decompresses and parses files (CPU bound)
+    ///
+    /// The pipeline continuously polls for new files at the configured interval.
     pub async fn run(&mut self) -> Result<PipelineStats, PipelineError> {
         info!("Starting pipeline");
 
-        // Race initialization against shutdown signal
-        let shutdown = self.shutdown.clone();
-        let state = tokio::select! {
-            biased;
+        let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
+        let mut first_iteration = true;
 
-            _ = shutdown.cancelled() => {
-                info!("Shutdown requested during initialization");
-                return Ok(self.stats.clone());
+        loop {
+            // Race initialization against shutdown signal
+            let shutdown = self.shutdown.clone();
+            let state = tokio::select! {
+                biased;
+
+                _ = shutdown.cancelled() => {
+                    info!("Shutdown requested during initialization");
+                    return Ok(self.stats.clone());
+                }
+
+                result = async {
+                    if first_iteration {
+                        first_iteration = false;
+                        self.prepare_first_iteration().await
+                    } else {
+                        self.prepare_next_iteration().await
+                    }
+                } => result?,
+            };
+
+            let result = match state {
+                Some(s) => self.process_files(s).await?,
+                None => {
+                    info!("No files to process");
+                    IterationResult::NoFiles
+                }
+            };
+
+            // Exit on shutdown, otherwise wait and poll again
+            match result {
+                IterationResult::Shutdown => break,
+                IterationResult::NoFiles => {
+                    info!(
+                        "No new files, waiting {}s before next poll",
+                        poll_interval.as_secs()
+                    );
+                }
+                IterationResult::ProcessedFiles => {
+                    info!(
+                        "Iteration complete, waiting {}s before next poll",
+                        poll_interval.as_secs()
+                    );
+                }
             }
 
-            result = self.prepare_pipeline() => result?,
-        };
+            // Wait for poll interval or shutdown
+            tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    info!("Shutdown requested during poll wait");
+                    break;
+                }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        }
 
-        // Handle empty work case
-        let Some(state) = state else {
-            info!("No files to process");
-            return Ok(self.stats.clone());
-        };
+        info!("Pipeline completed: {:?}", self.stats);
+        Ok(self.stats.clone())
+    }
 
+    /// Process files in a single iteration.
+    ///
+    /// This contains the main processing loop: downloading, decompressing,
+    /// parsing, writing, and uploading files.
+    async fn process_files(
+        &mut self,
+        state: InitializedState,
+    ) -> Result<IterationResult, PipelineError> {
         // Unpack initialized state
         let InitializedState {
             pending_files,
@@ -230,6 +294,7 @@ impl Pipeline {
         let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
         let mut channel_open = true;
         let mut util_timer = UtilizationTimer::new("processor");
+        let mut shutdown_requested = false;
 
         // Helper to spawn a read task (decompress + parse)
         let spawn_read = |downloaded: DownloadedFile, reader: Arc<NdjsonReader>| {
@@ -260,6 +325,7 @@ impl Pipeline {
 
             if self.shutdown.is_cancelled() {
                 info!("Shutdown requested, stopping processing");
+                shutdown_requested = true;
                 // Note: checkpoint state will be committed with final files
                 break;
             }
@@ -458,7 +524,7 @@ impl Pipeline {
             "All uploads complete: {} files, {} bytes",
             files_uploaded, bytes_uploaded
         );
-        self.stats.delta_commits = files_uploaded;
+        self.stats.delta_commits += files_uploaded;
 
         // Note: final checkpoint is committed atomically with the last file batch
         // in the uploader task
@@ -472,30 +538,33 @@ impl Pipeline {
 
         if failure_count > 0 {
             warn!(
-                "Pipeline completed with {} failures (recorded to DLQ if configured)",
+                "Iteration completed with {} failures (recorded to DLQ if configured)",
                 failure_count
             );
         }
 
-        info!("Pipeline completed: {:?}", self.stats);
-        info!("Final Delta table version: {}", delta_sink.version());
         info!(
-            "Final checkpoint version: {}",
-            delta_sink.checkpoint_version()
+            "Iteration complete, Delta table version: {}",
+            delta_sink.version()
         );
+        info!("Checkpoint version: {}", delta_sink.checkpoint_version());
 
-        Ok(self.stats.clone())
+        if shutdown_requested {
+            Ok(IterationResult::Shutdown)
+        } else {
+            Ok(IterationResult::ProcessedFiles)
+        }
     }
 
-    /// Prepare the pipeline for processing.
+    /// Prepare the pipeline for the first iteration (cold start).
     ///
-    /// Performs all initialization: checkpoint restoration from Delta log,
+    /// Performs full initialization: checkpoint restoration from Delta log,
     /// Delta sink creation, file listing, and writer setup.
     /// Returns `None` if there are no files to process.
     ///
     /// This method is designed to be cancellation-safe - it can be dropped at any
     /// `.await` point without leaving the system in an inconsistent state.
-    async fn prepare_pipeline(&mut self) -> Result<Option<InitializedState>, PipelineError> {
+    async fn prepare_first_iteration(&mut self) -> Result<Option<InitializedState>, PipelineError> {
         // Create the Arrow schema from config
         let schema = self.config.to_arrow_schema();
 
@@ -530,6 +599,76 @@ impl Pipeline {
         info!("Found {} source files", source_files.len());
 
         // Get current source state
+        let source_state = self.checkpoint_coordinator.get_source_state().await;
+
+        // Filter to unprocessed files
+        let pending_files: Vec<String> = source_state
+            .pending_files(&source_files)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        info!("{} files remaining to process", pending_files.len());
+
+        if pending_files.is_empty() {
+            return Ok(None);
+        }
+
+        // Build writer configuration
+        let rolling_policies = self.build_rolling_policies();
+        let writer_config = ParquetWriterConfig::default()
+            .with_file_size_mb(self.config.sink.file_size_mb)
+            .with_row_group_size_bytes(self.config.sink.row_group_size_bytes)
+            .with_compression(self.config.sink.compression)
+            .with_rolling_policies(rolling_policies);
+
+        let writer = ParquetWriter::new(schema.clone(), writer_config);
+
+        // Initialize DLQ if configured
+        let dlq = DeadLetterQueue::from_config(&self.config.error_handling)
+            .await
+            .context(DlqSnafu)?
+            .map(Arc::new);
+
+        Ok(Some(InitializedState {
+            pending_files,
+            source_state,
+            schema,
+            writer,
+            delta_sink,
+            max_concurrent: self.config.source.max_concurrent_files,
+            compression: self.config.source.compression,
+            batch_size: self.config.source.batch_size,
+            dlq,
+        }))
+    }
+
+    /// Prepare the pipeline for subsequent iterations (polling mode).
+    ///
+    /// Creates a fresh DeltaSink for commits but skips checkpoint recovery,
+    /// using the in-memory state from CheckpointCoordinator instead.
+    /// This avoids redundant Delta log reads and ensures we don't lose state
+    /// if the last batch had fewer files than the checkpoint commit threshold.
+    ///
+    /// Returns `None` if there are no new files to process.
+    async fn prepare_next_iteration(&mut self) -> Result<Option<InitializedState>, PipelineError> {
+        info!("Preparing next iteration (using in-memory checkpoint state)");
+
+        // Create the Arrow schema from config
+        let schema = self.config.to_arrow_schema();
+
+        // Create fresh Delta sink (needed for commits)
+        let delta_sink = DeltaSink::new(self.sink_storage.clone(), &schema)
+            .await
+            .context(DeltaSnafu)?;
+
+        // Skip checkpoint recovery - use in-memory state from coordinator
+        // This preserves state from files processed but not yet committed
+
+        // List source files (may have new files since last iteration)
+        let source_files = self.list_source_files().await?;
+        info!("Found {} source files", source_files.len());
+
+        // Get current source state from in-memory coordinator
         let source_state = self.checkpoint_coordinator.get_source_state().await;
 
         // Filter to unprocessed files

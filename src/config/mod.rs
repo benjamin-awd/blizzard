@@ -98,6 +98,11 @@ pub struct SourceConfig {
     /// Maximum number of files to process concurrently (default: 4)
     #[serde(default = "default_max_concurrent_files")]
     pub max_concurrent_files: usize,
+
+    /// Interval in seconds between polls for new files (default: 60).
+    /// The pipeline continuously checks for new files at this interval.
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
 }
 
 fn default_batch_size() -> usize {
@@ -106,6 +111,10 @@ fn default_batch_size() -> usize {
 
 fn default_max_concurrent_files() -> usize {
     4
+}
+
+fn default_poll_interval_secs() -> u64 {
+    60
 }
 
 /// Sink configuration for writing to Delta Lake.
@@ -328,6 +337,7 @@ mod tests {
                 storage_options: HashMap::new(),
                 batch_size: 8192,
                 max_concurrent_files: 4,
+                poll_interval_secs: 60,
             },
             sink: SinkConfig {
                 path: "s3://bucket/output/table".to_string(),

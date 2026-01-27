@@ -507,6 +507,217 @@ error_handling:
     }
 }
 
+mod polling_tests {
+    use blizzard::Pipeline;
+    use blizzard::config::Config;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn test_polling_config_defaults() {
+        let yaml = r#"
+source:
+  path: "/input/*.ndjson.gz"
+
+sink:
+  path: "/output/table"
+
+schema:
+  fields:
+    - name: id
+      type: string
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        // Check default poll interval
+        assert_eq!(
+            config.source.poll_interval_secs, 60,
+            "default poll interval should be 60s"
+        );
+    }
+
+    #[test]
+    fn test_polling_config_yaml_parsing() {
+        let yaml = r#"
+source:
+  path: "s3://bucket/input/*.ndjson.gz"
+  poll_interval_secs: 30
+
+sink:
+  path: "s3://bucket/output/table"
+
+schema:
+  fields:
+    - name: id
+      type: string
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(
+            config.source.poll_interval_secs, 30,
+            "poll interval should be 30s"
+        );
+    }
+
+    /// Helper to create a gzip-compressed NDJSON file
+    fn create_ndjson_gz_file(path: &std::path::Path, records: &[&str]) {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        for record in records {
+            writeln!(encoder, "{}", record).unwrap();
+        }
+        encoder.finish().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_can_be_shutdown() {
+        let source_dir = TempDir::new().unwrap();
+        let sink_dir = TempDir::new().unwrap();
+
+        // No input files - pipeline will wait in polling mode
+
+        let config = Config {
+            source: blizzard::config::SourceConfig {
+                path: source_dir.path().to_str().unwrap().to_string(),
+                compression: blizzard::config::CompressionFormat::Gzip,
+                storage_options: HashMap::new(),
+                batch_size: 1000,
+                max_concurrent_files: 1,
+                poll_interval_secs: 60, // Long interval - we'll cancel before it elapses
+            },
+            sink: blizzard::config::SinkConfig {
+                path: sink_dir.path().to_str().unwrap().to_string(),
+                file_size_mb: 128,
+                row_group_size_bytes: 128 * 1024 * 1024,
+                inactivity_timeout_secs: None,
+                rollover_timeout_secs: None,
+                part_size_mb: 32,
+                min_multipart_size_mb: 5,
+                max_concurrent_uploads: 1,
+                max_concurrent_parts: 1,
+                storage_options: HashMap::new(),
+                compression: blizzard::config::ParquetCompression::Snappy,
+            },
+            schema: blizzard::config::SchemaConfig {
+                fields: vec![blizzard::config::FieldConfig {
+                    name: "id".to_string(),
+                    field_type: blizzard::config::FieldType::String,
+                    nullable: false,
+                }],
+            },
+            metrics: blizzard::config::MetricsConfig {
+                enabled: false,
+                address: "127.0.0.1:0".to_string(),
+            },
+            error_handling: blizzard::config::ErrorHandlingConfig::default(),
+        };
+
+        let shutdown = CancellationToken::new();
+        let shutdown_trigger = shutdown.clone();
+
+        // Spawn the pipeline
+        let handle = tokio::spawn(async move {
+            let mut pipeline = Pipeline::new(config, shutdown).await.unwrap();
+            pipeline.run().await
+        });
+
+        // Give the pipeline time to start and enter polling wait
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Trigger shutdown
+        shutdown_trigger.cancel();
+
+        // Pipeline should exit gracefully
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
+        assert!(result.is_ok(), "Pipeline should shutdown within timeout");
+
+        let stats = result.unwrap().unwrap().unwrap();
+        assert_eq!(stats.files_processed, 0, "No files should be processed");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_processes_new_files() {
+        let source_dir = TempDir::new().unwrap();
+        let sink_dir = TempDir::new().unwrap();
+
+        // Create first test file
+        let input_file1 = source_dir.path().join("test1.ndjson.gz");
+        create_ndjson_gz_file(&input_file1, &[r#"{"id": "1"}"#]);
+
+        let config = Config {
+            source: blizzard::config::SourceConfig {
+                path: source_dir.path().to_str().unwrap().to_string(),
+                compression: blizzard::config::CompressionFormat::Gzip,
+                storage_options: HashMap::new(),
+                batch_size: 1000,
+                max_concurrent_files: 1,
+                poll_interval_secs: 1, // Short interval for testing
+            },
+            sink: blizzard::config::SinkConfig {
+                path: sink_dir.path().to_str().unwrap().to_string(),
+                file_size_mb: 128,
+                row_group_size_bytes: 128 * 1024 * 1024,
+                inactivity_timeout_secs: None,
+                rollover_timeout_secs: None,
+                part_size_mb: 32,
+                min_multipart_size_mb: 5,
+                max_concurrent_uploads: 1,
+                max_concurrent_parts: 1,
+                storage_options: HashMap::new(),
+                compression: blizzard::config::ParquetCompression::Snappy,
+            },
+            schema: blizzard::config::SchemaConfig {
+                fields: vec![blizzard::config::FieldConfig {
+                    name: "id".to_string(),
+                    field_type: blizzard::config::FieldType::String,
+                    nullable: false,
+                }],
+            },
+            metrics: blizzard::config::MetricsConfig {
+                enabled: false,
+                address: "127.0.0.1:0".to_string(),
+            },
+            error_handling: blizzard::config::ErrorHandlingConfig::default(),
+        };
+
+        let shutdown = CancellationToken::new();
+        let shutdown_trigger = shutdown.clone();
+        let source_path = source_dir.path().to_path_buf();
+
+        // Spawn the pipeline
+        let handle = tokio::spawn(async move {
+            let mut pipeline = Pipeline::new(config, shutdown).await.unwrap();
+            pipeline.run().await
+        });
+
+        // Wait for first file to be processed, then add a new file
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Add second file during polling wait
+        let input_file2 = source_path.join("test2.ndjson.gz");
+        create_ndjson_gz_file(&input_file2, &[r#"{"id": "2"}"#, r#"{"id": "3"}"#]);
+
+        // Wait for second poll iteration to process the new file
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Trigger shutdown
+        shutdown_trigger.cancel();
+
+        // Pipeline should exit gracefully
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
+        assert!(result.is_ok(), "Pipeline should shutdown within timeout");
+
+        let stats = result.unwrap().unwrap().unwrap();
+        assert_eq!(stats.files_processed, 2, "Should process both files");
+        assert_eq!(stats.records_processed, 3, "Should process all 3 records");
+    }
+}
+
 mod delta_atomic_checkpoint_tests {
     use blizzard::checkpoint::CheckpointState;
     use blizzard::sink::FinishedFile;
