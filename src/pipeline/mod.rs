@@ -29,16 +29,15 @@ use tracing::{debug, error, info, warn};
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{CompressionFormat, Config, MB};
-use crate::dlq::DeadLetterQueue;
+use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::emit;
 use crate::error::{
-    DeltaSnafu, DlqSnafu, MaxFailuresExceededSnafu, ParquetSnafu, PipelineError,
-    PipelineStorageSnafu, TaskJoinSnafu,
+    DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, TaskJoinSnafu,
 };
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
-    BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileFailed,
-    FileProcessed, FileStatus, PendingBatches, RecordsProcessed,
+    BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileProcessed,
+    FileStatus, PendingBatches, RecordsProcessed,
 };
 use crate::sink::FinishedFile;
 use crate::sink::delta::DeltaSink;
@@ -120,69 +119,6 @@ impl ProcessingState {
         if self.processing.is_empty() {
             self.util_timer.stop_wait();
         }
-    }
-}
-
-/// Tracks failures and handles DLQ recording with max_failures enforcement.
-struct FailureTracker {
-    count: usize,
-    max_failures: usize,
-    dlq: Option<Arc<DeadLetterQueue>>,
-}
-
-impl FailureTracker {
-    fn new(max_failures: usize, dlq: Option<Arc<DeadLetterQueue>>) -> Self {
-        Self {
-            count: 0,
-            max_failures,
-            dlq,
-        }
-    }
-
-    /// Record a failure, emit metrics, and check max_failures limit.
-    ///
-    /// Returns `Err` if max_failures has been reached (after finalizing DLQ).
-    async fn record_failure(
-        &mut self,
-        error: &str,
-        stage: FailureStage,
-    ) -> Result<(), PipelineError> {
-        self.count += 1;
-        emit!(FileProcessed {
-            status: FileStatus::Failed
-        });
-        emit!(FileFailed { stage });
-
-        if let Some(dlq) = &self.dlq {
-            dlq.record_failure("unknown", error, stage).await;
-        }
-
-        if self.max_failures > 0 && self.count >= self.max_failures {
-            error!("Max failures ({}) reached, stopping pipeline", self.count);
-            self.finalize_dlq().await;
-            return MaxFailuresExceededSnafu { count: self.count }.fail();
-        }
-
-        Ok(())
-    }
-
-    /// Finalize DLQ, logging any errors.
-    async fn finalize_dlq(&self) {
-        if let Some(dlq) = &self.dlq {
-            if let Err(e) = dlq.finalize().await {
-                error!("Failed to finalize DLQ: {}", e);
-            }
-        }
-    }
-
-    /// Returns true if any failures were recorded.
-    fn has_failures(&self) -> bool {
-        self.count > 0
-    }
-
-    /// Returns the failure count.
-    fn count(&self) -> usize {
-        self.count
     }
 }
 
@@ -335,10 +271,8 @@ impl Pipeline {
         } = state;
 
         // Track failures with DLQ support
-        let mut failures = FailureTracker::new(
-            self.config.error_handling.max_failures,
-            dlq.clone(),
-        );
+        let mut failures =
+            FailureTracker::new(self.config.error_handling.max_failures, dlq.clone());
 
         // Create the NDJSON reader for decompression and parsing
         let reader_config = NdjsonReaderConfig::new(batch_size, compression);
@@ -587,7 +521,10 @@ impl Pipeline {
     ///     been flushed to a persistent checkpoint.
     ///
     /// Returns `None` if no files are available.
-    async fn prepare(&mut self, cold_start: bool) -> Result<Option<InitializedState>, PipelineError> {
+    async fn prepare(
+        &mut self,
+        cold_start: bool,
+    ) -> Result<Option<InitializedState>, PipelineError> {
         let schema = self.config.to_arrow_schema();
 
         let mut delta_sink = DeltaSink::new(self.sink_storage.clone(), &schema)

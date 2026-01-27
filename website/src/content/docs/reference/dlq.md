@@ -20,10 +20,10 @@ The Dead Letter Queue (DLQ) captures information about files that fail processin
 │  └─────────────────┘                                            │
 │       │                                                         │
 │       ▼                                                         │
-│  ┌─────────────────┐     ┌─────────────────────────────────┐    │
-│  │ DLQ configured? │─Yes─▶│ Record failure to DLQ          │    │
-│  └─────────────────┘     │ (path, error, stage, timestamp) │    │
-│       │                  └─────────────────────────────────┘    │
+│  ┌─────────────────┐      ┌─────────────────────────────────┐   │
+│  │ DLQ configured? │─Yes─▶│ Record failure to DLQ           │   │
+│  └─────────────────┘      │ (path, error, stage, timestamp) │   │
+│       │                   └─────────────────────────────────┘   │
 │       │ No                          │                           │
 │       ▼                             ▼                           │
 │  Continue processing          Buffer in memory                  │

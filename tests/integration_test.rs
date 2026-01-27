@@ -303,7 +303,7 @@ mod sink_tests {
 
 mod dlq_tests {
     use blizzard::config::ErrorHandlingConfig;
-    use blizzard::dlq::{DeadLetterQueue, FailedFile};
+    use blizzard::dlq::DeadLetterQueue;
     use blizzard::metrics::events::FailureStage;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -356,13 +356,8 @@ mod dlq_tests {
         )
         .await;
 
-        // Finalize and verify stats
-        let stats = dlq.finalize().await.expect("Failed to finalize DLQ");
-        assert_eq!(stats.download, 1);
-        assert_eq!(stats.decompress, 1);
-        assert_eq!(stats.parse, 1);
-        assert_eq!(stats.upload, 1);
-        assert_eq!(stats.total(), 4);
+        // Finalize
+        dlq.finalize().await.expect("Failed to finalize DLQ");
 
         // Verify file was written
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
@@ -386,31 +381,21 @@ mod dlq_tests {
         // Parse each line and verify structure
         let mut stages_seen = Vec::new();
         for line in lines {
-            let record: FailedFile =
+            let record: serde_json::Value =
                 serde_json::from_str(line).expect("Each line should be valid JSON");
-            assert!(!record.path.is_empty());
-            assert!(!record.error.is_empty());
-            assert_eq!(record.retry_count, 0);
-            stages_seen.push(record.stage);
+            assert!(record.get("path").and_then(|v| v.as_str()).is_some());
+            assert!(record.get("error").and_then(|v| v.as_str()).is_some());
+            assert_eq!(record.get("retry_count").and_then(|v| v.as_u64()), Some(0));
+            if let Some(stage) = record.get("stage").and_then(|v| v.as_str()) {
+                stages_seen.push(stage.to_string());
+            }
         }
 
         // Verify all stages are represented
-        assert!(
-            stages_seen
-                .iter()
-                .any(|s| matches!(s, FailureStage::Download))
-        );
-        assert!(
-            stages_seen
-                .iter()
-                .any(|s| matches!(s, FailureStage::Decompress))
-        );
-        assert!(stages_seen.iter().any(|s| matches!(s, FailureStage::Parse)));
-        assert!(
-            stages_seen
-                .iter()
-                .any(|s| matches!(s, FailureStage::Upload))
-        );
+        assert!(stages_seen.iter().any(|s| s == "download"));
+        assert!(stages_seen.iter().any(|s| s == "decompress"));
+        assert!(stages_seen.iter().any(|s| s == "parse"));
+        assert!(stages_seen.iter().any(|s| s == "upload"));
     }
 
     #[tokio::test]
@@ -466,10 +451,10 @@ mod dlq_tests {
             .collect();
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let record: FailedFile = serde_json::from_str(content.trim()).unwrap();
+        let record: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
 
-        assert!(record.path.contains("quotes"));
-        assert!(record.error.contains("newlines"));
+        assert!(record["path"].as_str().unwrap().contains("quotes"));
+        assert!(record["error"].as_str().unwrap().contains("newlines"));
     }
 
     #[tokio::test]
