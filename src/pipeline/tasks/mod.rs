@@ -34,18 +34,22 @@ pub(super) fn spawn_read_task(
     downloaded: DownloadedFile,
     reader: Arc<NdjsonReader>,
 ) -> ProcessFuture {
-    let path = downloaded.path.clone();
-    let path_for_result = path.clone();
+    let DownloadedFile {
+        path,
+        compressed_data,
+        skip_records,
+    } = downloaded;
+    let path_for_blocking = path.clone();
     Box::pin(async move {
         let result = tokio::task::spawn_blocking(move || {
-            reader.read(downloaded.compressed_data, downloaded.skip_records, &path)
+            reader.read(compressed_data, skip_records, &path_for_blocking)
         })
         .await
         .context(TaskJoinSnafu)?
         .context(ReaderSnafu)?;
 
         Ok(ProcessedFile {
-            path: path_for_result,
+            path,
             batches: result.batches,
             total_records: result.total_records,
         })

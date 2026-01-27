@@ -283,17 +283,19 @@ impl Pipeline {
             dlq.clone(),
         );
 
-        // Spawn background downloader task
+        // Consumer: Process downloaded files with parallel decompression
+        let files_count = pending_files.len();
+
+        // Spawn background downloader task (consumes pending_files and source_state)
         let mut downloader = Downloader::spawn(
-            pending_files.clone(),
-            source_state.clone(),
+            pending_files,
+            source_state,
             self.source_storage.clone(),
             self.shutdown.clone(),
             max_concurrent,
         );
 
-        // Consumer: Process downloaded files with parallel decompression
-        let mut state = ProcessingState::new(pending_files.len());
+        let mut state = ProcessingState::new(files_count);
 
         loop {
             state.update_utilization();
