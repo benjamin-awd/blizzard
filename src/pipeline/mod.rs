@@ -23,7 +23,9 @@ use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{CompressionFormat, Config};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::emit;
-use crate::error::{DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu};
+use crate::error::{
+    DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, StorageError,
+};
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileProcessed,
@@ -34,7 +36,7 @@ use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
 
-use tasks::{Downloader, ProcessFuture, Uploader, spawn_read_task};
+use tasks::{DownloadedFile, Downloader, ProcessFuture, Uploader, spawn_read_task};
 
 /// Statistics about the pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -106,6 +108,37 @@ impl ProcessingState {
         if self.processing.is_empty() {
             self.util_timer.stop_wait();
         }
+    }
+
+    /// Queue a downloaded file for decompression.
+    fn queue_for_decompression(&mut self, downloaded: DownloadedFile, reader: &Arc<NdjsonReader>) {
+        self.start_processing();
+        self.processing
+            .push(spawn_read_task(downloaded, reader.clone()));
+        emit!(DecompressionQueueDepth {
+            count: self.processing.len()
+        });
+    }
+
+    /// Record a download error, skipping not-found errors.
+    async fn record_download_error(
+        &mut self,
+        error: StorageError,
+        failures: &mut FailureTracker,
+    ) -> Result<(), PipelineError> {
+        self.files_remaining -= 1;
+        if error.is_not_found() {
+            warn!("Skipping file with download error (not found): {}", error);
+            emit!(FileProcessed {
+                status: FileStatus::Skipped
+            });
+        } else {
+            warn!("Skipping failed file (download error): {}", error);
+            failures
+                .record_failure(&error.to_string(), FailureStage::Download)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -309,23 +342,10 @@ impl Pipeline {
                 result = downloader.rx.recv(), if has_capacity => {
                     match result {
                         Some(Ok(downloaded)) => {
-                            state.start_processing();
-                            state.processing.push(spawn_read_task(downloaded, reader.clone()));
-                            emit!(DecompressionQueueDepth {
-                                count: state.processing.len()
-                            });
+                            state.queue_for_decompression(downloaded, &reader);
                         }
                         Some(Err(e)) => {
-                            state.files_remaining -= 1;
-                            if e.is_not_found() {
-                                warn!("Skipping file with download error (not found): {}", e);
-                                emit!(FileProcessed { status: FileStatus::Skipped });
-                            } else {
-                                warn!("Skipping failed file (download error): {}", e);
-                                failures
-                                    .record_failure(&e.to_string(), FailureStage::Download)
-                                    .await?;
-                            }
+                            state.record_download_error(e, &mut failures).await?;
                         }
                         None => {
                             state.channel_open = false;
