@@ -23,7 +23,7 @@ export default defineConfig({
 					label: 'Architecture',
 					items: [
 						{ label: 'Pipeline Overview', slug: 'architecture/pipeline' },
-						{ label: 'Checkpoint & Recovery', slug: 'architecture/checkpoint-recovery' },
+						{ label: 'Checkpoints', slug: 'architecture/checkpoint' },
 						{ label: 'Storage Backends', slug: 'architecture/storage' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Sink & Delta Lake', slug: 'architecture/sink' },
