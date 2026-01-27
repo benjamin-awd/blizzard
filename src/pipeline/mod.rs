@@ -8,14 +8,6 @@
 //! Uses a producer-consumer pattern to separate I/O from CPU work:
 //! - **Tokio tasks**: Download compressed files concurrently (I/O bound)
 //! - **Tokio's blocking thread pool**: Decompress and parse files in parallel (CPU bound)
-//!
-//! This enables full CPU utilization during gzip decompression.
-//!
-//! # Atomic Checkpointing
-//!
-//! Checkpoints are stored atomically in Delta Lake using `Txn` actions.
-//! Each Delta commit includes the checkpoint state, ensuring file commits
-//! and checkpoint state are always consistent.
 
 mod signal;
 mod tasks;
