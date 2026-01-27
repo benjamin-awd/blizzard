@@ -268,12 +268,9 @@ impl Pipeline {
                 }
 
                 result = async {
-                    if first_iteration {
-                        first_iteration = false;
-                        self.prepare_first_iteration().await
-                    } else {
-                        self.prepare_next_iteration().await
-                    }
+                    let cold_start = first_iteration;
+                    first_iteration = false;
+                    self.prepare(cold_start).await
                 } => result?,
             };
 
@@ -579,52 +576,51 @@ impl Pipeline {
         }
     }
 
-    /// Prepare the pipeline for the first iteration (cold start).
+    /// Prepares the pipeline for a processing iteration.
     ///
-    /// Performs full initialization: checkpoint restoration from Delta log,
-    /// Delta sink creation, file listing, and writer setup.
-    /// Returns `None` if there are no files to process.
+    /// # State Recovery Logic
     ///
-    /// This method is designed to be cancellation-safe - it can be dropped at any
-    /// `.await` point without leaving the system in an inconsistent state.
-    async fn prepare_first_iteration(&mut self) -> Result<Option<InitializedState>, PipelineError> {
-        // Create the Arrow schema from config
+    /// **Cold Start:** Recovers state from the Delta transaction log to identify
+    ///     previously committed files.
+    /// **Warm Start:** Uses the in-memory `CheckpointCoordinator`. This prevents
+    ///     state regression, as the in-memory state tracks progress that hasn't yet
+    ///     been flushed to a persistent checkpoint.
+    ///
+    /// Returns `None` if no files are available.
+    async fn prepare(&mut self, cold_start: bool) -> Result<Option<InitializedState>, PipelineError> {
         let schema = self.config.to_arrow_schema();
 
-        // Create Delta sink
         let mut delta_sink = DeltaSink::new(self.sink_storage.clone(), &schema)
             .await
             .context(DeltaSnafu)?;
 
-        // Recover checkpoint from Delta transaction log
-        if let Some((checkpoint, checkpoint_version)) = delta_sink
-            .recover_checkpoint_from_log()
-            .await
-            .context(DeltaSnafu)?
-        {
-            info!(
-                "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
-                checkpoint_version,
-                checkpoint.delta_version,
-                checkpoint.source_state.files.len()
-            );
-
-            // Restore checkpoint coordinator state
-            self.checkpoint_coordinator
-                .restore_from_state(checkpoint)
-                .await;
+        if cold_start {
+            if let Some((checkpoint, checkpoint_version)) = delta_sink
+                .recover_checkpoint_from_log()
+                .await
+                .context(DeltaSnafu)?
+            {
+                info!(
+                    "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
+                    checkpoint_version,
+                    checkpoint.delta_version,
+                    checkpoint.source_state.files.len()
+                );
+                self.checkpoint_coordinator
+                    .restore_from_state(checkpoint)
+                    .await;
+            } else {
+                info!("No checkpoint found in Delta log, starting fresh");
+            }
         } else {
-            info!("No checkpoint found in Delta log, starting fresh");
+            info!("Preparing next iteration (using in-memory checkpoint state)");
         }
 
-        // List source files
         let source_files = self.list_source_files().await?;
         info!("Found {} source files", source_files.len());
 
-        // Get current source state
         let source_state = self.checkpoint_coordinator.get_source_state().await;
 
-        // Filter to unprocessed files
         let pending_files: Vec<String> = source_state
             .pending_files(&source_files)
             .into_iter()
@@ -636,7 +632,6 @@ impl Pipeline {
             return Ok(None);
         }
 
-        // Build writer configuration
         let rolling_policies = self.build_rolling_policies();
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(self.config.sink.file_size_mb)
@@ -646,77 +641,6 @@ impl Pipeline {
 
         let writer = ParquetWriter::new(schema.clone(), writer_config);
 
-        // Initialize DLQ if configured
-        let dlq = DeadLetterQueue::from_config(&self.config.error_handling)
-            .await
-            .context(DlqSnafu)?
-            .map(Arc::new);
-
-        Ok(Some(InitializedState {
-            pending_files,
-            source_state,
-            schema,
-            writer,
-            delta_sink,
-            max_concurrent: self.config.source.max_concurrent_files,
-            compression: self.config.source.compression,
-            batch_size: self.config.source.batch_size,
-            dlq,
-        }))
-    }
-
-    /// Prepare the pipeline for subsequent iterations (polling mode).
-    ///
-    /// Creates a fresh DeltaSink for commits but skips checkpoint recovery,
-    /// using the in-memory state from CheckpointCoordinator instead.
-    /// This avoids redundant Delta log reads and ensures we don't lose state
-    /// if the last batch had fewer files than the checkpoint commit threshold.
-    ///
-    /// Returns `None` if there are no new files to process.
-    async fn prepare_next_iteration(&mut self) -> Result<Option<InitializedState>, PipelineError> {
-        info!("Preparing next iteration (using in-memory checkpoint state)");
-
-        // Create the Arrow schema from config
-        let schema = self.config.to_arrow_schema();
-
-        // Create fresh Delta sink (needed for commits)
-        let delta_sink = DeltaSink::new(self.sink_storage.clone(), &schema)
-            .await
-            .context(DeltaSnafu)?;
-
-        // Skip checkpoint recovery - use in-memory state from coordinator
-        // This preserves state from files processed but not yet committed
-
-        // List source files (may have new files since last iteration)
-        let source_files = self.list_source_files().await?;
-        info!("Found {} source files", source_files.len());
-
-        // Get current source state from in-memory coordinator
-        let source_state = self.checkpoint_coordinator.get_source_state().await;
-
-        // Filter to unprocessed files
-        let pending_files: Vec<String> = source_state
-            .pending_files(&source_files)
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        info!("{} files remaining to process", pending_files.len());
-
-        if pending_files.is_empty() {
-            return Ok(None);
-        }
-
-        // Build writer configuration
-        let rolling_policies = self.build_rolling_policies();
-        let writer_config = ParquetWriterConfig::default()
-            .with_file_size_mb(self.config.sink.file_size_mb)
-            .with_row_group_size_bytes(self.config.sink.row_group_size_bytes)
-            .with_compression(self.config.sink.compression)
-            .with_rolling_policies(rolling_policies);
-
-        let writer = ParquetWriter::new(schema.clone(), writer_config);
-
-        // Initialize DLQ if configured
         let dlq = DeadLetterQueue::from_config(&self.config.error_handling)
             .await
             .context(DlqSnafu)?
