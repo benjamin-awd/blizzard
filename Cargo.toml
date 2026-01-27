@@ -1,6 +1,6 @@
 [package]
 name = "blizzard"
-version = "0.1.2"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.93"
 description = "A standalone tool for streaming NDJSON.gz files to Delta Lake with checkpoint-based recovery"
