@@ -5,6 +5,14 @@ description: How Blizzard's processing pipeline connects source, sink, and check
 
 Blizzard's pipeline connects sources, sinks, and checkpoints into a streaming data flow with backpressure and graceful shutdown. It uses a producer-consumer pattern to maximize parallelism by separating I/O-bound work from CPU-bound processing.
 
+The pipeline runs continuously, polling for new files at a configurable interval. This enables real-time ingestion where new files are automatically discovered and processed as they arrive.
+
+On each iteration:
+1. **Prepare**: Lists source files and compares against checkpoint to find pending work
+2. **Process**: Runs the full download → process → upload pipeline for pending files
+3. **Wait**: Sleeps for the configured poll interval before checking for new files
+
+
 ## Architecture Overview
 
 ```
@@ -144,9 +152,15 @@ sink:
 
 ## Graceful Shutdown
 
-The pipeline supports graceful shutdown via `CancellationToken`:
+The pipeline supports graceful shutdown via `CancellationToken`. Shutdown can occur at multiple points in the polling loop:
 
-1. **Signal received**: SIGINT/SIGTERM triggers shutdown
+- **During initialization**: Pipeline exits immediately
+- **During processing**: Current iteration completes, then exits
+- **During poll wait**: Wakes up and exits
+
+Shutdown sequence within a processing iteration:
+
+1. **Signal received**: SIGINT/SIGTERM/SIGQUIT triggers shutdown
 2. **Downloads stop**: No new downloads started
 3. **Processing drains**: Finish in-flight files
 4. **Final flush**: Close Parquet writer, upload remaining files
@@ -198,7 +212,9 @@ See [Error Handling](/reference/errors/) for details.
 | Component | File |
 |-----------|------|
 | Pipeline struct | `src/pipeline/mod.rs` |
+| Polling loop | `src/pipeline/mod.rs:253` |
+| Iteration prepare | `src/pipeline/mod.rs:590` |
+| Processing loop | `src/pipeline/mod.rs:320` |
 | Downloader task | `src/pipeline/tasks.rs:300` |
 | Uploader task | `src/pipeline/tasks.rs:97` |
-| Processing loop | `src/pipeline/mod.rs:254` |
 | Graceful shutdown | `src/pipeline/mod.rs:261` |
