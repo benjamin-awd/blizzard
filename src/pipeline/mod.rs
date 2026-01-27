@@ -19,7 +19,6 @@
 
 mod tasks;
 
-use deltalake::arrow::array::RecordBatch;
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::prelude::*;
 use std::sync::Arc;
@@ -34,7 +33,7 @@ use crate::dlq::DeadLetterQueue;
 use crate::emit;
 use crate::error::{
     DeltaSnafu, DlqSnafu, MaxFailuresExceededSnafu, ParquetSnafu, PipelineError,
-    PipelineStorageSnafu, ReaderSnafu, TaskJoinSnafu,
+    PipelineStorageSnafu, TaskJoinSnafu,
 };
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
@@ -47,12 +46,9 @@ use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig, RollingPolicy};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
 use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
 
-use tasks::{DownloadedFile, UploaderConfig, run_downloader, run_uploader};
-
-/// Future type for file processing operations.
-type ProcessFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<ProcessedFile, PipelineError>> + Send>,
->;
+use tasks::{
+    DownloadedFile, ProcessFuture, UploaderConfig, run_downloader, run_uploader, spawn_read_task,
+};
 
 /// Statistics about the pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -63,13 +59,6 @@ pub struct PipelineStats {
     pub parquet_files_written: usize,
     pub delta_commits: usize,
     pub checkpoints_saved: usize,
-}
-
-/// Result of processing a downloaded file.
-struct ProcessedFile {
-    path: String,
-    batches: Vec<RecordBatch>,
-    total_records: usize,
 }
 
 /// Result of a single processing iteration.
@@ -361,26 +350,6 @@ impl Pipeline {
         let mut util_timer = UtilizationTimer::new("processor");
         let mut shutdown_requested = false;
 
-        // Helper to spawn a read task (decompress + parse)
-        let spawn_read = |downloaded: DownloadedFile, reader: Arc<NdjsonReader>| {
-            let path = downloaded.path.clone();
-            let path_for_result = path.clone();
-            let task: ProcessFuture = Box::pin(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    reader.read(downloaded.compressed_data, downloaded.skip_records, &path)
-                })
-                .await
-                .context(TaskJoinSnafu)?
-                .context(ReaderSnafu)?;
-                Ok(ProcessedFile {
-                    path: path_for_result,
-                    batches: result.batches,
-                    total_records: result.total_records,
-                })
-            });
-            task
-        };
-
         loop {
             // Update utilization state: waiting if no processing tasks
             if processing.is_empty() {
@@ -414,7 +383,7 @@ impl Pipeline {
                             if processing.is_empty() {
                                 util_timer.stop_wait();
                             }
-                            processing.push(spawn_read(downloaded, reader.clone()));
+                            processing.push(spawn_read_task(downloaded, reader.clone()));
                             emit!(DecompressionQueueDepth {
                                 count: processing.len()
                             });
