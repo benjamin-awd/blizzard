@@ -16,10 +16,13 @@ pub use state::CheckpointState;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, error, info};
 
 use crate::emit;
+use crate::error::DeltaError;
 use crate::metrics::events::{CheckpointAge, SourceStateFiles};
+use crate::sink::FinishedFile;
+use crate::sink::delta::DeltaSink;
 use crate::source::SourceState;
 
 /// Consolidated checkpoint state protected by a single lock.
@@ -114,6 +117,74 @@ impl CheckpointCoordinator {
     pub async fn get_source_state(&self) -> SourceState {
         let state = self.state.lock().await;
         state.source_state.clone()
+    }
+
+    /// Restore checkpoint state from the Delta transaction log.
+    ///
+    /// This is the primary entry point for cold start recovery. It scans the
+    /// Delta log for embedded checkpoint state and restores it to the coordinator.
+    ///
+    /// Returns `true` if a checkpoint was recovered, `false` otherwise.
+    pub async fn restore_from_delta_log(
+        &self,
+        delta_sink: &mut DeltaSink,
+    ) -> Result<bool, DeltaError> {
+        if let Some((checkpoint, version)) = delta_sink.recover_checkpoint_from_log().await? {
+            info!(
+                "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
+                version,
+                checkpoint.delta_version,
+                checkpoint.source_state.files.len()
+            );
+            self.restore_from_state(checkpoint).await;
+            Ok(true)
+        } else {
+            info!("No checkpoint found in Delta log, starting fresh");
+            Ok(false)
+        }
+    }
+
+    /// Commit files to Delta Lake with an atomic checkpoint.
+    ///
+    /// This centralizes the checkpoint commit logic:
+    /// 1. Captures the current checkpoint state
+    /// 2. Commits files with the checkpoint atomically
+    /// 3. Updates the coordinator with the new delta version
+    /// 4. Marks the checkpoint as committed (resets timer)
+    ///
+    /// Returns the number of files committed (0 if files list was empty).
+    pub async fn commit_files(&self, delta_sink: &mut DeltaSink, files: &[FinishedFile]) -> usize {
+        if files.is_empty() {
+            return 0;
+        }
+
+        let count = files.len();
+
+        // Capture current checkpoint state
+        let checkpoint_state = self.capture_state().await;
+
+        // Commit with atomic checkpoint
+        match delta_sink
+            .commit_files_with_checkpoint(files, &checkpoint_state)
+            .await
+        {
+            Ok(Some(version)) => {
+                info!(
+                    "Committed {} files with checkpoint to Delta Lake, version {}",
+                    count, version
+                );
+                // Update coordinator with new delta version and mark checkpoint committed
+                self.update_delta_version(version).await;
+                self.mark_checkpoint_committed().await;
+            }
+            Ok(None) => {
+                debug!("No commit needed (duplicate files)");
+            }
+            Err(e) => {
+                error!("Failed to commit {} files to Delta: {}", count, e);
+            }
+        }
+        count
     }
 }
 
