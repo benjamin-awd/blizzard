@@ -132,6 +132,14 @@ pub enum DeltaError {
     /// Base64 decode error.
     #[snafu(display("Base64 decode error"))]
     Base64Decode { source: base64::DecodeError },
+
+    /// Failed to parse object store path.
+    #[snafu(display("Failed to parse path: {path}"))]
+    PathParse { path: String },
+
+    /// Checkpoint state corrupted (missing expected prefix after validation).
+    #[snafu(display("Checkpoint state corrupted: invalid app_id format"))]
+    CheckpointCorrupted,
 }
 
 // ============ Metrics Errors ============
@@ -158,6 +166,24 @@ pub enum ParquetError {
     Write {
         source: deltalake::parquet::errors::ParquetError,
     },
+
+    /// Failed to create Parquet writer.
+    #[snafu(display("Failed to create Parquet writer"))]
+    WriterCreate {
+        source: deltalake::parquet::errors::ParquetError,
+    },
+
+    /// Writer is not available (internal state error).
+    #[snafu(display("Parquet writer is not available"))]
+    WriterUnavailable,
+
+    /// Buffer lock error (mutex poisoned).
+    #[snafu(display("Buffer lock failed: mutex poisoned"))]
+    BufferLock,
+
+    /// Buffer has outstanding references and cannot be consumed.
+    #[snafu(display("Buffer has outstanding references"))]
+    BufferInUse,
 }
 
 // ============ DLQ Errors ============
