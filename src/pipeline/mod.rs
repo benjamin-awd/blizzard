@@ -441,12 +441,12 @@ impl Pipeline {
 
         // Wait for uploader to finish
         info!("Waiting for uploads to complete...");
-        let (delta_sink, files_uploaded, bytes_uploaded) = uploader.finish().await?;
+        let result = uploader.finish().await?;
         info!(
             "All uploads complete: {} files, {} bytes",
-            files_uploaded, bytes_uploaded
+            result.files_uploaded, result.bytes_uploaded
         );
-        self.stats.delta_commits += files_uploaded;
+        self.stats.delta_commits += result.files_uploaded;
 
         // Note: final checkpoint is committed atomically with the last file batch
         // in the uploader task
@@ -463,9 +463,9 @@ impl Pipeline {
 
         info!(
             "Iteration complete, Delta table version: {}",
-            delta_sink.version()
+            result.delta_sink.version()
         );
-        info!("Checkpoint version: {}", delta_sink.checkpoint_version());
+        info!("Checkpoint version: {}", result.delta_sink.checkpoint_version());
 
         if state.shutdown_requested {
             Ok(IterationResult::Shutdown)

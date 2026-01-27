@@ -26,11 +26,18 @@ use crate::storage::{StorageProvider, StorageProviderRef};
 /// Future type for upload operations.
 type UploadFuture = Pin<Box<dyn Future<Output = Result<UploadResult, StorageError>> + Send>>;
 
-/// Result of uploading a file.
+/// Result of uploading a single file.
 struct UploadResult {
     filename: String,
     size: usize,
     record_count: usize,
+}
+
+/// Result of the uploader task finalization.
+pub(in crate::pipeline) struct DeltaUploadResult {
+    pub delta_sink: DeltaSink,
+    pub files_uploaded: usize,
+    pub bytes_uploaded: usize,
 }
 
 /// Configuration for the uploader task.
@@ -44,7 +51,7 @@ struct UploaderConfig {
 /// Handle to the background uploader task.
 pub(in crate::pipeline) struct Uploader {
     pub tx: mpsc::Sender<FinishedFile>,
-    handle: JoinHandle<(DeltaSink, usize, usize)>,
+    handle: JoinHandle<DeltaUploadResult>,
 }
 
 impl Uploader {
@@ -83,7 +90,7 @@ impl Uploader {
     /// Finish uploading and wait for all uploads to complete.
     ///
     /// Returns the final DeltaSink state and upload statistics.
-    pub async fn finish(self) -> Result<(DeltaSink, usize, usize), PipelineError> {
+    pub async fn finish(self) -> Result<DeltaUploadResult, PipelineError> {
         drop(self.tx);
         self.handle.await.context(TaskJoinSnafu)
     }
@@ -100,7 +107,7 @@ impl Uploader {
         shutdown: CancellationToken,
         config: UploaderConfig,
         dlq: Option<Arc<DeadLetterQueue>>,
-    ) -> (DeltaSink, usize, usize) {
+    ) -> DeltaUploadResult {
         let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
 
         let mut active_uploads = 0;
@@ -257,7 +264,11 @@ impl Uploader {
             "Uploader finished: {} files, {} bytes",
             files_uploaded, bytes_uploaded
         );
-        (delta_sink, files_uploaded, bytes_uploaded)
+        DeltaUploadResult {
+            delta_sink,
+            files_uploaded,
+            bytes_uploaded,
+        }
     }
 }
 
