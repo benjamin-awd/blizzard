@@ -382,12 +382,14 @@ impl Pipeline {
                                     files_remaining -= 1;
                                     emit!(FileProcessed { status: FileStatus::Skipped });
                                 } else {
-                                    // Determine failure stage based on error type
+                                    // Determine failure stage based on error type.
+                                    // Note: With streaming decompression, gzip errors surface
+                                    // through the JSON reader and are classified as Parse failures.
+                                    // Only zstd decoder creation errors are caught as Decompress.
                                     let stage = match &e {
                                         PipelineError::Reader {
                                             source:
-                                                crate::error::ReaderError::GzipDecompression { .. }
-                                                | crate::error::ReaderError::ZstdDecompression { .. },
+                                                crate::error::ReaderError::ZstdDecompression { .. },
                                         } => FailureStage::Decompress,
                                         _ => FailureStage::Parse,
                                     };

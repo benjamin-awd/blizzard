@@ -85,14 +85,7 @@ pub enum ConfigError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ReaderError {
-    /// Gzip decompression failed.
-    #[snafu(display("Gzip decompression failed for {path}"))]
-    GzipDecompression {
-        source: std::io::Error,
-        path: String,
-    },
-
-    /// Zstd decompression failed.
+    /// Zstd decompression failed (during decoder creation).
     #[snafu(display("Zstd decompression failed for {path}"))]
     ZstdDecompression {
         source: std::io::Error,
@@ -103,13 +96,9 @@ pub enum ReaderError {
     #[snafu(display("Failed to build JSON decoder: {message}"))]
     DecoderBuild { message: String },
 
-    /// Failed to decode JSON.
+    /// Failed to decode JSON (includes streaming decompression errors).
     #[snafu(display("Failed to decode JSON for {path}: {message}"))]
     JsonDecode { path: String, message: String },
-
-    /// Failed to flush batch.
-    #[snafu(display("Failed to flush batch for {path}: {message}"))]
-    BatchFlush { path: String, message: String },
 }
 
 // ============ Delta Errors ============

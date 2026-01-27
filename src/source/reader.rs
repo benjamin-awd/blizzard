@@ -8,17 +8,14 @@ use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::arrow::json::ReaderBuilder;
 use snafu::prelude::*;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Cursor};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::debug;
 
 use crate::config::CompressionFormat;
 use crate::emit;
-use crate::error::{
-    BatchFlushSnafu, DecoderBuildSnafu, GzipDecompressionSnafu, JsonDecodeSnafu, ReaderError,
-    ZstdDecompressionSnafu,
-};
+use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError, ZstdDecompressionSnafu};
 use crate::metrics::events::{BytesRead, FileDecompressionCompleted};
 
 /// Configuration for the NDJSON reader.
@@ -63,9 +60,10 @@ impl NdjsonReader {
 
     /// Read compressed data and parse it into record batches.
     ///
-    /// This method:
-    /// 1. Decompresses the input data according to the configured compression format
-    /// 2. Parses the NDJSON content into Arrow RecordBatches
+    /// This method uses streaming decompression to avoid loading the entire
+    /// decompressed file into memory:
+    /// 1. Creates a streaming decompressor based on the configured compression format
+    /// 2. Parses NDJSON content into Arrow RecordBatches as data is decompressed
     /// 3. Optionally skips a number of records (for checkpoint recovery)
     ///
     /// # Arguments
@@ -83,42 +81,28 @@ impl NdjsonReader {
             bytes: compressed.len() as u64,
         });
 
-        // Decompress
-        let decompress_start = Instant::now();
-        let decompressed = match self.config.compression {
-            CompressionFormat::Gzip => {
-                let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
-                let mut buf = Vec::new();
-                decoder
-                    .read_to_end(&mut buf)
-                    .context(GzipDecompressionSnafu {
-                        path: path.to_string(),
-                    })?;
-                buf
-            }
-            CompressionFormat::Zstd => {
-                zstd::decode_all(&compressed[..]).context(ZstdDecompressionSnafu {
+        let start = Instant::now();
+        let compressed_len = compressed.len();
+
+        // Create a streaming reader based on compression format.
+        // This avoids loading the entire decompressed file into memory.
+        let reader: Box<dyn BufRead> = match self.config.compression {
+            CompressionFormat::Gzip => Box::new(BufReader::new(
+                flate2::read::GzDecoder::new(&compressed[..]),
+            )),
+            CompressionFormat::Zstd => Box::new(BufReader::new(
+                zstd::stream::Decoder::new(&compressed[..]).context(ZstdDecompressionSnafu {
                     path: path.to_string(),
-                })?
-            }
-            CompressionFormat::None => compressed.to_vec(),
+                })?,
+            )),
+            CompressionFormat::None => Box::new(Cursor::new(compressed)),
         };
-        emit!(FileDecompressionCompleted {
-            duration: decompress_start.elapsed()
-        });
 
-        debug!(
-            "Decompressed {} -> {} bytes for {}",
-            compressed.len(),
-            decompressed.len(),
-            path
-        );
-
-        // Parse JSON to batches
-        let mut decoder = ReaderBuilder::new(Arc::clone(&self.schema))
+        // Build streaming JSON reader that processes data as it's decompressed
+        let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
             .with_batch_size(self.config.batch_size)
             .with_strict_mode(false)
-            .build_decoder()
+            .build(reader)
             .map_err(|e| {
                 DecoderBuildSnafu {
                     message: e.to_string(),
@@ -126,15 +110,13 @@ impl NdjsonReader {
                 .build()
             })?;
 
-        // Decode and flush in interleaved fashion - decode() stops after batch_size records,
-        // so we must flush after each decode to get all records
-        let mut offset = 0;
         let mut batches = Vec::new();
         let mut total_records = 0;
         let mut records_to_skip = skip_records;
 
-        loop {
-            let consumed = decoder.decode(&decompressed[offset..]).map_err(|e| {
+        // Stream through batches as they're produced
+        for batch_result in json_reader {
+            let batch = batch_result.map_err(|e| {
                 JsonDecodeSnafu {
                     path: path.to_string(),
                     message: e.to_string(),
@@ -142,50 +124,33 @@ impl NdjsonReader {
                 .build()
             })?;
 
-            // Flush any accumulated records after each decode
-            if let Some(batch) = decoder.flush().map_err(|e| {
-                BatchFlushSnafu {
-                    path: path.to_string(),
-                    message: e.to_string(),
-                }
-                .build()
-            })? {
-                // Apply skip logic for checkpoint recovery
-                if records_to_skip > 0 {
-                    let batch_rows = batch.num_rows();
-                    if records_to_skip >= batch_rows {
-                        records_to_skip -= batch_rows;
-                    } else {
-                        // Partial skip
-                        let skip = records_to_skip;
-                        records_to_skip = 0;
-                        let sliced = batch.slice(skip, batch_rows - skip);
-                        total_records += sliced.num_rows();
-                        batches.push(sliced);
-                    }
+            // Apply skip logic for checkpoint recovery
+            if records_to_skip > 0 {
+                let batch_rows = batch.num_rows();
+                if records_to_skip >= batch_rows {
+                    records_to_skip -= batch_rows;
+                    continue;
                 } else {
-                    total_records += batch.num_rows();
-                    batches.push(batch);
+                    // Partial skip
+                    let skip = records_to_skip;
+                    records_to_skip = 0;
+                    let sliced = batch.slice(skip, batch_rows - skip);
+                    total_records += sliced.num_rows();
+                    batches.push(sliced);
                 }
+            } else {
+                total_records += batch.num_rows();
+                batches.push(batch);
             }
-
-            if consumed == 0 {
-                // No progress - check if remaining bytes are just whitespace
-                let remaining = &decompressed[offset..];
-                if !remaining.iter().all(|&b| b.is_ascii_whitespace()) {
-                    debug!(
-                        "Could not parse {} trailing bytes in {}",
-                        remaining.len(),
-                        path
-                    );
-                }
-                break;
-            }
-            offset += consumed;
         }
 
+        emit!(FileDecompressionCompleted {
+            duration: start.elapsed()
+        });
+
         debug!(
-            "Parsed {} batches ({} records) from {}",
+            "Streamed and parsed {} bytes -> {} batches ({} records) from {}",
+            compressed_len,
             batches.len(),
             total_records,
             path
