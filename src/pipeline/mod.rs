@@ -555,6 +555,11 @@ impl Pipeline {
                 .restore_from_delta_log(&mut delta_sink)
                 .await
                 .context(DeltaSnafu)?;
+
+            // Compact checkpoint state to remove finished files outside partition window
+            if let Some(prefixes) = self.generate_date_prefixes() {
+                self.checkpoint_coordinator.compact_state(&prefixes).await;
+            }
         } else {
             info!("Preparing next iteration (using in-memory checkpoint state)");
         }
