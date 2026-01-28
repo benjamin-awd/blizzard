@@ -34,7 +34,9 @@ use crate::metrics::events::{
 use crate::sink::delta::DeltaSink;
 use crate::sink::parquet::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig};
-use crate::storage::{StorageProvider, StorageProviderRef, list_ndjson_files};
+use crate::storage::{
+    DatePrefixGenerator, StorageProvider, StorageProviderRef, list_ndjson_files_with_prefixes,
+};
 
 use tasks::{DownloadedFile, Downloader, ProcessFuture, ProcessedFile, Uploader, spawn_read_task};
 
@@ -599,10 +601,23 @@ impl Pipeline {
     }
 
     /// List source NDJSON files.
+    ///
+    /// If a partition filter is configured, only lists files under recent
+    /// date prefixes. Otherwise, lists all files in the source path.
     async fn list_source_files(&self) -> Result<Vec<String>, PipelineError> {
-        list_ndjson_files(&self.source_storage)
+        let prefixes = self.generate_date_prefixes();
+        list_ndjson_files_with_prefixes(&self.source_storage, prefixes.as_deref())
             .await
             .context(PipelineStorageSnafu)
+    }
+
+    /// Generate date prefixes based on partition filter configuration.
+    ///
+    /// Returns `None` if no partition filter is configured.
+    fn generate_date_prefixes(&self) -> Option<Vec<String>> {
+        let filter = self.config.source.partition_filter.as_ref()?;
+        let generator = DatePrefixGenerator::new(filter.prefix_template.clone(), filter.lookback);
+        Some(generator.generate_prefixes())
     }
 }
 
