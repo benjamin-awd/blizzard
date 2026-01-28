@@ -73,6 +73,14 @@ impl SourceState {
     /// - Finished files are only retained if they match at least one prefix
     ///
     /// Returns the number of files removed.
+    ///
+    /// # Warning
+    ///
+    /// Compacted files lose their "finished" status. If you later widen or disable
+    /// the partition filter, those files may reappear in listings and be reprocessed.
+    /// Only change the partition filter configuration if you're okay with potential
+    /// duplicate processing of old files, or if you're certain those files no longer
+    /// exist in the source location.
     pub fn compact(&mut self, prefixes: &[String]) -> usize {
         let before = self.files.len();
 
