@@ -26,7 +26,7 @@ use crate::emit;
 use crate::error::{
     DeltaSnafu, DlqSnafu, ParquetSnafu, PipelineError, PipelineStorageSnafu, StorageError,
 };
-use crate::metrics::{MemoryTracker, UtilizationTimer, log_memory_stats};
+use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FailureStage, FileProcessed,
     FileStatus, PendingBatches, RecordsProcessed,
@@ -259,17 +259,11 @@ impl Pipeline {
     /// The pipeline continuously polls for new files at the configured interval.
     pub async fn run(&mut self) -> Result<PipelineStats, PipelineError> {
         info!("Starting pipeline");
-        log_memory_stats("pipeline_start");
 
         let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
         let mut first_iteration = true;
-        let mut iteration_count = 0u64;
-        // Log memory every 50 MiB change
-        let mut memory_tracker = MemoryTracker::new(50);
 
         loop {
-            iteration_count += 1;
-            log_memory_stats(&format!("iteration_{}_start", iteration_count));
             // Race initialization against shutdown signal
             let shutdown = self.shutdown.clone();
             let state = tokio::select! {
@@ -294,9 +288,6 @@ impl Pipeline {
                     IterationResult::NoFiles
                 }
             };
-
-            // Log memory after each iteration
-            memory_tracker.maybe_log(&format!("iteration_{}_end", iteration_count));
 
             // Exit on shutdown, otherwise wait and poll again
             match result {
