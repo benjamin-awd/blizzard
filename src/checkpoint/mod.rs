@@ -144,6 +144,34 @@ impl CheckpointCoordinator {
         }
     }
 
+    /// Compact the checkpoint state by removing finished files outside the given prefixes.
+    ///
+    /// This should be called after `restore_from_delta_log` when using partition filtering.
+    /// It removes finished files that are outside the partition filter window, reducing
+    /// memory usage significantly for long-running pipelines.
+    ///
+    /// Returns the number of files removed.
+    pub async fn compact_state(&self, prefixes: &[String]) -> usize {
+        let mut state = self.state.lock().await;
+        let before = state.source_state.files.len();
+        let removed = state.source_state.compact(prefixes);
+
+        if removed > 0 {
+            info!(
+                "Compacted checkpoint state: removed {} finished files outside partition window ({} -> {} files)",
+                removed,
+                before,
+                state.source_state.files.len()
+            );
+        }
+
+        emit!(SourceStateFiles {
+            count: state.source_state.files.len()
+        });
+
+        removed
+    }
+
     /// Commit files to Delta Lake with an atomic checkpoint.
     ///
     /// This centralizes the checkpoint commit logic:
