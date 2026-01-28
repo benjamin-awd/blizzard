@@ -574,6 +574,7 @@ schema:
                 batch_size: 1000,
                 max_concurrent_files: 1,
                 poll_interval_secs: 60, // Long interval - we'll cancel before it elapses
+                partition_filter: None,
             },
             sink: blizzard::config::SinkConfig {
                 path: sink_dir.path().to_str().unwrap().to_string(),
@@ -642,6 +643,7 @@ schema:
                 batch_size: 1000,
                 max_concurrent_files: 1,
                 poll_interval_secs: 1, // Short interval for testing
+                partition_filter: None,
             },
             sink: blizzard::config::SinkConfig {
                 path: sink_dir.path().to_str().unwrap().to_string(),

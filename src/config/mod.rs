@@ -106,6 +106,38 @@ pub struct SourceConfig {
     /// The pipeline continuously checks for new files at this interval.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
+
+    /// Optional partition filter to limit file listing to recent date prefixes.
+    /// When configured, only lists files under matching date partitions instead
+    /// of scanning the entire bucket.
+    #[serde(default)]
+    pub partition_filter: Option<PartitionFilterConfig>,
+}
+
+/// Configuration for date-based partition filtering.
+///
+/// Limits file listing to recent date prefixes, dramatically reducing
+/// the number of files that need to be listed in large buckets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionFilterConfig {
+    /// Template using strftime codes: %Y (year), %m (month), %d (day), %H (hour).
+    /// Example: "date=%Y-%m-%d" or "date=%Y-%m-%d/hour=%H"
+    pub prefix_template: String,
+
+    /// Number of time units to look back (default: 1).
+    ///
+    /// The unit depends on the template:
+    /// - If template contains `%H`: lookback is in hours
+    /// - Otherwise: lookback is in days
+    ///
+    /// With lookback=1 and a day template, lists today + 1 day back (2 total).
+    /// With lookback=1 and an hour template, lists current hour + 1 hour back (2 total).
+    #[serde(default = "default_lookback")]
+    pub lookback: u32,
+}
+
+fn default_lookback() -> u32 {
+    1
 }
 
 fn default_batch_size() -> usize {
@@ -364,6 +396,7 @@ mod tests {
                 batch_size: 8192,
                 max_concurrent_files: 4,
                 poll_interval_secs: 60,
+                partition_filter: None,
             },
             sink: SinkConfig {
                 path: "s3://bucket/output/table".to_string(),

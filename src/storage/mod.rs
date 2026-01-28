@@ -6,7 +6,10 @@
 mod azure;
 mod gcs;
 mod local;
+mod prefix;
 mod s3;
+
+pub use prefix::DatePrefixGenerator;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::ready};
@@ -387,6 +390,50 @@ impl StorageProvider {
         }
     }
 
+    /// List files under a specific prefix (relative to configured base prefix).
+    ///
+    /// The prefix is appended to the configured key prefix.
+    /// Returns paths relative to the configured base prefix.
+    pub async fn list_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<impl Stream<Item = Result<Path, object_store::Error>> + '_, StorageError> {
+        emit!(StorageRequest {
+            operation: StorageOperation::List,
+            status: RequestStatus::Success,
+        });
+
+        // Combine the configured key prefix with the additional prefix
+        let full_prefix: Path = match self.config.key() {
+            Some(key) => key.parts().chain(Path::from(prefix).parts()).collect(),
+            None => Path::from(prefix),
+        };
+
+        let key_part_count = self
+            .config
+            .key()
+            .map(|key| key.parts().count())
+            .unwrap_or_default();
+
+        let list = self
+            .object_store
+            .list(Some(&full_prefix))
+            .filter_map(move |meta| {
+                let result = match meta {
+                    Ok(metadata) => {
+                        // Strip the base prefix from the path so callers get relative paths
+                        let relative_path: Path =
+                            metadata.location.parts().skip(key_part_count).collect();
+                        Some(Ok(relative_path))
+                    }
+                    Err(err) => Some(Err(err)),
+                };
+                ready(result)
+            });
+
+        Ok(list)
+    }
+
     /// Get storage options for external integrations (e.g., Delta Lake).
     pub fn storage_options(&self) -> &HashMap<String, String> {
         &self.storage_options
@@ -585,6 +632,83 @@ pub async fn list_ndjson_files(storage: &StorageProvider) -> Result<Vec<String>,
     files.sort();
 
     Ok(files)
+}
+
+/// List NDJSON.gz files with optional prefix filtering.
+///
+/// When prefixes are provided, only lists files under those prefixes.
+/// This is much more efficient for partitioned data where only recent
+/// partitions need to be processed.
+///
+/// Results are deduplicated and sorted for consistent ordering.
+pub async fn list_ndjson_files_with_prefixes(
+    storage: &StorageProvider,
+    prefixes: Option<&[String]>,
+) -> Result<Vec<String>, StorageError> {
+    match prefixes {
+        None => list_ndjson_files(storage).await,
+        Some([]) => list_ndjson_files(storage).await,
+        Some(prefixes) => {
+            let mut files = Vec::new();
+            let mut total_listed = 0;
+
+            tracing::info!(
+                "Listing files under {} date prefixes: {:?}",
+                prefixes.len(),
+                if prefixes.len() <= 5 {
+                    prefixes.to_vec()
+                } else {
+                    let mut preview = prefixes[..3].to_vec();
+                    preview.push(format!("... and {} more", prefixes.len() - 3));
+                    preview
+                }
+            );
+
+            for prefix in prefixes {
+                let stream_result = storage.list_with_prefix(prefix).await;
+
+                // Handle missing prefixes gracefully - they just return empty results
+                let mut stream = match stream_result {
+                    Ok(s) => s,
+                    Err(e) if e.is_not_found() => {
+                        tracing::debug!("Prefix not found (skipping): {}", prefix);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(path) => {
+                            total_listed += 1;
+                            if path.as_ref().ends_with(".ndjson.gz") {
+                                files.push(path.to_string());
+                            }
+                        }
+                        Err(e) => {
+                            // Not found errors during listing are fine (empty prefix)
+                            if !e.to_string().contains("not found") {
+                                return Err(StorageError::ObjectStore { source: e });
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "Listed {} total files under {} prefixes, {} are .ndjson.gz",
+                total_listed,
+                prefixes.len(),
+                files.len()
+            );
+
+            // Sort and deduplicate (prefixes might overlap at boundaries)
+            files.sort();
+            files.dedup();
+
+            Ok(files)
+        }
+    }
 }
 
 #[cfg(test)]
