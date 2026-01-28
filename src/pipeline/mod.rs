@@ -198,7 +198,8 @@ impl ProcessingState {
 /// Initialized pipeline state ready for processing.
 struct InitializedState {
     pending_files: Vec<String>,
-    source_state: crate::source::SourceState,
+    /// Skip counts for partially processed files (crash recovery). Usually empty.
+    skip_counts: std::collections::HashMap<String, usize>,
     schema: Arc<deltalake::arrow::datatypes::Schema>,
     writer: ParquetWriter,
     delta_sink: DeltaSink,
@@ -333,7 +334,7 @@ impl Pipeline {
         // Unpack initialized state
         let InitializedState {
             pending_files,
-            source_state,
+            skip_counts,
             schema,
             mut writer,
             delta_sink,
@@ -364,10 +365,10 @@ impl Pipeline {
         // Consumer: Process downloaded files with parallel decompression
         let files_count = pending_files.len();
 
-        // Spawn background downloader task (consumes pending_files and source_state)
+        // Spawn background downloader task
         let mut downloader = Downloader::spawn(
             pending_files,
-            source_state,
+            skip_counts,
             self.source_storage.clone(),
             self.shutdown.clone(),
             max_concurrent,
@@ -555,13 +556,15 @@ impl Pipeline {
                 .restore_from_delta_log(&mut delta_sink)
                 .await
                 .context(DeltaSnafu)?;
-
-            // Compact checkpoint state to remove finished files outside partition window
-            if let Some(prefixes) = self.generate_date_prefixes() {
-                self.checkpoint_coordinator.compact_state(&prefixes).await;
-            }
         } else {
             info!("Preparing next iteration (using in-memory checkpoint state)");
+        }
+
+        // Compact checkpoint state to remove finished files outside partition window.
+        // This runs every iteration (not just cold start) to prevent unbounded state growth
+        // as the partition window slides forward over time.
+        if let Some(prefixes) = self.generate_date_prefixes() {
+            self.checkpoint_coordinator.compact_state(&prefixes).await;
         }
 
         let source_files = self.list_source_files().await?;
@@ -577,6 +580,18 @@ impl Pipeline {
         if pending_files.is_empty() {
             return Ok(None);
         }
+
+        // Extract only skip counts for partially processed files (crash recovery).
+        // This is usually empty - only populated if we crashed mid-file.
+        // Avoids passing the full SourceState (with all 200K+ finished files) to the Downloader.
+        let skip_counts: std::collections::HashMap<String, usize> = pending_files
+            .iter()
+            .filter_map(|path| {
+                let skip = source_state.records_to_skip(path);
+                if skip > 0 { Some((path.clone(), skip)) } else { None }
+            })
+            .collect();
+        drop(source_state); // Free the cloned SourceState
 
         let rolling_policies = self.config.sink.rolling_policies();
         let writer_config = ParquetWriterConfig::default()
@@ -594,7 +609,7 @@ impl Pipeline {
 
         Ok(Some(InitializedState {
             pending_files,
-            source_state,
+            skip_counts,
             schema,
             writer,
             delta_sink,
