@@ -10,11 +10,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use std::collections::HashMap;
+
 use crate::emit;
 use crate::error::StorageError;
 use crate::metrics::UtilizationTimer;
 use crate::metrics::events::{ActiveDownloads, FileDownloadCompleted, RecoveredRecords};
-use crate::source::SourceState;
 use crate::storage::StorageProviderRef;
 
 /// Future type for download operations.
@@ -35,9 +36,12 @@ pub(in crate::pipeline) struct Downloader {
 
 impl Downloader {
     /// Spawn the downloader task.
+    ///
+    /// `skip_counts` contains the number of records to skip for partially
+    /// processed files (from crash recovery). Most files won't have an entry.
     pub fn spawn(
         pending_files: Vec<String>,
-        source_state: SourceState,
+        skip_counts: HashMap<String, usize>,
         storage: StorageProviderRef,
         shutdown: CancellationToken,
         max_concurrent: usize,
@@ -46,7 +50,7 @@ impl Downloader {
 
         let handle = tokio::spawn(Self::run(
             pending_files,
-            source_state,
+            skip_counts,
             storage,
             tx,
             shutdown,
@@ -65,7 +69,7 @@ impl Downloader {
     /// Run the downloader task that manages concurrent file downloads.
     async fn run(
         pending_files: Vec<String>,
-        source_state: SourceState,
+        skip_counts: HashMap<String, usize>,
         storage: StorageProviderRef,
         download_tx: mpsc::Sender<Result<DownloadedFile, StorageError>>,
         shutdown: CancellationToken,
@@ -79,7 +83,7 @@ impl Downloader {
 
         // Start initial downloads
         for file_path in pending_iter.by_ref().take(max_concurrent) {
-            let skip = source_state.records_to_skip(&file_path);
+            let skip = skip_counts.get(&file_path).copied().unwrap_or(0);
             if skip > 0 {
                 emit!(RecoveredRecords { count: skip as u64 });
             }
@@ -146,7 +150,7 @@ impl Downloader {
 
             // Start next download if available
             if let Some(next_file) = pending_iter.next() {
-                let skip = source_state.records_to_skip(&next_file);
+                let skip = skip_counts.get(&next_file).copied().unwrap_or(0);
                 if skip > 0 {
                     emit!(RecoveredRecords { count: skip as u64 });
                 }
