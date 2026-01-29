@@ -6,7 +6,7 @@
 //!
 //! Based on delta-rs patterns from `crates/core/src/operations/write/mod.rs`.
 
-use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,9 +42,7 @@ pub struct SchemaComparison {
 impl SchemaComparison {
     /// Check if the schemas are identical.
     pub fn is_identical(&self) -> bool {
-        self.new_fields.is_empty()
-            && self.missing_fields.is_empty()
-            && self.type_changes.is_empty()
+        self.new_fields.is_empty() && self.missing_fields.is_empty() && self.type_changes.is_empty()
     }
 
     /// Check if there are any new required (non-nullable) fields.
@@ -136,10 +134,8 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
 /// - Nested types (List, Struct): recursively checks inner types
 fn is_type_widening(from: &DataType, to: &DataType) -> bool {
     // Handle timestamp precision coercion (Delta Lake requires microsecond precision)
-    if let (
-        DataType::Timestamp(from_unit, from_tz),
-        DataType::Timestamp(to_unit, to_tz),
-    ) = (from, to)
+    if let (DataType::Timestamp(from_unit, from_tz), DataType::Timestamp(to_unit, to_tz)) =
+        (from, to)
     {
         // Timezone must match (or both be None)
         if from_tz != to_tz {
@@ -202,6 +198,95 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
             // Date widening
             | (DataType::Date32, DataType::Date64)
     )
+}
+
+/// Coerce an Arrow field to be Delta Lake compatible.
+///
+/// This function transforms field types that are not natively supported by Delta Lake
+/// into compatible types. Specifically:
+///
+/// - Timestamp precision is coerced to microseconds (Delta Lake requirement)
+/// - Nested types (List, LargeList, Struct) are recursively processed
+///
+/// This is useful when creating tables from parquet files that may have
+/// nanosecond or millisecond timestamps.
+pub fn coerce_field(field: FieldRef) -> FieldRef {
+    match field.data_type() {
+        // Coerce timestamp precision to microseconds
+        DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Millisecond, tz) => {
+            Arc::new(Field::new(
+                field.name(),
+                DataType::Timestamp(TimeUnit::Microsecond, tz.clone()),
+                field.is_nullable(),
+            ))
+        }
+        // Recursively coerce List inner types
+        DataType::List(inner_field) => {
+            let coerced_inner = coerce_field(inner_field.clone());
+            if Arc::ptr_eq(&coerced_inner, inner_field) {
+                field
+            } else {
+                Arc::new(Field::new(
+                    field.name(),
+                    DataType::List(coerced_inner),
+                    field.is_nullable(),
+                ))
+            }
+        }
+        // Recursively coerce LargeList inner types
+        DataType::LargeList(inner_field) => {
+            let coerced_inner = coerce_field(inner_field.clone());
+            if Arc::ptr_eq(&coerced_inner, inner_field) {
+                field
+            } else {
+                Arc::new(Field::new(
+                    field.name(),
+                    DataType::LargeList(coerced_inner),
+                    field.is_nullable(),
+                ))
+            }
+        }
+        // Recursively coerce Struct field types
+        DataType::Struct(fields) => {
+            let coerced_fields: Vec<FieldRef> =
+                fields.iter().map(|f| coerce_field(f.clone())).collect();
+
+            // Check if any field was actually coerced
+            let any_changed = fields
+                .iter()
+                .zip(coerced_fields.iter())
+                .any(|(orig, coerced)| !Arc::ptr_eq(orig, coerced));
+
+            if any_changed {
+                Arc::new(Field::new(
+                    field.name(),
+                    DataType::Struct(coerced_fields.into()),
+                    field.is_nullable(),
+                ))
+            } else {
+                field
+            }
+        }
+        // All other types pass through unchanged
+        _ => field,
+    }
+}
+
+/// Coerce an entire schema to be Delta Lake compatible.
+///
+/// Applies [`coerce_field`] to all fields in the schema, converting
+/// incompatible types (like nanosecond timestamps) to Delta-compatible types.
+pub fn coerce_schema(schema: &Schema) -> SchemaRef {
+    let coerced_fields: Vec<FieldRef> = schema
+        .fields()
+        .iter()
+        .map(|f| coerce_field(f.clone()))
+        .collect();
+
+    Arc::new(Schema::new_with_metadata(
+        coerced_fields,
+        schema.metadata().clone(),
+    ))
 }
 
 /// Merge a table schema with an incoming schema.
@@ -647,8 +732,7 @@ mod tests {
             ("email", DataType::Utf8, true),
         ]);
 
-        let result =
-            validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Strict);
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Strict);
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -665,8 +749,7 @@ mod tests {
             ("email", DataType::Utf8, true),
         ]);
 
-        let result =
-            validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
 
         assert!(result.is_ok());
         match result.unwrap() {
@@ -688,8 +771,7 @@ mod tests {
             // missing "name" field - allowed, filled with NULL on read
         ]);
 
-        let result =
-            validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
 
         assert!(result.is_ok());
         match result.unwrap() {
@@ -706,8 +788,7 @@ mod tests {
             ("different", DataType::Float64, true),
         ]);
 
-        let result =
-            validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Overwrite);
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Overwrite);
 
         assert!(result.is_ok());
         match result.unwrap() {
@@ -853,16 +934,12 @@ mod tests {
 
         let table = make_schema(vec![(
             "meta",
-            DataType::Struct(
-                vec![Arc::new(Field::new("id", DataType::Int32, true))].into(),
-            ),
+            DataType::Struct(vec![Arc::new(Field::new("id", DataType::Int32, true))].into()),
             true,
         )]);
         let incoming = make_schema(vec![(
             "meta",
-            DataType::Struct(
-                vec![Arc::new(Field::new("user_id", DataType::Int32, true))].into(),
-            ),
+            DataType::Struct(vec![Arc::new(Field::new("user_id", DataType::Int32, true))].into()),
             true,
         )]);
 
@@ -913,5 +990,181 @@ mod tests {
 
         assert!(comparison.is_compatible);
         assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_coerce_field_timestamp_nanosecond() {
+        let field = Arc::new(Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        ));
+
+        let coerced = coerce_field(field);
+
+        assert_eq!(
+            coerced.data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(coerced.name(), "ts");
+        assert!(coerced.is_nullable());
+    }
+
+    #[test]
+    fn test_coerce_field_timestamp_millisecond() {
+        let field = Arc::new(Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            false,
+        ));
+
+        let coerced = coerce_field(field);
+
+        assert_eq!(
+            coerced.data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+        assert!(!coerced.is_nullable());
+    }
+
+    #[test]
+    fn test_coerce_field_timestamp_microsecond_unchanged() {
+        let field = Arc::new(Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ));
+
+        let coerced = coerce_field(field.clone());
+
+        // Should return the same Arc (no change needed)
+        assert!(Arc::ptr_eq(&field, &coerced));
+    }
+
+    #[test]
+    fn test_coerce_field_non_timestamp_unchanged() {
+        let field = Arc::new(Field::new("id", DataType::Int64, false));
+
+        let coerced = coerce_field(field.clone());
+
+        assert!(Arc::ptr_eq(&field, &coerced));
+    }
+
+    #[test]
+    fn test_coerce_field_list_with_timestamp() {
+        let field = Arc::new(Field::new(
+            "timestamps",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ))),
+            true,
+        ));
+
+        let coerced = coerce_field(field);
+
+        match coerced.data_type() {
+            DataType::List(inner) => {
+                assert_eq!(
+                    inner.data_type(),
+                    &DataType::Timestamp(TimeUnit::Microsecond, None)
+                );
+            }
+            other => panic!("Expected List type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_coerce_field_struct_with_timestamp() {
+        let field = Arc::new(Field::new(
+            "meta",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new(
+                        "created_at",
+                        DataType::Timestamp(TimeUnit::Nanosecond, None),
+                        true,
+                    )),
+                    Arc::new(Field::new("id", DataType::Int32, true)),
+                ]
+                .into(),
+            ),
+            true,
+        ));
+
+        let coerced = coerce_field(field);
+
+        match coerced.data_type() {
+            DataType::Struct(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(
+                    fields[0].data_type(),
+                    &DataType::Timestamp(TimeUnit::Microsecond, None)
+                );
+                assert_eq!(fields[1].data_type(), &DataType::Int32);
+            }
+            other => panic!("Expected Struct type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_coerce_schema() {
+        let schema = Schema::new(vec![
+            Field::new(
+                "ts_ns",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_us",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("id", DataType::Int64, false),
+        ]);
+
+        let coerced = coerce_schema(&schema);
+
+        assert_eq!(coerced.fields().len(), 4);
+        assert_eq!(
+            coerced.field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(
+            coerced.field(1).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(
+            coerced.field(2).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(coerced.field(3).data_type(), &DataType::Int64);
+    }
+
+    #[test]
+    fn test_coerce_schema_preserves_metadata() {
+        use std::collections::HashMap;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("key".to_string(), "value".to_string());
+
+        let schema = Schema::new_with_metadata(
+            vec![Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            )],
+            metadata.clone(),
+        );
+
+        let coerced = coerce_schema(&schema);
+
+        assert_eq!(coerced.metadata(), &metadata);
     }
 }

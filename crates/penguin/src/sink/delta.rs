@@ -211,7 +211,10 @@ impl DeltaSink {
                 Ok(())
             }
             EvolutionAction::Overwrite { new_schema } => {
-                warn!("Overwriting schema with {} fields", new_schema.fields().len());
+                warn!(
+                    "Overwriting schema with {} fields",
+                    new_schema.fields().len()
+                );
                 self.apply_schema_change(&new_schema).await?;
                 self.cached_schema = Some(new_schema);
                 Ok(())
@@ -223,8 +226,8 @@ impl DeltaSink {
     ///
     /// Uses Delta Lake's metadata action to update the schema.
     async fn apply_schema_change(&mut self, new_schema: &Schema) -> Result<(), DeltaError> {
-        use deltalake::kernel::transaction::CommitBuilder;
         use deltalake::kernel::MetadataExt;
+        use deltalake::kernel::transaction::CommitBuilder;
 
         // Convert Arrow schema to Delta schema
         let delta_schema = arrow_schema_to_delta(new_schema)?;
