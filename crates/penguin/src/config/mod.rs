@@ -14,13 +14,13 @@ fn default_poll_interval() -> u64 {
     10
 }
 
-/// Configuration for the Delta Lake sink.
+/// Configuration for the source Delta table.
 ///
 /// The staging directory is derived from the table URI: `{table_uri}/_staging/`
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SinkConfig {
+pub struct SourceConfig {
     /// URI of the Delta Lake table.
-    /// Staging is derived as `{table_uri}/_staging/`
+    /// Staging metadata is read from `{table_uri}/_staging/`
     pub table_uri: String,
     /// Poll interval in seconds for checking new files.
     #[serde(default = "default_poll_interval")]
@@ -71,8 +71,8 @@ fn default_min_multipart_size_mb() -> usize {
 /// Main configuration for penguin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Delta Lake sink configuration (includes table URI from which staging is derived).
-    pub sink: SinkConfig,
+    /// Source configuration (Delta table URI from which staging metadata is read).
+    pub source: SourceConfig,
     /// Metrics configuration.
     #[serde(default)]
     pub metrics: MetricsConfig,
@@ -108,7 +108,7 @@ impl Config {
 
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.sink.table_uri.is_empty() {
+        if self.source.table_uri.is_empty() {
             return Err(ConfigError::EmptyTableUri);
         }
         Ok(())

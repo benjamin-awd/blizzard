@@ -67,9 +67,9 @@ pub enum CompressionFormat {
     None,
 }
 
-/// Configuration for the output Delta table.
+/// Configuration for the sink Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputConfig {
+pub struct SinkConfig {
     /// URI of the Delta table (supports S3, GCS, Azure, local).
     /// Parquet files are written directly to {table_uri}/{partition}/
     /// Coordination metadata is written to {table_uri}/_staging/pending/
@@ -174,8 +174,8 @@ impl SchemaConfig {
 pub struct Config {
     /// Source configuration.
     pub source: SourceConfig,
-    /// Output configuration.
-    pub output: OutputConfig,
+    /// Sink configuration.
+    pub sink: SinkConfig,
     /// Schema configuration.
     pub schema: SchemaConfig,
     /// Metrics configuration.
@@ -219,7 +219,7 @@ impl Config {
         if self.source.path.is_empty() {
             return Err(ConfigError::EmptySourcePath);
         }
-        if self.output.table_uri.is_empty() {
+        if self.sink.table_uri.is_empty() {
             return Err(ConfigError::EmptyTableUri);
         }
         if self.schema.fields.is_empty() {

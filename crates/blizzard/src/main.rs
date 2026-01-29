@@ -51,7 +51,7 @@ async fn main() -> ExitCode {
 
     info!("Starting blizzard file loader");
     info!("  Source: {}", config.source.path);
-    info!("  Table URI: {}", config.output.table_uri);
+    info!("  Sink: {}", config.sink.table_uri);
 
     match run_pipeline(config).await {
         Ok(stats) => {

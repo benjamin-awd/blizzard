@@ -50,7 +50,7 @@ async fn main() -> ExitCode {
     };
 
     info!("Starting penguin delta checkpointer");
-    info!("  Table URI: {}", config.sink.table_uri);
+    info!("  Source: {}", config.source.table_uri);
 
     match run_pipeline(config).await {
         Ok(stats) => {

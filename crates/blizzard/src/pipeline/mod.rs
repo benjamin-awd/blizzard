@@ -102,8 +102,8 @@ impl BlizzardProcessor {
 
         // Create staging writer (writes directly to table directory)
         let staging_writer = StagingWriter::new(
-            &config.output.table_uri,
-            config.output.storage_options.clone(),
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
         )
         .await?;
 
@@ -142,7 +142,7 @@ impl BlizzardProcessor {
     /// Extract partition values from a source path.
     fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
         let mut values = HashMap::new();
-        for key in &self.config.output.partition_by {
+        for key in &self.config.sink.partition_by {
             // Look for key=value patterns in the path
             let pattern = format!("{}=", key);
             if let Some(idx) = path.find(&pattern) {
@@ -213,9 +213,9 @@ impl PollingProcessor for BlizzardProcessor {
 
         // Create Parquet writer
         let writer_config = ParquetWriterConfig::default()
-            .with_file_size_mb(self.config.output.file_size_mb)
-            .with_row_group_size_bytes(self.config.output.row_group_size_bytes)
-            .with_compression(self.config.output.compression);
+            .with_file_size_mb(self.config.sink.file_size_mb)
+            .with_row_group_size_bytes(self.config.sink.row_group_size_bytes)
+            .with_compression(self.config.sink.compression);
         let mut parquet_writer =
             ParquetWriter::new(self.config.schema.to_arrow_schema(), writer_config)?;
 
