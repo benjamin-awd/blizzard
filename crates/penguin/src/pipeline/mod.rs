@@ -74,10 +74,12 @@ struct PenguinProcessor {
 impl PenguinProcessor {
     async fn new(config: Config) -> Result<Self, PipelineError> {
         // Create staging reader (reads from {table_uri}/_staging/)
-        let staging_reader =
-            StagingReader::new(&config.source.table_uri, config.source.storage_options.clone())
-                .await
-                .context(StorageSnafu)?;
+        let staging_reader = StagingReader::new(
+            &config.source.table_uri,
+            config.source.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
         // Create sink storage provider (same URI, parquet files already there)
         let sink_storage = StorageProvider::for_url_with_options(
