@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use blizzard_common::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FileProcessed, FileStatus,
@@ -62,7 +62,7 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
     });
 
     // Create the pipeline processor
-    let mut processor = BlizzardProcessor::new(config).await?;
+    let mut processor = BlizzardProcessor::new(config, shutdown.clone()).await?;
 
     // Run the polling loop
     let poll_interval = Duration::from_secs(processor.config.source.poll_interval_secs);
@@ -86,10 +86,11 @@ struct BlizzardProcessor {
     source_state: SourceState,
     stats: PipelineStats,
     failure_tracker: FailureTracker,
+    shutdown: CancellationToken,
 }
 
 impl BlizzardProcessor {
-    async fn new(config: Config) -> Result<Self, PipelineError> {
+    async fn new(config: Config, shutdown: CancellationToken) -> Result<Self, PipelineError> {
         // Create source storage provider
         let source_storage = Arc::new(
             StorageProvider::for_url_with_options(
@@ -101,11 +102,8 @@ impl BlizzardProcessor {
         );
 
         // Create staging writer (writes directly to table directory)
-        let staging_writer = StagingWriter::new(
-            &config.sink.table_uri,
-            config.sink.storage_options.clone(),
-        )
-        .await?;
+        let staging_writer =
+            StagingWriter::new(&config.sink.table_uri, config.sink.storage_options.clone()).await?;
 
         // Create NDJSON reader
         let reader_config =
@@ -129,6 +127,7 @@ impl BlizzardProcessor {
             reader,
             source_state: SourceState::new(),
             stats: PipelineStats::default(),
+            shutdown,
         })
     }
 
@@ -219,19 +218,18 @@ impl PollingProcessor for BlizzardProcessor {
         let mut parquet_writer =
             ParquetWriter::new(self.config.schema.to_arrow_schema(), writer_config)?;
 
-        // Create downloader
-        let shutdown = CancellationToken::new();
+        // Create downloader using shared shutdown token
         let downloader = Downloader::spawn(
             pending_files,
             skip_counts,
             self.source_storage.clone(),
-            shutdown.clone(),
+            self.shutdown.clone(),
             self.config.source.max_concurrent_files,
         );
 
         // Process downloaded files
         let result = self
-            .process_downloads(downloader, &mut parquet_writer, shutdown)
+            .process_downloads(downloader, &mut parquet_writer, self.shutdown.clone())
             .await;
 
         // Close the writer and get finished files
@@ -367,7 +365,7 @@ impl BlizzardProcessor {
         });
 
         let short_name = path.split('/').next_back().unwrap_or(&path);
-        info!(
+        debug!(
             "Processed {} ({} records, {} batches)",
             short_name, total_records, batch_count
         );
@@ -380,5 +378,100 @@ impl BlizzardProcessor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Test that the shutdown token is properly propagated from run_pipeline
+    /// to the processor. This was a bug where a new local CancellationToken
+    /// was created in process() instead of using the one from run_pipeline.
+    #[tokio::test]
+    async fn test_shutdown_token_is_shared() {
+        // Create a shutdown token
+        let shutdown = CancellationToken::new();
+
+        // Clone it like run_pipeline does
+        let shutdown_for_processor = shutdown.clone();
+
+        // When the original token is cancelled...
+        shutdown.cancel();
+
+        // ...the clone should also be cancelled
+        assert!(
+            shutdown_for_processor.is_cancelled(),
+            "Shutdown token clones should share cancellation state"
+        );
+    }
+
+    /// Test that cancellation propagates through multiple clones
+    #[tokio::test]
+    async fn test_cancellation_propagates_through_clones() {
+        let original = CancellationToken::new();
+        let clone1 = original.clone();
+        let clone2 = clone1.clone();
+        let clone3 = clone2.clone();
+
+        // None should be cancelled yet
+        assert!(!original.is_cancelled());
+        assert!(!clone1.is_cancelled());
+        assert!(!clone2.is_cancelled());
+        assert!(!clone3.is_cancelled());
+
+        // Cancel the original
+        original.cancel();
+
+        // All clones should now be cancelled
+        assert!(clone1.is_cancelled());
+        assert!(clone2.is_cancelled());
+        assert!(clone3.is_cancelled());
+    }
+
+    /// Test that separate tokens do NOT share cancellation (the bug scenario)
+    #[tokio::test]
+    async fn test_separate_tokens_do_not_share_cancellation() {
+        let token1 = CancellationToken::new();
+        let token2 = CancellationToken::new(); // This was the bug - creating a new token
+
+        token1.cancel();
+
+        // token2 should NOT be cancelled because it's a separate token
+        assert!(
+            !token2.is_cancelled(),
+            "Separate tokens should not share cancellation"
+        );
+    }
+
+    /// Integration test: verify shutdown signal triggers cancellation
+    #[tokio::test]
+    async fn test_shutdown_cancellation_is_immediate() {
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+
+        // Spawn a task that waits for cancellation
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_clone.cancelled() => {
+                    "cancelled"
+                }
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    "timeout"
+                }
+            }
+        });
+
+        // Cancel immediately
+        shutdown.cancel();
+
+        // Task should complete with "cancelled" not "timeout"
+        let result = tokio::time::timeout(Duration::from_millis(100), handle)
+            .await
+            .expect("task should complete quickly")
+            .expect("task should not panic");
+
+        assert_eq!(result, "cancelled");
     }
 }

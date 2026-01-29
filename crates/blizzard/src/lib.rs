@@ -15,6 +15,11 @@ pub mod sink;
 pub mod source;
 pub mod staging;
 
+/// Re-export storage module from blizzard-common for convenience
+pub mod storage {
+    pub use blizzard_common::storage::*;
+}
+
 // Re-export commonly used items
 pub use config::Config;
 pub use error::PipelineError;

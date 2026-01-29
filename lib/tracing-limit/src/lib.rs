@@ -7,11 +7,11 @@
 //!
 //! - Rate limiting is ON by default (opt-out with `internal_log_rate_limit = false`)
 //! - Default window is 10 seconds (configurable via `with_default_limit`)
+//! - Default burst limit is 30 events (configurable via `with_burst_limit`)
 //! - Events are grouped by callsite + `component_id` field
 //! - Within a time window:
-//!   - 1st event: emitted normally
-//!   - 2nd event: shows "rate limit exceeded" warning
-//!   - 3rd+ events: silenced
+//!   - First N events (up to burst limit): emitted normally
+//!   - N+1+ events: silently suppressed
 //! - After window expires: emits summary of suppressed count, then resets
 //!
 //! # Usage
@@ -23,7 +23,8 @@
 //!
 //! let fmt_layer = tracing_subscriber::fmt::layer();
 //! let rate_limited = RateLimitedLayer::new(fmt_layer)
-//!     .with_default_limit(10)
+//!     .with_default_limit(10)   // 10 second window
+//!     .with_burst_limit(30)     // allow 30 events before limiting
 //!     .with_max_entries(10000);
 //!
 //! tracing_subscriber::registry()
@@ -59,6 +60,9 @@ fn nanos_since_epoch() -> u64 {
 
 /// Default rate limit window in seconds.
 const DEFAULT_LIMIT_SECS: u64 = 10;
+
+/// Default burst limit (number of events allowed before rate limiting kicks in).
+const DEFAULT_BURST_LIMIT: u64 = 30;
 
 /// Key for rate limiting - combines callsite identifier with optional component_id.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -198,8 +202,6 @@ impl tracing_core::field::Visit for LimitVisitor {
 enum RateLimitAction {
     /// Emit the event normally.
     Emit,
-    /// Emit a "rate limit exceeded" warning.
-    EmitWarning,
     /// Emit a summary of suppressed events.
     EmitSummary { suppressed: u64 },
     /// Suppress the event.
@@ -215,6 +217,8 @@ pub struct RateLimitedLayer<L> {
     inner: L,
     /// Default rate limit window in seconds.
     default_limit_secs: u64,
+    /// Burst limit - number of events allowed before rate limiting kicks in.
+    burst_limit: u64,
     /// Maximum number of entries to track (for bounded memory usage).
     max_entries: Option<usize>,
     /// Rate limit state for each key.
@@ -227,6 +231,7 @@ impl<L> RateLimitedLayer<L> {
         Self {
             inner,
             default_limit_secs: DEFAULT_LIMIT_SECS,
+            burst_limit: DEFAULT_BURST_LIMIT,
             max_entries: None,
             state: DashMap::new(),
         }
@@ -235,6 +240,14 @@ impl<L> RateLimitedLayer<L> {
     /// Set the default rate limit window in seconds.
     pub fn with_default_limit(mut self, secs: u64) -> Self {
         self.default_limit_secs = secs;
+        self
+    }
+
+    /// Set the burst limit (number of events allowed before rate limiting kicks in).
+    ///
+    /// Default is 30. Set higher to allow more events before suppression.
+    pub fn with_burst_limit(mut self, limit: u64) -> Self {
+        self.burst_limit = limit;
         self
     }
 
@@ -284,13 +297,15 @@ impl<L> RateLimitedLayer<L> {
 
     /// Determine what action to take for an event.
     fn check_rate_limit(&self, key: RateLimitKey, limit_secs: u64) -> RateLimitAction {
+        let burst = self.burst_limit;
+
         // Check if entry exists first
         if let Some(entry) = self.state.get(&key) {
             let state = entry.value();
 
             // Check if window has expired
             if state.is_expired() {
-                let suppressed = state.get_count().saturating_sub(2);
+                let suppressed = state.get_count().saturating_sub(burst);
 
                 // Reset state atomically
                 state.reset(limit_secs);
@@ -304,10 +319,10 @@ impl<L> RateLimitedLayer<L> {
             // Increment count
             let count = state.increment();
 
-            return match count {
-                1 => RateLimitAction::Emit,
-                2 => RateLimitAction::EmitWarning,
-                _ => RateLimitAction::Suppress,
+            return if count <= burst {
+                RateLimitAction::Emit
+            } else {
+                RateLimitAction::Suppress
             };
         }
 
@@ -321,10 +336,10 @@ impl<L> RateLimitedLayer<L> {
             .or_insert_with(|| RateLimitState::new(limit_secs));
         let count = entry.value().increment();
 
-        match count {
-            1 => RateLimitAction::Emit,
-            2 => RateLimitAction::EmitWarning,
-            _ => RateLimitAction::Suppress,
+        if count <= burst {
+            RateLimitAction::Emit
+        } else {
+            RateLimitAction::Suppress
         }
     }
 }
@@ -360,11 +375,6 @@ where
         match self.check_rate_limit(key, limit_secs) {
             RateLimitAction::Emit => {
                 self.inner.on_event(event, ctx);
-            }
-            RateLimitAction::EmitWarning => {
-                // Don't emit the original event, just show rate limit warning
-                let message = limit_visitor.message.as_deref().unwrap_or("<no message>");
-                eprintln!("  Internal log [{}] is being rate limited.", message);
             }
             RateLimitAction::EmitSummary { suppressed } => {
                 // Log summary of suppressed events with the message content
