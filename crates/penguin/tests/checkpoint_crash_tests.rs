@@ -11,10 +11,10 @@ use std::sync::Arc;
 use blizzard_common::FinishedFile;
 use blizzard_common::storage::StorageProvider;
 use blizzard_common::types::SourceState;
+use penguin::SchemaEvolutionMode;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::schema::infer_schema_from_first_file;
 use penguin::sink::DeltaSink;
-use penguin::SchemaEvolutionMode;
 
 /// Test: Checkpoint commit and recovery via Delta Lake Txn actions.
 ///
