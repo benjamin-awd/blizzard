@@ -475,7 +475,7 @@ impl StorageProvider {
     ///
     /// For backends that don't support `MultipartStore` or for small files,
     /// falls back to simple PUT.
-    pub async fn put_multipart_bytes_parallel(
+    pub async fn put_multipart_bytes(
         &self,
         path: &Path,
         bytes: Bytes,
