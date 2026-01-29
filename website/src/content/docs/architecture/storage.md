@@ -130,7 +130,7 @@ The `StorageProvider` abstraction provides these operations:
 | `list()` | List files in a path | `blizzard_storage_requests_total{operation="list"}` |
 | `get()` | Download file contents | `blizzard_storage_requests_total{operation="get"}` |
 | `put()` | Upload file contents | `blizzard_storage_requests_total{operation="put"}` |
-| `put_multipart_bytes_parallel()` | Parallel multipart upload | Multiple part metrics |
+| `put_multipart_bytes()` | Parallel multipart upload | Multiple part metrics |
 
 ## Multipart Uploads
 

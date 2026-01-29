@@ -302,7 +302,7 @@ async fn upload_file(
 
     let path = object_store::path::Path::from(file.filename.as_str());
     storage
-        .put_multipart_bytes_parallel(
+        .put_multipart_bytes(
             &path,
             bytes,
             part_size,
