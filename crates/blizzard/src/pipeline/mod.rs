@@ -144,7 +144,7 @@ impl BlizzardProcessor {
     /// Generate date prefixes for partition filtering.
     fn generate_date_prefixes(&self) -> Option<Vec<String>> {
         self.config.source.partition_filter.as_ref().map(|pf| {
-            DatePrefixGenerator::new(pf.prefix_template.clone(), pf.lookback).generate_prefixes()
+            DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
         })
     }
 
