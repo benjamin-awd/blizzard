@@ -47,7 +47,12 @@ impl SchemaComparison {
 
     /// Check if there are any new required (non-nullable) fields.
     pub fn has_new_required_fields(&self) -> bool {
-        self.new_fields.iter().any(|f| !f.is_nullable())
+        self.first_new_required_field().is_some()
+    }
+
+    /// Returns the first new required (non-nullable) field, if any.
+    pub fn first_new_required_field(&self) -> Option<&Field> {
+        self.new_fields.iter().find(|f| !f.is_nullable())
     }
 }
 
@@ -314,12 +319,10 @@ pub fn merge_schemas(table: &Schema, incoming: &Schema) -> Result<SchemaRef, Sch
     }
 
     // Check for new required fields
-    for field in &comparison.new_fields {
-        if !field.is_nullable() {
-            return Err(SchemaError::RequiredFieldAddition {
-                field_name: field.name().clone(),
-            });
-        }
+    if let Some(field) = comparison.first_new_required_field() {
+        return Err(SchemaError::RequiredFieldAddition {
+            field_name: field.name().clone(),
+        });
     }
 
     // Build merged schema: start with table fields, add new nullable fields
@@ -376,17 +379,9 @@ pub fn validate_schema_evolution(
                         to: format!("{:?}", to),
                     });
                 }
-                if comparison.has_new_required_fields() {
-                    // Safe: has_new_required_fields() guarantees at least one non-nullable field exists
-                    let required_field = comparison
-                        .new_fields
-                        .iter()
-                        .find(|f| !f.is_nullable())
-                        .expect(
-                            "has_new_required_fields returned true but no required field found",
-                        );
+                if let Some(field) = comparison.first_new_required_field() {
                     return Err(SchemaError::RequiredFieldAddition {
-                        field_name: required_field.name().clone(),
+                        field_name: field.name().clone(),
                     });
                 }
                 let details = format_incompatibility(&comparison);
