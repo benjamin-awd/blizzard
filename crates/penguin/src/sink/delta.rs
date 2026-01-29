@@ -31,6 +31,13 @@ use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_sc
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
 const TXN_APP_ID_PREFIX: &str = "blizzard:";
 
+/// Maximum number of Delta log versions to scan when recovering checkpoint state.
+///
+/// This limits how far back we search in the transaction log to avoid scanning
+/// the entire history of long-lived tables. If no checkpoint is found within
+/// this range, we start fresh.
+const CHECKPOINT_RECOVERY_SCAN_LIMIT: i64 = 100;
+
 /// Ensure Delta Lake cloud storage handlers are registered.
 ///
 /// This is idempotent - calling multiple times is safe.
@@ -306,8 +313,7 @@ impl DeltaSink {
         let object_store = log_store.object_store(None);
 
         // Scan backwards through commit logs looking for our Txn action
-        // Limit search to last 100 commits to avoid scanning entire history
-        let start_version = (current_version - 100).max(0);
+        let start_version = (current_version - CHECKPOINT_RECOVERY_SCAN_LIMIT).max(0);
 
         for version in (start_version..=current_version).rev() {
             let commit_bytes = match read_commit_entry(object_store.as_ref(), version)

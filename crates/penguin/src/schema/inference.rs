@@ -18,6 +18,12 @@ use blizzard_common::{FinishedFile, StorageProvider};
 use crate::error::SchemaError;
 use crate::schema::evolution::coerce_schema;
 
+/// Maximum number of files to try when inferring schema.
+///
+/// If the first file is corrupted or inaccessible, we try subsequent files
+/// up to this limit before giving up.
+const MAX_SCHEMA_INFERENCE_ATTEMPTS: usize = 3;
+
 /// Infer Arrow schema from parquet file bytes.
 ///
 /// This reads only the parquet footer (metadata), not the actual data,
@@ -54,8 +60,7 @@ pub async fn infer_schema_from_first_file(
         return Err(SchemaError::NoFilesAvailable);
     }
 
-    // Try up to 3 files
-    let max_attempts = std::cmp::min(3, files.len());
+    let max_attempts = std::cmp::min(MAX_SCHEMA_INFERENCE_ATTEMPTS, files.len());
     let mut last_error = None;
 
     for file in files.iter().take(max_attempts) {
@@ -199,7 +204,9 @@ mod tests {
             schema.clone(),
             vec![
                 Arc::new(Int32Array::from(vec![1])),
-                Arc::new(TimestampNanosecondArray::from(vec![Some(1234567890123456789i64)])),
+                Arc::new(TimestampNanosecondArray::from(vec![Some(
+                    1234567890123456789i64,
+                )])),
             ],
         )
         .unwrap();
