@@ -117,6 +117,11 @@ impl DeltaSink {
         self.checkpoint_version
     }
 
+    /// Get a reference to the underlying Delta table.
+    pub fn table(&self) -> &DeltaTable {
+        &self.table
+    }
+
     /// Recover checkpoint state from the Delta transaction log.
     ///
     /// Scans the transaction log backwards from the latest version looking for

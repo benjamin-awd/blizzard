@@ -205,6 +205,13 @@ pub struct SinkConfig {
     /// Partition values are extracted from source file paths.
     #[serde(default)]
     pub partition_by: Vec<String>,
+
+    /// Interval between Delta Lake checkpoint file creation (in commits).
+    /// Delta checkpoints are Parquet files that allow readers to skip reading
+    /// the entire JSON transaction log, dramatically improving read performance
+    /// for tables with many commits. Default is 10. Set to 0 to disable.
+    #[serde(default = "default_delta_checkpoint_interval")]
+    pub delta_checkpoint_interval: usize,
 }
 
 fn default_file_size_mb() -> usize {
@@ -229,6 +236,10 @@ fn default_max_concurrent_uploads() -> usize {
 
 fn default_max_concurrent_parts() -> usize {
     8
+}
+
+fn default_delta_checkpoint_interval() -> usize {
+    10
 }
 
 impl SinkConfig {
@@ -416,6 +427,7 @@ mod tests {
                 storage_options: HashMap::new(),
                 compression: ParquetCompression::Snappy,
                 partition_by: Vec::new(),
+                delta_checkpoint_interval: 10,
             },
             schema: SchemaConfig {
                 fields: vec![

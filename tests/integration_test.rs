@@ -590,6 +590,7 @@ schema:
                 storage_options: HashMap::new(),
                 compression: blizzard::config::ParquetCompression::Snappy,
                 partition_by: Vec::new(),
+                delta_checkpoint_interval: 10,
             },
             schema: blizzard::config::SchemaConfig {
                 fields: vec![blizzard::config::FieldConfig {
@@ -660,6 +661,7 @@ schema:
                 storage_options: HashMap::new(),
                 compression: blizzard::config::ParquetCompression::Snappy,
                 partition_by: Vec::new(),
+                delta_checkpoint_interval: 10,
             },
             schema: blizzard::config::SchemaConfig {
                 fields: vec![blizzard::config::FieldConfig {
@@ -781,7 +783,9 @@ mod delta_atomic_checkpoint_tests {
         );
 
         let schema = test_schema();
-        let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
+        let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![])
+            .await
+            .unwrap();
 
         // Create and commit checkpoint
         let mut source_state = SourceState::new();

@@ -16,7 +16,7 @@ pub use state::CheckpointState;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::emit;
 use crate::error::DeltaError;
@@ -38,6 +38,8 @@ struct CheckpointStateInner {
 pub struct CheckpointCoordinator {
     state: Arc<Mutex<CheckpointStateInner>>,
     last_checkpoint: Arc<Mutex<Instant>>,
+    /// Number of commits since last Delta checkpoint file was created.
+    commits_since_delta_checkpoint: Arc<Mutex<usize>>,
 }
 
 impl Default for CheckpointCoordinator {
@@ -55,6 +57,7 @@ impl CheckpointCoordinator {
                 delta_version: -1,
             })),
             last_checkpoint: Arc::new(Mutex::new(Instant::now())),
+            commits_since_delta_checkpoint: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -172,6 +175,40 @@ impl CheckpointCoordinator {
         removed
     }
 
+    /// Maybe create a Delta Lake checkpoint file based on the commit interval.
+    ///
+    /// Delta checkpoints are Parquet files that summarize the state of the table,
+    /// allowing readers to skip reading all JSON log files. This dramatically
+    /// improves read performance for tables with many commits.
+    ///
+    /// # Arguments
+    /// * `delta_sink` - The Delta sink to create the checkpoint for
+    /// * `interval` - Number of commits between checkpoints. Set to 0 to disable.
+    async fn maybe_create_delta_checkpoint(&self, delta_sink: &DeltaSink, interval: usize) {
+        if interval == 0 {
+            return;
+        }
+
+        let mut counter = self.commits_since_delta_checkpoint.lock().await;
+        *counter += 1;
+
+        if *counter >= interval {
+            match deltalake::checkpoints::create_checkpoint(delta_sink.table(), None).await {
+                Ok(()) => {
+                    info!(
+                        "Created Delta checkpoint at version {}",
+                        delta_sink.version()
+                    );
+                    *counter = 0;
+                }
+                Err(e) => {
+                    warn!("Failed to create Delta checkpoint: {}", e);
+                    // Don't reset counter on failure - will retry on next commit
+                }
+            }
+        }
+    }
+
     /// Commit files to Delta Lake with an atomic checkpoint.
     ///
     /// This centralizes the checkpoint commit logic:
@@ -179,9 +216,15 @@ impl CheckpointCoordinator {
     /// 2. Commits files with the checkpoint atomically
     /// 3. Updates the coordinator with the new delta version
     /// 4. Marks the checkpoint as committed (resets timer)
+    /// 5. Maybe creates a Delta checkpoint file (based on interval)
     ///
     /// Returns the number of files committed (0 if files list was empty).
-    pub async fn commit_files(&self, delta_sink: &mut DeltaSink, files: &[FinishedFile]) -> usize {
+    pub async fn commit_files(
+        &self,
+        delta_sink: &mut DeltaSink,
+        files: &[FinishedFile],
+        delta_checkpoint_interval: usize,
+    ) -> usize {
         if files.is_empty() {
             return 0;
         }
@@ -204,6 +247,9 @@ impl CheckpointCoordinator {
                 // Update coordinator with new delta version and mark checkpoint committed
                 self.update_delta_version(version).await;
                 self.mark_checkpoint_committed().await;
+                // Maybe create Delta checkpoint file
+                self.maybe_create_delta_checkpoint(delta_sink, delta_checkpoint_interval)
+                    .await;
             }
             Ok(None) => {
                 debug!("No commit needed (duplicate files)");
