@@ -379,41 +379,48 @@ fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructTyp
     })
 }
 
-/// Try to open an existing Delta Lake table.
-///
-/// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
-/// to check if the error indicates a missing table.
-async fn try_open_table(storage_provider: &StorageProvider) -> Result<DeltaTable, DeltaError> {
-    let empty_path = &Path::parse("").map_err(|_| DeltaError::PathParse {
+/// Construct the Delta table URL from a storage provider.
+fn build_table_url(storage_provider: &StorageProvider) -> Result<String, DeltaError> {
+    let empty_path = Path::parse("").map_err(|_| DeltaError::PathParse {
         path: "".to_string(),
     })?;
 
-    let table_url: String = match storage_provider.config() {
+    let table_url = match storage_provider.config() {
         BackendConfig::S3(s3) => {
             format!(
                 "s3://{}/{}",
                 s3.bucket,
-                storage_provider.qualify_path(empty_path)
+                storage_provider.qualify_path(&empty_path)
             )
         }
         BackendConfig::Gcs(gcs) => {
             format!(
                 "gs://{}/{}",
                 gcs.bucket,
-                storage_provider.qualify_path(empty_path)
+                storage_provider.qualify_path(&empty_path)
             )
         }
         BackendConfig::Azure(azure) => {
             format!(
                 "abfs://{}/{}",
                 azure.container,
-                storage_provider.qualify_path(empty_path)
+                storage_provider.qualify_path(&empty_path)
             )
         }
         BackendConfig::Local(local) => {
             format!("file://{}", local.path)
         }
     };
+
+    Ok(table_url)
+}
+
+/// Try to open an existing Delta Lake table.
+///
+/// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
+/// to check if the error indicates a missing table.
+async fn try_open_table(storage_provider: &StorageProvider) -> Result<DeltaTable, DeltaError> {
+    let table_url = build_table_url(storage_provider)?;
 
     let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
         url: table_url.clone(),
@@ -439,36 +446,7 @@ pub async fn load_or_create_table(
     schema: &Schema,
     partition_by: &[String],
 ) -> Result<DeltaTable, DeltaError> {
-    let empty_path = &Path::parse("").map_err(|_| DeltaError::PathParse {
-        path: "".to_string(),
-    })?;
-
-    let table_url: String = match storage_provider.config() {
-        BackendConfig::S3(s3) => {
-            format!(
-                "s3://{}/{}",
-                s3.bucket,
-                storage_provider.qualify_path(empty_path)
-            )
-        }
-        BackendConfig::Gcs(gcs) => {
-            format!(
-                "gs://{}/{}",
-                gcs.bucket,
-                storage_provider.qualify_path(empty_path)
-            )
-        }
-        BackendConfig::Azure(azure) => {
-            format!(
-                "abfs://{}/{}",
-                azure.container,
-                storage_provider.qualify_path(empty_path)
-            )
-        }
-        BackendConfig::Local(local) => {
-            format!("file://{}", local.path)
-        }
-    };
+    let table_url = build_table_url(storage_provider)?;
 
     // Try to open existing table
     let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
