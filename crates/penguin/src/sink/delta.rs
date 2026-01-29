@@ -11,13 +11,13 @@
 
 use base64::Engine;
 use deltalake::DeltaTable;
-use deltalake::arrow::datatypes::Schema;
+use deltalake::arrow::datatypes::{Schema, SchemaRef};
 use deltalake::kernel::Action;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::protocol::SaveMode;
 use object_store::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use blizzard_common::FinishedFile;
@@ -26,6 +26,7 @@ use blizzard_common::storage::{BackendConfig, StorageProvider};
 
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
+use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_schema_evolution};
 
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
 const TXN_APP_ID_PREFIX: &str = "blizzard:";
@@ -45,6 +46,8 @@ pub struct DeltaSink {
     checkpoint_version: i64,
     /// Partition columns for this table.
     partition_by: Vec<String>,
+    /// Cached table schema for evolution checks.
+    cached_schema: Option<SchemaRef>,
 }
 
 impl DeltaSink {
@@ -59,11 +62,20 @@ impl DeltaSink {
         let table = load_or_create_table(storage, schema, &partition_by).await?;
         let last_version = table.version().unwrap_or(-1);
 
+        // Cache the schema from the created/loaded table
+        let cached_schema = table.snapshot().ok().and_then(|s| {
+            use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
+            use std::sync::Arc;
+            let arrow_schema: Schema = s.schema().as_ref().try_into_arrow().ok()?;
+            Some(Arc::new(arrow_schema))
+        });
+
         Ok(Self {
             table,
             last_version,
             checkpoint_version: 0,
             partition_by,
+            cached_schema,
         })
     }
 
@@ -80,11 +92,20 @@ impl DeltaSink {
         let table = try_open_table(storage).await?;
         let last_version = table.version().unwrap_or(-1);
 
+        // Cache the schema from the opened table
+        let cached_schema = table.snapshot().ok().and_then(|s| {
+            use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
+            use std::sync::Arc;
+            let arrow_schema: Schema = s.schema().as_ref().try_into_arrow().ok()?;
+            Some(Arc::new(arrow_schema))
+        });
+
         Ok(Self {
             table,
             last_version,
             checkpoint_version: 0,
             partition_by,
+            cached_schema,
         })
     }
 
@@ -143,6 +164,110 @@ impl DeltaSink {
     /// Get a reference to the underlying Delta table.
     pub fn table(&self) -> &DeltaTable {
         &self.table
+    }
+
+    /// Get the cached table schema, if available.
+    pub fn schema(&self) -> Option<&SchemaRef> {
+        self.cached_schema.as_ref()
+    }
+
+    /// Validate an incoming schema against the table schema.
+    ///
+    /// Returns the evolution action to take based on the configured mode.
+    pub fn validate_schema(
+        &self,
+        incoming: &Schema,
+        mode: SchemaEvolutionMode,
+    ) -> Result<EvolutionAction, crate::error::SchemaError> {
+        let table_schema = match &self.cached_schema {
+            Some(schema) => schema,
+            None => {
+                // No cached schema - accept incoming schema
+                return Ok(EvolutionAction::None);
+            }
+        };
+
+        validate_schema_evolution(table_schema, incoming, mode)
+    }
+
+    /// Apply a schema evolution action to the table.
+    ///
+    /// For `Merge` and `Overwrite` actions, this updates the table metadata
+    /// with the new schema using Delta Lake's native schema evolution.
+    pub async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
+        match action {
+            EvolutionAction::None => {
+                // No change needed
+                Ok(())
+            }
+            EvolutionAction::Merge { new_schema } => {
+                info!(
+                    "Evolving schema: adding {} new fields",
+                    new_schema.fields().len()
+                        - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
+                );
+                self.apply_schema_change(&new_schema).await?;
+                self.cached_schema = Some(new_schema);
+                Ok(())
+            }
+            EvolutionAction::Overwrite { new_schema } => {
+                warn!("Overwriting schema with {} fields", new_schema.fields().len());
+                self.apply_schema_change(&new_schema).await?;
+                self.cached_schema = Some(new_schema);
+                Ok(())
+            }
+        }
+    }
+
+    /// Apply a schema change to the Delta table.
+    ///
+    /// Uses Delta Lake's metadata action to update the schema.
+    async fn apply_schema_change(&mut self, new_schema: &Schema) -> Result<(), DeltaError> {
+        use deltalake::kernel::transaction::CommitBuilder;
+        use deltalake::kernel::MetadataExt;
+
+        // Convert Arrow schema to Delta schema
+        let delta_schema = arrow_schema_to_delta(new_schema)?;
+
+        // Get current metadata and update schema
+        let snapshot = self
+            .table
+            .snapshot()
+            .map_err(|source| DeltaError::DeltaOperation { source })?;
+
+        let current_metadata = snapshot.metadata().clone();
+        let new_metadata = current_metadata
+            .with_schema(&delta_schema)
+            .map_err(|source| DeltaError::DeltaOperation {
+                source: deltalake::DeltaTableError::Kernel { source },
+            })?;
+
+        // Commit the metadata change
+        let actions = vec![Action::Metadata(new_metadata)];
+
+        let version = CommitBuilder::default()
+            .with_actions(actions)
+            .build(
+                Some(snapshot),
+                self.table.log_store(),
+                deltalake::protocol::DeltaOperation::SetTableProperties {
+                    properties: std::collections::HashMap::new(),
+                },
+            )
+            .await
+            .map_err(|source| DeltaError::DeltaOperation { source })?
+            .version;
+
+        // Reload table to get new state
+        self.table
+            .load()
+            .await
+            .map_err(|source| DeltaError::DeltaOperation { source })?;
+
+        self.last_version = version;
+        info!("Schema evolution committed at version {}", version);
+
+        Ok(())
     }
 
     /// Recover checkpoint state from the Delta transaction log.

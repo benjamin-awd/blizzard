@@ -5,7 +5,7 @@ use snafu::prelude::*;
 // Re-export common errors
 pub use blizzard_common::error::{ConfigError, StorageError};
 
-/// Errors that can occur during schema inference.
+/// Errors that can occur during schema inference and evolution.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[snafu(module)]
@@ -35,6 +35,22 @@ pub enum SchemaError {
     /// Storage error while reading file for schema inference.
     #[snafu(display("Storage error during schema inference: {source}"))]
     StorageRead { source: StorageError },
+
+    /// Incoming schema is incompatible with table schema.
+    #[snafu(display("Incompatible schema: {details}"))]
+    IncompatibleSchema { details: String },
+
+    /// Attempted to add a required (non-nullable) field.
+    #[snafu(display("Cannot add required field '{field_name}' - new fields must be nullable"))]
+    RequiredFieldAddition { field_name: String },
+
+    /// Type change is not allowed between schemas.
+    #[snafu(display("Type change not allowed for field '{field}': {from} -> {to}"))]
+    TypeChangeNotAllowed {
+        field: String,
+        from: String,
+        to: String,
+    },
 }
 
 /// Errors that can occur during Delta Lake operations.

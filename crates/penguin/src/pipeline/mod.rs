@@ -15,6 +15,7 @@ use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::Config;
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
+use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 use crate::staging::StagingReader;
@@ -127,34 +128,74 @@ impl PenguinProcessor {
     ///
     /// If no sink exists yet, infers the schema from the first parquet file
     /// and creates the Delta table with the correct schema.
+    ///
+    /// If a sink exists, validates the incoming schema against the table schema
+    /// and applies schema evolution if needed based on the configured mode.
     async fn ensure_delta_sink(
         &mut self,
         pending_files: &[FinishedFile],
     ) -> Result<(), PipelineError> {
-        if self.delta_sink.is_some() {
+        // Infer schema from incoming files
+        let incoming_schema =
+            infer_schema_from_first_file(&self.sink_storage, pending_files).await?;
+
+        if self.delta_sink.is_none() {
+            info!("Creating new Delta table with inferred schema");
+            info!(
+                "Inferred schema with {} fields: {:?}",
+                incoming_schema.fields().len(),
+                incoming_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            );
+
+            // Create the Delta sink with the inferred schema
+            let sink = DeltaSink::new(
+                &self.sink_storage,
+                &incoming_schema,
+                self.config.source.partition_by.clone(),
+            )
+            .await?;
+
+            self.delta_sink = Some(sink);
             return Ok(());
         }
 
-        info!("Inferring schema from first parquet file to create Delta table");
+        // Table exists - validate schema evolution
+        let sink = self.delta_sink.as_mut().unwrap();
+        let evolution_mode = self.config.source.schema_evolution;
 
-        // Infer schema from the first available parquet file
-        let schema = infer_schema_from_first_file(&self.sink_storage, pending_files).await?;
+        let action = sink.validate_schema(&incoming_schema, evolution_mode)?;
 
-        info!(
-            "Inferred schema with {} fields: {:?}",
-            schema.fields().len(),
-            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-        );
+        match &action {
+            EvolutionAction::None => {
+                // Schema is compatible, no changes needed
+            }
+            EvolutionAction::Merge { new_schema } => {
+                let new_field_names: Vec<_> = new_schema
+                    .fields()
+                    .iter()
+                    .skip(sink.schema().map_or(0, |s| s.fields().len()))
+                    .map(|f| f.name().as_str())
+                    .collect();
+                info!(
+                    "Schema evolution: adding {} new field(s): {:?}",
+                    new_field_names.len(),
+                    new_field_names
+                );
+            }
+            EvolutionAction::Overwrite { new_schema } => {
+                info!(
+                    "Schema evolution: overwriting with {} fields",
+                    new_schema.fields().len()
+                );
+            }
+        }
 
-        // Create the Delta sink with the inferred schema
-        let sink = DeltaSink::new(
-            &self.sink_storage,
-            &schema,
-            self.config.source.partition_by.clone(),
-        )
-        .await?;
-
-        self.delta_sink = Some(sink);
+        // Apply the evolution action
+        sink.evolve_schema(action).await?;
 
         Ok(())
     }

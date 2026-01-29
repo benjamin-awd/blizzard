@@ -14,6 +14,7 @@ use blizzard_common::types::SourceState;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::schema::infer_schema_from_first_file;
 use penguin::sink::DeltaSink;
+use penguin::SchemaEvolutionMode;
 
 /// Test: Checkpoint commit and recovery via Delta Lake Txn actions.
 ///
@@ -264,4 +265,256 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         .await
         .unwrap();
     assert!(recovered.is_some(), "Should find checkpoint in new table");
+}
+
+/// Test: Schema evolution in merge mode allows adding new nullable columns.
+///
+/// Verifies that:
+/// - A table is created with initial schema
+/// - Incoming schema with new nullable fields triggers merge evolution
+/// - The merged schema includes both original and new fields
+#[tokio::test]
+async fn test_schema_evolution_merge_mode() {
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use penguin::schema::evolution::EvolutionAction;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path().to_str().unwrap();
+
+    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+        .await
+        .unwrap();
+
+    // Create table with initial schema
+    let initial_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]);
+
+    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+        .await
+        .unwrap();
+
+    // Verify initial schema is cached
+    assert!(delta_sink.schema().is_some());
+    assert_eq!(delta_sink.schema().unwrap().fields().len(), 2);
+
+    // Incoming schema with new nullable field
+    let incoming_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("email", DataType::Utf8, true), // New nullable field
+    ]);
+
+    // Validate schema evolution in merge mode
+    let action = delta_sink
+        .validate_schema(&incoming_schema, SchemaEvolutionMode::Merge)
+        .unwrap();
+
+    match action {
+        EvolutionAction::Merge { ref new_schema } => {
+            assert_eq!(new_schema.fields().len(), 3);
+            assert_eq!(new_schema.field(2).name(), "email");
+        }
+        _ => panic!("Expected Merge action, got {:?}", action),
+    }
+
+    // Apply the evolution
+    delta_sink.evolve_schema(action).await.unwrap();
+
+    // Verify schema was updated
+    assert_eq!(delta_sink.schema().unwrap().fields().len(), 3);
+
+    // Verify we can reopen the table and see the evolved schema
+    let reopened = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    assert_eq!(reopened.schema().unwrap().fields().len(), 3);
+}
+
+/// Test: Schema evolution in strict mode rejects any schema changes.
+///
+/// Verifies that:
+/// - Strict mode rejects even compatible schema changes (new nullable fields)
+/// - Appropriate error is returned
+#[tokio::test]
+async fn test_schema_evolution_strict_mode_rejects() {
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path().to_str().unwrap();
+
+    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+        .await
+        .unwrap();
+
+    // Create table with initial schema
+    let initial_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]);
+
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+        .await
+        .unwrap();
+
+    // Incoming schema with new field
+    let incoming_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("email", DataType::Utf8, true), // New field
+    ]);
+
+    // Strict mode should reject
+    let result = delta_sink.validate_schema(&incoming_schema, SchemaEvolutionMode::Strict);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, penguin::error::SchemaError::IncompatibleSchema { .. }),
+        "Expected IncompatibleSchema error, got: {:?}",
+        err
+    );
+}
+
+/// Test: Schema evolution in overwrite mode replaces schema entirely.
+///
+/// Verifies that:
+/// - Overwrite mode accepts completely different schemas
+/// - The new schema replaces the old one
+#[tokio::test]
+async fn test_schema_evolution_overwrites() {
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use penguin::schema::evolution::EvolutionAction;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path().to_str().unwrap();
+
+    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+        .await
+        .unwrap();
+
+    // Create table with initial schema
+    let initial_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, true),
+    ]);
+
+    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+        .await
+        .unwrap();
+
+    // Completely different schema
+    let new_schema = Schema::new(vec![
+        Field::new("user_id", DataType::Utf8, false),
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("data", DataType::Utf8, true),
+    ]);
+
+    // Overwrite mode should accept any schema
+    let action = delta_sink
+        .validate_schema(&new_schema, SchemaEvolutionMode::Overwrite)
+        .unwrap();
+
+    match action {
+        EvolutionAction::Overwrite { ref new_schema } => {
+            assert_eq!(new_schema.fields().len(), 3);
+            assert_eq!(new_schema.field(0).name(), "user_id");
+        }
+        _ => panic!("Expected Overwrite action, got {:?}", action),
+    }
+
+    // Apply the overwrite
+    delta_sink.evolve_schema(action).await.unwrap();
+
+    // Verify schema was replaced
+    let schema = delta_sink.schema().unwrap();
+    assert_eq!(schema.fields().len(), 3);
+    assert_eq!(schema.field(0).name(), "user_id");
+    assert_eq!(schema.field(1).name(), "timestamp");
+    assert_eq!(schema.field(2).name(), "data");
+}
+
+/// Test: Schema evolution rejects new required (non-nullable) fields in merge mode.
+///
+/// Verifies that merge mode correctly rejects attempts to add required fields,
+/// which would break existing data.
+#[tokio::test]
+async fn test_schema_evolution_rejects_required_fields() {
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path().to_str().unwrap();
+
+    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+        .await
+        .unwrap();
+
+    // Create table with initial schema
+    let initial_schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+        .await
+        .unwrap();
+
+    // Incoming schema with new REQUIRED field
+    let incoming_schema = Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("required_field", DataType::Utf8, false), // Non-nullable!
+    ]);
+
+    // Merge mode should reject required fields
+    let result = delta_sink.validate_schema(&incoming_schema, SchemaEvolutionMode::Merge);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            penguin::error::SchemaError::RequiredFieldAddition { .. }
+        ),
+        "Expected RequiredFieldAddition error, got: {:?}",
+        err
+    );
+}
+
+/// Test: Schema evolution allows type widening (Int32 -> Int64).
+///
+/// Verifies that compatible type changes (widening) are allowed in merge mode.
+#[tokio::test]
+async fn test_schema_evolution_allows_type_widening() {
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use penguin::schema::evolution::EvolutionAction;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path().to_str().unwrap();
+
+    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+        .await
+        .unwrap();
+
+    // Create table with Int32 field
+    let initial_schema = Schema::new(vec![Field::new("value", DataType::Int32, true)]);
+
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+        .await
+        .unwrap();
+
+    // Incoming schema with Int64 (widened type)
+    let incoming_schema = Schema::new(vec![Field::new("value", DataType::Int64, true)]);
+
+    // Merge mode should allow type widening
+    let action = delta_sink
+        .validate_schema(&incoming_schema, SchemaEvolutionMode::Merge)
+        .unwrap();
+
+    // Type widening doesn't require schema change - data is compatible
+    assert!(
+        matches!(action, EvolutionAction::None),
+        "Expected None action for compatible type widening, got {:?}",
+        action
+    );
 }

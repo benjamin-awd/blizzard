@@ -17,6 +17,7 @@ pub mod staging;
 pub use config::Config;
 pub use error::PipelineError;
 pub use pipeline::run_pipeline;
+pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
 
 // Re-export from blizzard-common
 pub use blizzard_common::{
