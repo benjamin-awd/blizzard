@@ -30,6 +30,14 @@ use crate::error::DeltaError;
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
 const TXN_APP_ID_PREFIX: &str = "blizzard:";
 
+/// Ensure Delta Lake cloud storage handlers are registered.
+///
+/// This is idempotent - calling multiple times is safe.
+fn ensure_handlers_registered() {
+    deltalake::aws::register_handlers(None);
+    deltalake::gcp::register_handlers(None);
+}
+
 /// Delta Lake sink for committing Parquet files.
 pub struct DeltaSink {
     table: DeltaTable,
@@ -46,11 +54,30 @@ impl DeltaSink {
         schema: &Schema,
         partition_by: Vec<String>,
     ) -> Result<Self, DeltaError> {
-        // Register Delta Lake handlers for cloud storage
-        deltalake::aws::register_handlers(None);
-        deltalake::gcp::register_handlers(None);
+        ensure_handlers_registered();
 
         let table = load_or_create_table(storage, schema, &partition_by).await?;
+        let last_version = table.version().unwrap_or(-1);
+
+        Ok(Self {
+            table,
+            last_version,
+            checkpoint_version: 0,
+            partition_by,
+        })
+    }
+
+    /// Try to open an existing Delta Lake table without creating it.
+    ///
+    /// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
+    /// to check if the error indicates a missing table.
+    pub async fn try_open(
+        storage: &StorageProvider,
+        partition_by: Vec<String>,
+    ) -> Result<Self, DeltaError> {
+        ensure_handlers_registered();
+
+        let table = try_open_table(storage).await?;
         let last_version = table.version().unwrap_or(-1);
 
         Ok(Self {
@@ -222,6 +249,60 @@ fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructTyp
     StructType::try_new(fields).map_err(|e| DeltaError::StructType {
         message: e.to_string(),
     })
+}
+
+/// Try to open an existing Delta Lake table.
+///
+/// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
+/// to check if the error indicates a missing table.
+async fn try_open_table(storage_provider: &StorageProvider) -> Result<DeltaTable, DeltaError> {
+    let empty_path = &Path::parse("").map_err(|_| DeltaError::PathParse {
+        path: "".to_string(),
+    })?;
+
+    let table_url: String = match storage_provider.config() {
+        BackendConfig::S3(s3) => {
+            format!(
+                "s3://{}/{}",
+                s3.bucket,
+                storage_provider.qualify_path(empty_path)
+            )
+        }
+        BackendConfig::Gcs(gcs) => {
+            format!(
+                "gs://{}/{}",
+                gcs.bucket,
+                storage_provider.qualify_path(empty_path)
+            )
+        }
+        BackendConfig::Azure(azure) => {
+            format!(
+                "abfs://{}/{}",
+                azure.container,
+                storage_provider.qualify_path(empty_path)
+            )
+        }
+        BackendConfig::Local(local) => {
+            format!("file://{}", local.path)
+        }
+    };
+
+    let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
+        url: table_url.clone(),
+    })?;
+
+    let table = deltalake::open_table_with_storage_options(
+        parsed_url,
+        storage_provider.storage_options().clone(),
+    )
+    .await
+    .map_err(|source| DeltaError::DeltaOperation { source })?;
+
+    info!(
+        "Opened existing Delta table at version {}",
+        table.version().unwrap_or(-1)
+    );
+    Ok(table)
 }
 
 /// Load or create a Delta Lake table with the given schema.
@@ -573,5 +654,74 @@ mod tests {
         } else {
             panic!("Expected Txn action");
         }
+    }
+
+    #[tokio::test]
+    async fn test_try_open_nonexistent_table() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageProvider::for_url_with_options(
+            temp_dir.path().to_str().unwrap(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let result = DeltaSink::try_open(&storage, vec![]).await;
+        match result {
+            Ok(_) => panic!("Expected error for non-existent table"),
+            Err(e) => assert!(
+                e.is_table_not_found(),
+                "Expected table not found error, got: {:?}",
+                e
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_try_open_existing_table() {
+        use deltalake::arrow::datatypes::{DataType, Field, Schema};
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageProvider::for_url_with_options(
+            temp_dir.path().to_str().unwrap(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        // First create a table
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        let _sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
+
+        // Now try_open should succeed
+        let opened_sink = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+        assert!(opened_sink.version() >= 0);
+    }
+
+    #[test]
+    fn test_is_table_not_found_delta_operation() {
+        use deltalake::DeltaTableError;
+
+        // Test with a "not found" error message
+        let err = DeltaError::DeltaOperation {
+            source: DeltaTableError::NotATable("Table not found".to_string()),
+        };
+        assert!(err.is_table_not_found());
+
+        // Test with other error types
+        let err = DeltaError::UrlParse {
+            url: "invalid".to_string(),
+        };
+        assert!(!err.is_table_not_found());
+
+        let err = DeltaError::InvalidCheckpoint {
+            message: "bad checkpoint".to_string(),
+        };
+        assert!(!err.is_table_not_found());
     }
 }
