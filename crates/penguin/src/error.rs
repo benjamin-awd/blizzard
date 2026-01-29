@@ -63,6 +63,10 @@ pub enum StagingError {
     /// Failed to delete file.
     #[snafu(display("Failed to delete file {path}: {source}"))]
     Delete { path: String, source: StorageError },
+
+    /// Failed to archive file.
+    #[snafu(display("Failed to archive file {path}: {source}"))]
+    Archive { path: String, source: StorageError },
 }
 
 /// Top-level pipeline errors.

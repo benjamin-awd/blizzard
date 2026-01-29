@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use blizzard_common::FinishedFile;
 use blizzard_common::storage::StorageProvider;
 use blizzard_common::types::SourceState;
-use blizzard_common::FinishedFile;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::sink::DeltaSink;
 
