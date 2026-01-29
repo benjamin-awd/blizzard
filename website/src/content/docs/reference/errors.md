@@ -30,11 +30,11 @@ Errors are organized into categories based on where they occur:
 │  │   ├── DecoderBuild                                            │
 │  │   ├── JsonDecode                                              │
 │  │   └── BatchFlush                                              │
-│  ├── DeltaError                                                  │
+│  ├── SchemaError                                                 │
 │  │   ├── StructType / SchemaConversion                           │
-│  │   ├── DeltaLake                                               │
-│  │   ├── CheckpointJson / Base64Decode                           │
 │  │   └── UrlParse                                                │
+│  ├── StagingError                                                │
+│  │   └── StagingWrite / Serialize                                │
 │  ├── ParquetError                                                │
 │  │   └── Write                                                   │
 │  ├── DlqError                                                    │
@@ -82,15 +82,14 @@ Errors are organized into categories based on where they occur:
 | `JsonDecode` | JSON parsing failed | `parse` |
 | `BatchFlush` | Failed to flush record batch | `parse` |
 
-## Delta Lake Errors
+## Schema Errors
+
+These errors occur during schema conversion for Delta Lake compatibility:
 
 | Error | Description |
 |-------|-------------|
 | `StructType` | Failed to create Delta schema |
 | `SchemaConversion` | Arrow to Delta schema conversion failed |
-| `DeltaLake` | Delta Lake operation failed |
-| `CheckpointJson` | Checkpoint JSON serialization error |
-| `Base64Decode` | Checkpoint base64 decode error |
 | `UrlParse` | Table URL parsing failed |
 
 ## Failure Stages
@@ -121,7 +120,7 @@ When enabled, the DLQ captures:
 - Failure stage
 - Timestamp
 
-See [Dead Letter Queue](/reference/dlq/) for detailed configuration, record format, and reprocessing workflows.
+See [Dead Letter Queue](/blizzard/reference/dlq/) for detailed configuration, record format, and reprocessing workflows.
 
 ## Max Failures
 
@@ -139,7 +138,7 @@ Behavior:
 When max failures is reached:
 1. DLQ is finalized (flushed to storage)
 2. Pipeline returns `MaxFailuresExceeded` error
-3. Checkpoint is NOT committed (safe for retry)
+3. In-progress files may not be written to staging (safe for retry)
 
 ## Error Handling Flow
 

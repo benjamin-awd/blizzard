@@ -223,5 +223,5 @@ source:
 | Source module | `src/source/mod.rs` |
 | NDJSON reader | `src/source/reader.rs` |
 | Source state tracking | `src/source/state.rs` |
-| File listing | `src/storage/mod.rs:564` |
+| File listing | `src/storage/mod.rs` |
 | Download task | `src/pipeline/tasks.rs:300` |

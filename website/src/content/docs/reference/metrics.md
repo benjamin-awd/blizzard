@@ -60,7 +60,7 @@ Stage labels:
 | `blizzard_file_download_duration_seconds` | Histogram | File download latency |
 | `blizzard_file_decompression_duration_seconds` | Histogram | File decompression latency |
 | `blizzard_parquet_write_duration_seconds` | Histogram | Parquet file write latency |
-| `blizzard_delta_commit_duration_seconds` | Histogram | Delta Lake commit latency |
+| `blizzard_staging_write_duration_seconds` | Histogram | Staging file write latency |
 
 ### Concurrency Gauges
 
@@ -125,8 +125,8 @@ increase(blizzard_files_processed_total[1m])
 # P99 download latency
 histogram_quantile(0.99, rate(blizzard_file_download_duration_seconds_bucket[5m]))
 
-# P95 commit latency
-histogram_quantile(0.95, rate(blizzard_delta_commit_duration_seconds_bucket[5m]))
+# P95 staging write latency
+histogram_quantile(0.95, rate(blizzard_staging_write_duration_seconds_bucket[5m]))
 
 # Average decompression time
 rate(blizzard_file_decompression_duration_seconds_sum[5m])

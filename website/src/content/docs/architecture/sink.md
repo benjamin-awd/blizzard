@@ -1,9 +1,9 @@
 ---
-title: Sink & Delta Lake
-description: How Blizzard writes Parquet files and commits them to Delta Lake tables
+title: Sink & Staging
+description: How Blizzard writes Parquet files to staging for Penguin to commit
 ---
 
-Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and committing them atomically to Delta Lake tables with exactly-once semantics.
+Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and uploading them to a staging area. Penguin then commits these files to Delta Lake.
 
 ## Sink Architecture
 
@@ -26,17 +26,16 @@ Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and c
 │       │                                                                      │
 │       ▼ Uploaded files                                                       │
 │  ┌──────────────────┐                                                        │
-│  │  Delta Sink      │  Batch commits with checkpoint                         │
+│  │  Staging Writer  │  Write parquet + metadata for Penguin                  │
 │  └──────────────────┘                                                        │
 │       │                                                                      │
 │       ▼                                                                      │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        Delta Lake Table                                │   │
-│  │  _delta_log/                                                           │   │
-│  │    ├── 00000000000000000000.json                                       │   │
-│  │    ├── 00000000000000000001.json                                       │   │
-│  │    └── 00000000000000000002.json  ◀── Txn + Add actions                │   │
-│  │  *.parquet                                                             │   │
+│  │                        Staging Directory                              │   │
+│  │  table_uri/                                                           │   │
+│  │    ├── _staging/pending/                                              │   │
+│  │    │     └── {uuid}.meta.json  ◀── Metadata for Penguin               │   │
+│  │    └── {partition}/{uuid}.parquet  ◀── Parquet data files             │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -104,57 +103,44 @@ Files are named with UUIDv7 for:
 019234ab-cdef-7890-1234-567890abcdef.parquet
 ```
 
-## Delta Lake Integration
+## Staging Protocol
 
-### Table Creation
+Blizzard writes files to a staging area where Penguin picks them up for Delta Lake commits.
 
-Blizzard automatically creates Delta tables if they don't exist:
-
-1. Attempt to open existing table
-2. If not found, create with schema from config
-3. Register cloud storage handlers (S3, GCS)
-
-### Commit Protocol
-
-Files are committed to Delta Lake in batches:
+### Directory Structure
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Delta Lake Commit                        │
-├─────────────────────────────────────────────────────────────┤
-│  Commit N:                                                  │
-│    ├── Txn { app_id: "blizzard:<checkpoint>", version: N }  │
-│    ├── Add { path: "file1.parquet", size: 128MB, ... }      │
-│    ├── Add { path: "file2.parquet", size: 128MB, ... }      │
-│    └── Add { path: "file3.parquet", size: 128MB, ... }      │
-│                              ▲                              │
-│                              │                              │
-│                    Atomic commit (all or nothing)           │
-└─────────────────────────────────────────────────────────────┘
+table_uri/
+├── _delta_log/              # Delta transaction log (managed by Penguin)
+├── _staging/pending/        # Coordination metadata (.meta.json files)
+├── date=2024-01-01/         # Partitioned parquet files
+│   └── uuid.parquet
+└── ...
 ```
 
-### Batch Commits
+### Write Protocol
 
-To reduce commit overhead, files are committed in batches:
+1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuid}.parquet`
+2. Blizzard writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
+3. Penguin reads `.meta.json`, commits to Delta log, deletes `.meta.json`
 
+The metadata file is written **last**, so Penguin can use its presence as an atomic signal that the Parquet file is complete and ready for commit.
+
+### Metadata Format
+
+The `.meta.json` file contains:
+
+```json
+{
+  "filename": "date=2024-01-01/019234ab-cdef-7890.parquet",
+  "size": 134217728,
+  "record_count": 1000000,
+  "partition_values": {
+    "date": "2024-01-01"
+  },
+  "source_file": "s3://bucket/input/events.ndjson.gz"
+}
 ```
-COMMIT_BATCH_SIZE = 10 files per commit
-```
-
-This balances:
-- Checkpoint frequency (more frequent = less re-processing on failure)
-- Commit overhead (fewer commits = better throughput)
-
-### Atomic Checkpointing
-
-Checkpoint state is embedded in the Delta commit using `Txn` actions:
-
-1. Serialize checkpoint state to JSON
-2. Base64 encode the JSON
-3. Store in `Txn.app_id` with `blizzard:` prefix
-4. Commit atomically with Add actions
-
-See [Checkpoint & Recovery](/architecture/checkpoint-recovery/) for details.
 
 ## Upload Pipeline
 
@@ -202,7 +188,7 @@ sink:
 |--------|------|-------------|
 | `blizzard_bytes_written_total` | Counter | Total Parquet bytes written |
 | `blizzard_parquet_write_duration_seconds` | Histogram | Parquet file write latency |
-| `blizzard_delta_commit_duration_seconds` | Histogram | Delta commit latency |
+| `blizzard_staging_file_written_total` | Counter | Files written to staging |
 | `blizzard_active_uploads` | Gauge | Currently uploading files |
 | `blizzard_active_multipart_parts` | Gauge | Currently uploading parts |
 | `blizzard_multipart_uploads_total` | Counter | Completed multipart uploads |
@@ -213,25 +199,25 @@ When a Parquet file is complete, it's represented as:
 
 ```rust
 struct FinishedFile {
-    filename: String,      // "019234ab-cdef-7890.parquet"
-    size: usize,           // 134217728 (bytes)
-    record_count: usize,   // 1000000
-    bytes: Option<Bytes>,  // Parquet file content
+    filename: String,              // "date=2024-01-01/019234ab.parquet"
+    size: usize,                   // 134217728 (bytes)
+    record_count: usize,           // 1000000
+    bytes: Option<Bytes>,          // Parquet file content
+    partition_values: HashMap,     // {"date": "2024-01-01"}
+    source_file: Option<String>,   // Original source file path
 }
 ```
 
 The `bytes` field:
 - Contains file content for upload
 - Set to `None` after upload completes
-- Cleared in commit records (not stored in checkpoint)
 
 ## Code References
 
 | Component | File |
 |-----------|------|
-| Sink module | `src/sink/mod.rs` |
-| Parquet writer | `src/sink/parquet.rs` |
-| Delta sink | `src/sink/delta.rs` |
-| Rolling policies | `src/sink/parquet.rs:50` |
-| Uploader task | `src/pipeline/tasks.rs:97` |
-| Commit with checkpoint | `src/sink/delta.rs:68` |
+| Sink module | `crates/blizzard/src/sink/mod.rs` |
+| Parquet writer | `crates/blizzard/src/sink/parquet.rs` |
+| Staging writer | `crates/blizzard/src/staging.rs` |
+| Rolling policies | `crates/blizzard/src/sink/parquet.rs:50` |
+| Uploader task | `crates/blizzard/src/pipeline/tasks.rs` |

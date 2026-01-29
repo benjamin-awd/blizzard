@@ -1,15 +1,26 @@
 # ❄️ Blizzard
 
-A high-performance Rust tool for streaming NDJSON.gz files to Delta Lake with checkpoint-based recovery for exactly-once processing semantics.
+A high-performance Rust tool for streaming NDJSON.gz files to Parquet, designed for Delta Lake ingestion pipelines.
 
 ## Features
 
 - **Multi-cloud storage**: S3, GCS, Azure Blob Storage, and local filesystem
-- **Exactly-once processing**: Checkpoint-based recovery ensures no duplicates or data loss
 - **High throughput**: Concurrent file downloads, parallel decompression, and multipart uploads
-- **Delta Lake integration**: Transactional writes with ACID guarantees
+- **Two-stage pipeline**: Blizzard writes Parquet to staging, Penguin commits to Delta Lake
+- **Fault tolerant**: Staging-based coordination enables crash recovery
 - **Resilient error handling**: Skip failed files and continue processing, with Dead Letter Queue support
 - **Prometheus metrics**: Built-in metrics endpoint with health checks
+
+## Architecture
+
+This project includes two binaries:
+
+- **`blizzard`** - Ingests NDJSON files and writes Parquet files to a staging area
+- **`penguin`** - Watches the staging area and commits files to Delta Lake
+
+This two-stage architecture provides better fault tolerance. If the commit service crashes, ingestion continues writing to staging. When the commit service restarts, it picks up where it left off.
+
+For details on Penguin configuration, see the [Penguin Reference](https://benjamin-awd.github.io/blizzard/reference/penguin/).
 
 ## Installation
 

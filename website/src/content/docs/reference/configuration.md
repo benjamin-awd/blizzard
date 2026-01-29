@@ -104,7 +104,7 @@ storage_options:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | **required** | Path to Delta Lake table |
+| `path` | string | **required** | Path to output table (staging directory for Penguin) |
 | `file_size_mb` | integer | `128` | Target Parquet file size in MB |
 | `row_group_size_bytes` | integer | `134217728` | Row group size (128 MB) |
 | `inactivity_timeout_secs` | integer | none | Roll file after inactivity |
@@ -221,7 +221,7 @@ source:
   storage_options:
     AWS_REGION: "us-east-1"
 
-# Sink: Where to write Delta Lake table
+# Sink: Where to write Parquet files (Penguin commits to Delta Lake)
 sink:
   path: "s3://data-lake/curated/events"
   file_size_mb: 128

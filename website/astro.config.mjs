@@ -35,6 +35,7 @@ export default defineConfig({
 						{ label: 'Error Handling', slug: 'reference/errors' },
 						{ label: 'Dead Letter Queue', slug: 'reference/dlq' },
 						{ label: 'Metrics', slug: 'reference/metrics' },
+						{ label: '🐧 Penguin', slug: 'reference/penguin' },
 					],
 				},
 			],

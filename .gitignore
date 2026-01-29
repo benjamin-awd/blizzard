@@ -2,6 +2,7 @@ target/
 .idea
 .env
 .vscode/
+.venv
 
 *.yaml
 deployment/gcp
