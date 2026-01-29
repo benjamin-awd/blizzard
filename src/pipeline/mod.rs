@@ -14,6 +14,7 @@ mod tasks;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -207,6 +208,8 @@ struct InitializedState {
     compression: CompressionFormat,
     batch_size: usize,
     dlq: Option<Arc<DeadLetterQueue>>,
+    /// Partition columns for output files.
+    partition_by: Vec<String>,
 }
 
 /// Main processing pipeline.
@@ -342,6 +345,7 @@ impl Pipeline {
             compression,
             batch_size,
             dlq,
+            partition_by,
         } = state;
 
         // Track failures with DLQ support
@@ -404,7 +408,7 @@ impl Pipeline {
                     });
                     match result {
                         Ok(processed) => {
-                            self.handle_processed_file(processed, &mut state, &mut writer, &uploader).await?;
+                            self.handle_processed_file(processed, &mut state, &mut writer, &uploader, &partition_by).await?;
                         }
                         Err(e) => {
                             state.handle_processing_error(e, &mut failures).await?;
@@ -479,8 +483,17 @@ impl Pipeline {
         state: &mut ProcessingState,
         writer: &mut ParquetWriter,
         uploader: &Uploader,
+        partition_by: &[String],
     ) -> Result<(), PipelineError> {
         let short_name = processed.short_name();
+
+        // Extract partition values from source path and set on writer
+        let partition_values = extract_partition_values(&processed.path, partition_by);
+        if !partition_values.is_empty() {
+            writer
+                .set_partition_context(partition_values)
+                .context(ParquetSnafu)?;
+        }
 
         // Track pending batches before writing
         emit!(PendingBatches {
@@ -547,9 +560,13 @@ impl Pipeline {
     ) -> Result<Option<InitializedState>, PipelineError> {
         let schema = self.config.to_arrow_schema();
 
-        let mut delta_sink = DeltaSink::new(self.sink_storage.clone(), &schema)
-            .await
-            .context(DeltaSnafu)?;
+        let mut delta_sink = DeltaSink::new(
+            self.sink_storage.clone(),
+            &schema,
+            self.config.sink.partition_by.clone(),
+        )
+        .await
+        .context(DeltaSnafu)?;
 
         if cold_start {
             self.checkpoint_coordinator
@@ -617,6 +634,7 @@ impl Pipeline {
             compression: self.config.source.compression,
             batch_size: self.config.source.batch_size,
             dlq,
+            partition_by: self.config.sink.partition_by.clone(),
         }))
     }
 
@@ -639,6 +657,33 @@ impl Pipeline {
         let generator = DatePrefixGenerator::new(filter.prefix_template.clone(), filter.lookback);
         Some(generator.generate_prefixes())
     }
+}
+
+/// Extract partition values from a source file path.
+///
+/// Looks for patterns like `key=value` in the path and extracts values
+/// for the specified partition keys.
+///
+/// # Example
+/// ```ignore
+/// let path = "gs://bucket/data/date=2026-01-28/hour=00/file.ndjson.gz";
+/// let values = extract_partition_values(path, &["date".to_string()]);
+/// assert_eq!(values.get("date"), Some(&"2026-01-28".to_string()));
+/// ```
+fn extract_partition_values(path: &str, partition_keys: &[String]) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    for key in partition_keys {
+        let pattern = format!("{}=", key);
+        if let Some(start) = path.find(&pattern) {
+            let value_start = start + pattern.len();
+            let value_end = path[value_start..]
+                .find('/')
+                .map(|i| value_start + i)
+                .unwrap_or(path.len());
+            values.insert(key.clone(), path[value_start..value_end].to_string());
+        }
+    }
+    values
 }
 
 /// Run the pipeline with the given configuration.
@@ -667,5 +712,55 @@ mod tests {
         let stats = PipelineStats::default();
         assert_eq!(stats.files_processed, 0);
         assert_eq!(stats.records_processed, 0);
+    }
+
+    #[test]
+    fn test_extract_partition_values_single_key() {
+        let path = "gs://bucket/data/date=2026-01-28/hour=00/file.ndjson.gz";
+        let keys = vec!["date".to_string()];
+        let values = extract_partition_values(path, &keys);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values.get("date"), Some(&"2026-01-28".to_string()));
+    }
+
+    #[test]
+    fn test_extract_partition_values_multiple_keys() {
+        let path = "gs://bucket/data/date=2026-01-28/hour=00/file.ndjson.gz";
+        let keys = vec!["date".to_string(), "hour".to_string()];
+        let values = extract_partition_values(path, &keys);
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.get("date"), Some(&"2026-01-28".to_string()));
+        assert_eq!(values.get("hour"), Some(&"00".to_string()));
+    }
+
+    #[test]
+    fn test_extract_partition_values_missing_key() {
+        let path = "gs://bucket/data/date=2026-01-28/file.ndjson.gz";
+        let keys = vec!["date".to_string(), "hour".to_string()];
+        let values = extract_partition_values(path, &keys);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values.get("date"), Some(&"2026-01-28".to_string()));
+        assert_eq!(values.get("hour"), None);
+    }
+
+    #[test]
+    fn test_extract_partition_values_empty_keys() {
+        let path = "gs://bucket/data/date=2026-01-28/file.ndjson.gz";
+        let keys: Vec<String> = vec![];
+        let values = extract_partition_values(path, &keys);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_extract_partition_values_no_match() {
+        let path = "gs://bucket/data/file.ndjson.gz";
+        let keys = vec!["date".to_string()];
+        let values = extract_partition_values(path, &keys);
+
+        assert!(values.is_empty());
     }
 }

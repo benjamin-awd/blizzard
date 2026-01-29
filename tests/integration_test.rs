@@ -293,6 +293,7 @@ mod sink_tests {
             size: 1024 * 1024,
             record_count: 10000,
             bytes: None,
+            partition_values: std::collections::HashMap::new(),
         };
 
         assert_eq!(file.filename, "data-001.parquet");
@@ -588,6 +589,7 @@ schema:
                 max_concurrent_parts: 1,
                 storage_options: HashMap::new(),
                 compression: blizzard::config::ParquetCompression::Snappy,
+                partition_by: Vec::new(),
             },
             schema: blizzard::config::SchemaConfig {
                 fields: vec![blizzard::config::FieldConfig {
@@ -657,6 +659,7 @@ schema:
                 max_concurrent_parts: 1,
                 storage_options: HashMap::new(),
                 compression: blizzard::config::ParquetCompression::Snappy,
+                partition_by: Vec::new(),
             },
             schema: blizzard::config::SchemaConfig {
                 fields: vec![blizzard::config::FieldConfig {
@@ -735,7 +738,7 @@ mod delta_atomic_checkpoint_tests {
         );
 
         let schema = test_schema();
-        let mut delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
+        let mut delta_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
 
         // Create checkpoint state
         let mut source_state = SourceState::new();
@@ -753,6 +756,7 @@ mod delta_atomic_checkpoint_tests {
             size: 1024,
             record_count: 100,
             bytes: None,
+            partition_values: std::collections::HashMap::new(),
         }];
 
         // Commit with checkpoint
@@ -777,7 +781,7 @@ mod delta_atomic_checkpoint_tests {
         );
 
         let schema = test_schema();
-        let mut delta_sink = DeltaSink::new(storage.clone(), &schema).await.unwrap();
+        let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
 
         // Create and commit checkpoint
         let mut source_state = SourceState::new();
@@ -795,6 +799,7 @@ mod delta_atomic_checkpoint_tests {
             size: 1024,
             record_count: 500,
             bytes: None,
+            partition_values: std::collections::HashMap::new(),
         }];
 
         delta_sink
@@ -803,7 +808,7 @@ mod delta_atomic_checkpoint_tests {
             .unwrap();
 
         // Now create a new delta sink (simulating restart) and recover
-        let mut new_delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
+        let mut new_delta_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
         let recovered = new_delta_sink.recover_checkpoint_from_log().await.unwrap();
 
         assert!(recovered.is_some(), "Should recover checkpoint");
@@ -830,7 +835,7 @@ mod delta_atomic_checkpoint_tests {
         );
 
         let schema = test_schema();
-        let mut delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
+        let mut delta_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
 
         let recovered = delta_sink.recover_checkpoint_from_log().await.unwrap();
         assert!(recovered.is_none(), "Empty table should have no checkpoint");

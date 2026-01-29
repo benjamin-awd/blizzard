@@ -5,6 +5,8 @@
 pub mod delta;
 pub mod parquet;
 
+use std::collections::HashMap;
+
 /// Information about a completed Parquet file.
 #[derive(Debug, Clone)]
 pub struct FinishedFile {
@@ -17,4 +19,6 @@ pub struct FinishedFile {
     /// The parquet file bytes (to be uploaded to storage).
     /// None if the file was already uploaded (e.g., from checkpoint recovery).
     pub bytes: Option<bytes::Bytes>,
+    /// Partition values extracted from source path (e.g., {"date": "2026-01-28"}).
+    pub partition_values: HashMap<String, String>,
 }
