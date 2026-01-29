@@ -42,7 +42,7 @@ use crate::storage::{
 use tasks::{DownloadedFile, Downloader, ProcessFuture, ProcessedFile, Uploader, spawn_read_task};
 
 /// Statistics about the pipeline run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PipelineStats {
     pub files_processed: usize,
     pub records_processed: usize,
@@ -271,11 +271,10 @@ impl Pipeline {
 
         loop {
             // Race initialization against shutdown signal
-            let shutdown = self.shutdown.clone();
             let state = tokio::select! {
                 biased;
 
-                _ = shutdown.cancelled() => {
+                _ = self.shutdown.cancelled() => {
                     info!("Shutdown requested during initialization");
                     return Ok(self.stats.clone());
                 }
@@ -658,7 +657,7 @@ impl Pipeline {
     /// Returns `None` if no partition filter is configured.
     fn generate_date_prefixes(&self) -> Option<Vec<String>> {
         let filter = self.config.source.partition_filter.as_ref()?;
-        let generator = DatePrefixGenerator::new(filter.prefix_template.clone(), filter.lookback);
+        let generator = DatePrefixGenerator::new(&filter.prefix_template, filter.lookback);
         Some(generator.generate_prefixes())
     }
 }

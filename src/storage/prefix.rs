@@ -15,7 +15,7 @@ use chrono::{DateTime, Duration, Utc};
 ///
 /// # Example
 /// ```ignore
-/// let generator = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 2);
+/// let generator = DatePrefixGenerator::new("date=%Y-%m-%d", 2);
 /// let prefixes = generator.generate_prefixes();
 /// // Returns: ["date=2026-01-26", "date=2026-01-27", "date=2026-01-28"]
 /// ```
@@ -31,8 +31,11 @@ impl DatePrefixGenerator {
     /// * `template` - strftime-style template (e.g., "date=%Y-%m-%d/hour=%H")
     /// * `lookback` - number of units to look back. If the template contains `%H`,
     ///   this is interpreted as hours; otherwise as days. (0 = current unit only)
-    pub fn new(template: String, lookback: u32) -> Self {
-        Self { template, lookback }
+    pub fn new(template: &str, lookback: u32) -> Self {
+        Self {
+            template: template.to_owned(),
+            lookback,
+        }
     }
 
     /// Check if the template contains hour-level granularity (%H).
@@ -106,7 +109,7 @@ mod tests {
 
     #[test]
     fn test_date_only_prefixes() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 2);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d", 2);
         // Use a fixed time: 2026-01-28 14:30:00 UTC
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
         let prefixes = generator.generate_date_only_prefixes_from(now);
@@ -119,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_date_only_prefixes_zero_lookback() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 0);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d", 0);
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
         let prefixes = generator.generate_date_only_prefixes_from(now);
 
@@ -129,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_hour_prefixes_lookback_hours() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H".to_string(), 2);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H", 2);
         // 14:30 UTC - should generate hours 12, 13, 14 (lookback=2 means 2 hours back)
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
         let prefixes = generator.generate_prefixes_with_hours_from(now);
@@ -142,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_hour_prefixes_crosses_midnight() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H".to_string(), 3);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H", 3);
         // 02:00 UTC on Jan 28 - lookback=3 goes back to 23:00 on Jan 27
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 2, 0, 0).unwrap();
         let prefixes = generator.generate_prefixes_with_hours_from(now);
@@ -156,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_hour_prefixes_zero_lookback() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H".to_string(), 0);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H", 0);
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
         let prefixes = generator.generate_prefixes_with_hours_from(now);
 
@@ -166,10 +169,10 @@ mod tests {
 
     #[test]
     fn test_has_hour_granularity() {
-        let generator_with_hour = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H".to_string(), 1);
+        let generator_with_hour = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H", 1);
         assert!(generator_with_hour.has_hour_granularity());
 
-        let generator_date_only = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 1);
+        let generator_date_only = DatePrefixGenerator::new("date=%Y-%m-%d", 1);
         assert!(!generator_date_only.has_hour_granularity());
     }
 
@@ -178,14 +181,14 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
 
         // Date-only template - lookback=1 means 1 day back
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 1);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d", 1);
         let prefixes = generator.generate_date_only_prefixes_from(now);
         assert_eq!(prefixes.len(), 2);
         assert_eq!(prefixes[0], "date=2026-01-27");
         assert_eq!(prefixes[1], "date=2026-01-28");
 
         // Hour template - lookback=1 means 1 hour back
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H".to_string(), 1);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d/hour=%H", 1);
         let prefixes = generator.generate_prefixes_with_hours_from(now);
         assert_eq!(prefixes.len(), 2);
         assert_eq!(prefixes[0], "date=2026-01-28/hour=13");
@@ -194,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_custom_template_format() {
-        let generator = DatePrefixGenerator::new("year=%Y/month=%m/day=%d".to_string(), 1);
+        let generator = DatePrefixGenerator::new("year=%Y/month=%m/day=%d", 1);
         let now = Utc.with_ymd_and_hms(2026, 1, 28, 14, 30, 0).unwrap();
         let prefixes = generator.generate_date_only_prefixes_from(now);
 
@@ -205,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_month_boundary_crossing() {
-        let generator = DatePrefixGenerator::new("date=%Y-%m-%d".to_string(), 2);
+        let generator = DatePrefixGenerator::new("date=%Y-%m-%d", 2);
         // First day of February
         let now = Utc.with_ymd_and_hms(2026, 2, 1, 10, 0, 0).unwrap();
         let prefixes = generator.generate_date_only_prefixes_from(now);
