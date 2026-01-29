@@ -123,12 +123,6 @@ impl CheckpointCoordinator {
         }
     }
 
-    /// Get the current source state.
-    pub async fn get_source_state(&self) -> SourceState {
-        let state = self.state.lock().await;
-        state.source_state.clone()
-    }
-
     /// Restore checkpoint state from the Delta transaction log.
     ///
     /// This is the primary entry point for cold start recovery. It scans the
@@ -152,34 +146,6 @@ impl CheckpointCoordinator {
             info!("No checkpoint found in Delta log, starting fresh");
             Ok(false)
         }
-    }
-
-    /// Compact the checkpoint state by removing finished files outside the given prefixes.
-    ///
-    /// This should be called after `restore_from_delta_log` when using partition filtering.
-    /// It removes finished files that are outside the partition filter window, reducing
-    /// memory usage significantly for long-running pipelines.
-    ///
-    /// Returns the number of files removed.
-    pub async fn compact_state(&self, prefixes: &[String]) -> usize {
-        let mut state = self.state.lock().await;
-        let before = state.source_state.files.len();
-        let removed = state.source_state.compact(prefixes);
-
-        if removed > 0 {
-            info!(
-                "Compacted checkpoint state: removed {} finished files outside partition window ({} -> {} files)",
-                removed,
-                before,
-                state.source_state.files.len()
-            );
-        }
-
-        emit!(SourceStateFiles {
-            count: state.source_state.files.len()
-        });
-
-        removed
     }
 
     /// Maybe create a Delta Lake checkpoint file based on the commit interval.
