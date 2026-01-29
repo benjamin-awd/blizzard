@@ -61,11 +61,21 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
         shutdown_clone.cancel();
     });
 
-    // Create the pipeline processor
-    let mut processor = BlizzardProcessor::new(config, shutdown.clone()).await?;
+    // Create the pipeline processor, racing against shutdown
+    let poll_interval_secs = config.source.poll_interval_secs;
+    let mut processor = tokio::select! {
+        biased;
+
+        _ = shutdown.cancelled() => {
+            info!("Shutdown requested during initialization");
+            return Ok(PipelineStats::default());
+        }
+
+        result = BlizzardProcessor::new(config, shutdown.clone()) => result?,
+    };
 
     // Run the polling loop
-    let poll_interval = Duration::from_secs(processor.config.source.poll_interval_secs);
+    let poll_interval = Duration::from_secs(poll_interval_secs);
     run_polling_loop(&mut processor, poll_interval, shutdown).await?;
 
     Ok(processor.stats)

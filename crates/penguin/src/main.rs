@@ -3,9 +3,9 @@
 use clap::Parser;
 use std::process::ExitCode;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer};
 
 use penguin::Config;
 use penguin::run_pipeline;
@@ -23,14 +23,15 @@ struct Args {
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_filter(env_filter);
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true);
 
     // Use rate-limited layer to prevent log spam
     let rate_limited = tracing_limit::RateLimitedLayer::new(fmt_layer);
 
-    tracing_subscriber::registry().with(rate_limited).init();
+    tracing_subscriber::registry()
+        .with(rate_limited)
+        .with(env_filter)
+        .init();
 }
 
 #[tokio::main]

@@ -77,7 +77,20 @@ pub async fn run_polling_loop<P: PollingProcessor>(
         };
 
         let result = match state {
-            Some(s) => processor.process(s).await?,
+            Some(s) => {
+                // Race processing against shutdown signal
+                let shutdown_clone = shutdown.clone();
+                tokio::select! {
+                    biased;
+
+                    _ = shutdown_clone.cancelled() => {
+                        info!("Shutdown requested during processing");
+                        IterationResult::Shutdown
+                    }
+
+                    result = processor.process(s) => result?,
+                }
+            }
             None => {
                 info!("No items to process");
                 IterationResult::NoItems
