@@ -207,15 +207,3 @@ The pipeline handles errors at each stage:
 | Max failures reached | Stop pipeline with error |
 
 See [Error Handling](/blizzard/reference/errors/) for details.
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Pipeline struct | `crates/blizzard/src/pipeline/mod.rs` |
-| Polling loop | `crates/blizzard/src/pipeline/mod.rs:253` |
-| Iteration prepare | `crates/blizzard/src/pipeline/mod.rs:590` |
-| Processing loop | `crates/blizzard/src/pipeline/mod.rs:320` |
-| Downloader task | `crates/blizzard/src/pipeline/tasks.rs:300` |
-| Uploader task | `crates/blizzard/src/pipeline/tasks.rs:97` |
-| Graceful shutdown | `crates/blizzard/src/pipeline/mod.rs:261` |

@@ -279,12 +279,3 @@ Configuration is validated on load:
 | No schema fields | `Schema must have at least one field` |
 | Missing env var | `Environment variable interpolation failed` |
 | Invalid YAML | `Failed to parse YAML configuration` |
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Config structs | `src/config/mod.rs` |
-| Environment interpolation | `src/config/vars.rs` |
-| Schema to Arrow | `src/config/mod.rs:290` |
-| Validation | `src/config/mod.rs:282` |

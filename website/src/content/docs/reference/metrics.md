@@ -239,12 +239,3 @@ emit!(FileFailed { stage: FailureStage::Parse });
 ```
 
 The `emit!` macro calls the `emit()` method which increments/records metrics.
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Metrics events | `src/metrics/events.rs` |
-| Metrics server | `src/metrics/mod.rs` |
-| InternalEvent trait | `src/metrics/events.rs:12` |
-| emit! macro | `src/metrics/mod.rs` |

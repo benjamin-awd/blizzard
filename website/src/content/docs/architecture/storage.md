@@ -217,15 +217,3 @@ All storage operations emit metrics:
 Labels:
 - `operation`: `get`, `put`, `list`, `create_multipart`, `put_part`, `complete_multipart`
 - `status`: `success`, `error`
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| StorageProvider | `src/storage/mod.rs` |
-| S3 backend | `src/storage/s3.rs` |
-| GCS backend | `src/storage/gcs.rs` |
-| Azure backend | `src/storage/azure.rs` |
-| Local backend | `src/storage/local.rs` |
-| URL parsing | `src/storage/mod.rs:144` |
-| Multipart upload | `src/storage/mod.rs:431` |

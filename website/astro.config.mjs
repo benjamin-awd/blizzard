@@ -20,23 +20,25 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Architecture',
+					label: 'Blizzard',
 					items: [
 						{ label: 'Pipeline Overview', slug: 'architecture/pipeline' },
-						{ label: 'Checkpoints', slug: 'architecture/checkpoint' },
-						{ label: 'Storage Backends', slug: 'architecture/storage' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
-						{ label: 'Sink & Delta Lake', slug: 'architecture/sink' },
-					],
-				},
-				{
-					label: 'Reference',
-					items: [
+						{ label: 'Parquet Writer', slug: 'architecture/sink' },
+						{ label: 'Storage Backends', slug: 'architecture/storage' },
 						{ label: 'Configuration', slug: 'reference/configuration' },
 						{ label: 'Error Handling', slug: 'reference/errors' },
 						{ label: 'Dead Letter Queue', slug: 'reference/dlq' },
 						{ label: 'Metrics', slug: 'reference/metrics' },
-						{ label: '🐧 Penguin', slug: 'reference/penguin' },
+					],
+				},
+				{
+					label: '🐧 Penguin',
+					items: [
+						{ label: 'Overview', slug: 'penguin' },
+						{ label: 'Delta Lake Commits', slug: 'penguin/delta-lake' },
+						{ label: 'Fault Tolerance', slug: 'penguin/fault-tolerance' },
+						{ label: 'Configuration', slug: 'penguin/configuration' },
 					],
 				},
 			],

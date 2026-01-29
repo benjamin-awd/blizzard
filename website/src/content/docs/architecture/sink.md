@@ -1,9 +1,9 @@
 ---
-title: Sink & Staging
-description: How Blizzard writes Parquet files to staging for Penguin to commit
+title: Parquet Writer
+description: How Blizzard writes RecordBatches to Parquet files and uploads them
 ---
 
-Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and uploading them to a staging area. Penguin then commits these files to Delta Lake.
+Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and uploading them to storage. Once uploaded, [Penguin commits these files to Delta Lake](/blizzard/penguin/delta-lake/).
 
 ## Sink Architecture
 
@@ -28,15 +28,6 @@ Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and u
 │  ┌──────────────────┐                                                        │
 │  │  Staging Writer  │  Write parquet + metadata for Penguin                  │
 │  └──────────────────┘                                                        │
-│       │                                                                      │
-│       ▼                                                                      │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        Staging Directory                              │   │
-│  │  table_uri/                                                           │   │
-│  │    ├── _staging/pending/                                              │   │
-│  │    │     └── {uuid}.meta.json  ◀── Metadata for Penguin               │   │
-│  │    └── {partition}/{uuid}.parquet  ◀── Parquet data files             │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -101,45 +92,6 @@ Files are named with UUIDv7 for:
 
 ```
 019234ab-cdef-7890-1234-567890abcdef.parquet
-```
-
-## Staging Protocol
-
-Blizzard writes files to a staging area where Penguin picks them up for Delta Lake commits.
-
-### Directory Structure
-
-```
-table_uri/
-├── _delta_log/              # Delta transaction log (managed by Penguin)
-├── _staging/pending/        # Coordination metadata (.meta.json files)
-├── date=2024-01-01/         # Partitioned parquet files
-│   └── uuid.parquet
-└── ...
-```
-
-### Write Protocol
-
-1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuid}.parquet`
-2. Blizzard writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
-3. Penguin reads `.meta.json`, commits to Delta log, deletes `.meta.json`
-
-The metadata file is written **last**, so Penguin can use its presence as an atomic signal that the Parquet file is complete and ready for commit.
-
-### Metadata Format
-
-The `.meta.json` file contains:
-
-```json
-{
-  "filename": "date=2024-01-01/019234ab-cdef-7890.parquet",
-  "size": 134217728,
-  "record_count": 1000000,
-  "partition_values": {
-    "date": "2024-01-01"
-  },
-  "source_file": "s3://bucket/input/events.ndjson.gz"
-}
 ```
 
 ## Upload Pipeline
@@ -211,13 +163,3 @@ struct FinishedFile {
 The `bytes` field:
 - Contains file content for upload
 - Set to `None` after upload completes
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Sink module | `crates/blizzard/src/sink/mod.rs` |
-| Parquet writer | `crates/blizzard/src/sink/parquet.rs` |
-| Staging writer | `crates/blizzard/src/staging.rs` |
-| Rolling policies | `crates/blizzard/src/sink/parquet.rs:50` |
-| Uploader task | `crates/blizzard/src/pipeline/tasks.rs` |

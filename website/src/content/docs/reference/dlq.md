@@ -284,13 +284,3 @@ rate(blizzard_files_failed_total[5m])
 # Parse failures specifically
 blizzard_files_failed_total{stage="parse"}
 ```
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| DeadLetterQueue struct | `src/dlq.rs` |
-| FailedFile record | `src/dlq.rs:12` |
-| FailureStats | `src/dlq.rs:21` |
-| DLQ integration | `src/pipeline/mod.rs:379` |
-| Failure stage enum | `src/metrics/events.rs:72` |

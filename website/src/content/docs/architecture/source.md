@@ -215,13 +215,3 @@ source:
   storage_options:
     AWS_REGION: "us-east-1"
 ```
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Source module | `src/source/mod.rs` |
-| NDJSON reader | `src/source/reader.rs` |
-| Source state tracking | `src/source/state.rs` |
-| File listing | `src/storage/mod.rs` |
-| Download task | `src/pipeline/tasks.rs:300` |
