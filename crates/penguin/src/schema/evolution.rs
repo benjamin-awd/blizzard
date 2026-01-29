@@ -13,6 +13,29 @@ use std::sync::Arc;
 
 use crate::error::SchemaError;
 
+/// Result of coercing a field to Delta Lake compatible types.
+///
+/// This struct explicitly tracks whether coercion was needed, avoiding
+/// the need for fragile pointer equality checks.
+struct CoercedField {
+    /// The field after coercion (may be the same as input if unchanged).
+    field: FieldRef,
+    /// Whether the field was actually modified during coercion.
+    changed: bool,
+}
+
+impl CoercedField {
+    /// Create a result indicating the field was unchanged.
+    fn unchanged(field: FieldRef) -> Self {
+        Self { field, changed: false }
+    }
+
+    /// Create a result indicating the field was changed.
+    fn changed(field: FieldRef) -> Self {
+        Self { field, changed: true }
+    }
+}
+
 /// Schema evolution mode determining how schema changes are handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -216,64 +239,66 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
 /// This is useful when creating tables from parquet files that may have
 /// nanosecond or millisecond timestamps.
 pub fn coerce_field(field: FieldRef) -> FieldRef {
+    coerce_field_inner(field).field
+}
+
+/// Inner implementation that tracks whether coercion occurred.
+fn coerce_field_inner(field: FieldRef) -> CoercedField {
     match field.data_type() {
         // Coerce timestamp precision to microseconds
         DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Millisecond, tz) => {
-            Arc::new(Field::new(
+            CoercedField::changed(Arc::new(Field::new(
                 field.name(),
                 DataType::Timestamp(TimeUnit::Microsecond, tz.clone()),
                 field.is_nullable(),
-            ))
+            )))
         }
         // Recursively coerce List inner types
         DataType::List(inner_field) => {
-            let coerced_inner = coerce_field(inner_field.clone());
-            if Arc::ptr_eq(&coerced_inner, inner_field) {
-                field
-            } else {
-                Arc::new(Field::new(
+            let coerced_inner = coerce_field_inner(inner_field.clone());
+            if coerced_inner.changed {
+                CoercedField::changed(Arc::new(Field::new(
                     field.name(),
-                    DataType::List(coerced_inner),
+                    DataType::List(coerced_inner.field),
                     field.is_nullable(),
-                ))
+                )))
+            } else {
+                CoercedField::unchanged(field)
             }
         }
         // Recursively coerce LargeList inner types
         DataType::LargeList(inner_field) => {
-            let coerced_inner = coerce_field(inner_field.clone());
-            if Arc::ptr_eq(&coerced_inner, inner_field) {
-                field
-            } else {
-                Arc::new(Field::new(
+            let coerced_inner = coerce_field_inner(inner_field.clone());
+            if coerced_inner.changed {
+                CoercedField::changed(Arc::new(Field::new(
                     field.name(),
-                    DataType::LargeList(coerced_inner),
+                    DataType::LargeList(coerced_inner.field),
                     field.is_nullable(),
-                ))
+                )))
+            } else {
+                CoercedField::unchanged(field)
             }
         }
         // Recursively coerce Struct field types
         DataType::Struct(fields) => {
-            let coerced_fields: Vec<FieldRef> =
-                fields.iter().map(|f| coerce_field(f.clone())).collect();
+            let coerced: Vec<CoercedField> =
+                fields.iter().map(|f| coerce_field_inner(f.clone())).collect();
 
-            // Check if any field was actually coerced
-            let any_changed = fields
-                .iter()
-                .zip(coerced_fields.iter())
-                .any(|(orig, coerced)| !Arc::ptr_eq(orig, coerced));
+            let any_changed = coerced.iter().any(|c| c.changed);
 
             if any_changed {
-                Arc::new(Field::new(
+                let coerced_fields: Vec<FieldRef> = coerced.into_iter().map(|c| c.field).collect();
+                CoercedField::changed(Arc::new(Field::new(
                     field.name(),
                     DataType::Struct(coerced_fields.into()),
                     field.is_nullable(),
-                ))
+                )))
             } else {
-                field
+                CoercedField::unchanged(field)
             }
         }
         // All other types pass through unchanged
-        _ => field,
+        _ => CoercedField::unchanged(field),
     }
 }
 
