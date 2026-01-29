@@ -14,7 +14,9 @@ use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::Config;
-use crate::error::{AddressParseSnafu, DeltaSinkNotInitializedSnafu, MetricsSnafu, PipelineError, StorageSnafu};
+use crate::error::{
+    AddressParseSnafu, DeltaSinkNotInitializedSnafu, MetricsSnafu, PipelineError, StorageSnafu,
+};
 use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
@@ -164,7 +166,10 @@ impl PenguinProcessor {
         }
 
         // Table exists - validate schema evolution
-        let sink = self.delta_sink.as_mut().context(DeltaSinkNotInitializedSnafu)?;
+        let sink = self
+            .delta_sink
+            .as_mut()
+            .context(DeltaSinkNotInitializedSnafu)?;
         let evolution_mode = self.config.source.schema_evolution;
 
         let action = sink.validate_schema(&incoming_schema, evolution_mode)?;
@@ -224,7 +229,10 @@ impl PollingProcessor for PenguinProcessor {
         // This must happen AFTER ensure_delta_sink so we have a table to read from
         if cold_start {
             info!("Cold start - recovering checkpoint from Delta log");
-            let delta_sink = self.delta_sink.as_mut().context(DeltaSinkNotInitializedSnafu)?;
+            let delta_sink = self
+                .delta_sink
+                .as_mut()
+                .context(DeltaSinkNotInitializedSnafu)?;
             match self
                 .checkpoint_coordinator
                 .restore_from_delta_log(delta_sink)
@@ -244,7 +252,10 @@ impl PollingProcessor for PenguinProcessor {
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
         let PreparedState { pending_files } = state;
 
-        let delta_sink = self.delta_sink.as_mut().context(DeltaSinkNotInitializedSnafu)?;
+        let delta_sink = self
+            .delta_sink
+            .as_mut()
+            .context(DeltaSinkNotInitializedSnafu)?;
 
         // Commit files to Delta Lake (parquet files are already in table directory)
         let committed_count = self
