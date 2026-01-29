@@ -15,6 +15,7 @@ This page provides the complete configuration reference for Penguin. For an over
 | `poll_interval_secs` | integer | `10` | Interval in seconds between polling for new files |
 | `partition_by` | array | `[]` | Columns to partition the Delta table by |
 | `delta_checkpoint_interval` | integer | `10` | Number of commits between Delta checkpoints |
+| `schema_evolution` | string | `"merge"` | Schema evolution mode: `strict`, `merge`, or `overwrite`. See [Schema Evolution](./schema-evolution/) |
 | `max_concurrent_uploads` | integer | `4` | Maximum concurrent file uploads |
 | `max_concurrent_parts` | integer | `8` | Maximum concurrent parts per multipart upload |
 | `part_size_mb` | integer | `10` | Part size for multipart uploads in MB |
@@ -39,6 +40,7 @@ source:
     - date
     - region
   delta_checkpoint_interval: 10
+  schema_evolution: merge  # Allow adding new nullable columns
   max_concurrent_uploads: 4
   max_concurrent_parts: 8
   part_size_mb: 10

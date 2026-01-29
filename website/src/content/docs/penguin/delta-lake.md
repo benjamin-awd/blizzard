@@ -93,6 +93,17 @@ source:
   delta_checkpoint_interval: 10  # Checkpoint every 10 commits (default)
 ```
 
+## Schema Evolution
+
+Penguin automatically handles schema changes in incoming Parquet files. By default, it uses **merge mode** which allows adding new nullable columns while rejecting incompatible changes.
+
+```yaml
+source:
+  schema_evolution: merge  # strict, merge (default), or overwrite
+```
+
+For details on how schema evolution works and the available modes, see [Schema Evolution](./schema-evolution/).
+
 ## Configuration
 
 ### Basic Configuration
@@ -105,6 +116,7 @@ source:
     - date
     - region
   delta_checkpoint_interval: 10
+  schema_evolution: merge
   storage_options:
     AWS_REGION: "us-east-1"
 

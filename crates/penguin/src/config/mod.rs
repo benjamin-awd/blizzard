@@ -9,6 +9,7 @@ pub use blizzard_common::config::{
 pub use blizzard_common::{KB, MB};
 
 use crate::error::ConfigError;
+use crate::schema::SchemaEvolutionMode;
 
 fn default_poll_interval() -> u64 {
     10
@@ -46,6 +47,9 @@ pub struct SourceConfig {
     /// Storage options for Delta Lake storage.
     #[serde(default)]
     pub storage_options: HashMap<String, String>,
+    /// Schema evolution mode: "strict", "merge" (default), or "overwrite".
+    #[serde(default)]
+    pub schema_evolution: SchemaEvolutionMode,
 }
 
 fn default_delta_checkpoint_interval() -> usize {

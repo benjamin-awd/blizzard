@@ -19,7 +19,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Blizzard',
+					label: '❄️ Blizzard',
 					items: [
 						{ label: 'Pipeline Overview', slug: 'architecture/pipeline' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
@@ -36,6 +36,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Overview', slug: 'penguin' },
 						{ label: 'Delta Lake Commits', slug: 'penguin/delta-lake' },
+						{ label: 'Schema Evolution', slug: 'penguin/schema-evolution' },
 						{ label: 'Fault Tolerance', slug: 'penguin/fault-tolerance' },
 						{ label: 'Configuration', slug: 'penguin/configuration' },
 					],
