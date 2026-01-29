@@ -6,7 +6,7 @@
 //!
 //! Based on delta-rs patterns from `crates/core/src/operations/write/mod.rs`.
 
-use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,6 +64,7 @@ impl SchemaComparison {
 /// - Int8 -> Int16 -> Int32 -> Int64
 /// - Float32 -> Float64
 /// - Date32 -> Date64
+/// - Timestamp precision coercion to Microsecond (Delta Lake requirement)
 pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
     let table_fields: HashMap<&str, &Field> = table
         .fields()
@@ -123,14 +124,34 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
     }
 }
 
-/// Check if a type change represents valid type widening.
+/// Check if a type change represents valid type widening or coercion.
 ///
 /// Allowed widenings:
 /// - Integer widening: Int8 -> Int16 -> Int32 -> Int64
 /// - Unsigned integer widening: UInt8 -> UInt16 -> UInt32 -> UInt64
 /// - Float widening: Float32 -> Float64
 /// - Date widening: Date32 -> Date64
+/// - Timestamp precision coercion: Nanosecond/Millisecond -> Microsecond
+///   (Delta Lake requires microsecond precision for timestamps)
 fn is_type_widening(from: &DataType, to: &DataType) -> bool {
+    // Handle timestamp precision coercion (Delta Lake requires microsecond precision)
+    if let (
+        DataType::Timestamp(from_unit, from_tz),
+        DataType::Timestamp(to_unit, to_tz),
+    ) = (from, to)
+    {
+        // Timezone must match (or both be None)
+        if from_tz != to_tz {
+            return false;
+        }
+        // Allow coercion to microseconds from nanoseconds or milliseconds
+        return matches!(
+            (from_unit, to_unit),
+            (TimeUnit::Nanosecond, TimeUnit::Microsecond)
+                | (TimeUnit::Millisecond, TimeUnit::Microsecond)
+        );
+    }
+
     matches!(
         (from, to),
         // Integer widening
@@ -309,7 +330,7 @@ fn format_incompatibility(comparison: &SchemaComparison) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
     fn make_schema(fields: Vec<(&str, DataType, bool)>) -> Schema {
         Schema::new(
@@ -406,6 +427,103 @@ mod tests {
         assert_eq!(comparison.type_changes[0].0, "id");
         assert_eq!(comparison.type_changes[0].1, DataType::Int64);
         assert_eq!(comparison.type_changes[0].2, DataType::Int32);
+    }
+
+    #[test]
+    fn test_compare_timestamp_nanosecond_to_microsecond() {
+        let table = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_timestamp_millisecond_to_microsecond() {
+        let table = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_timestamp_with_timezone_coercion() {
+        let tz = Some("UTC".into());
+        let table = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, tz.clone()),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, tz),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_timestamp_timezone_mismatch_rejected() {
+        let table = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into())),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible);
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_timestamp_microsecond_to_nanosecond_rejected() {
+        // Narrowing from microsecond to nanosecond is not allowed
+        let table = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible);
+        assert_eq!(comparison.type_changes.len(), 1);
     }
 
     #[test]
