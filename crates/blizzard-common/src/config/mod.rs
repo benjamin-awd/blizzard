@@ -1,7 +1,13 @@
 //! Common configuration types shared between blizzard and penguin.
 
+mod component_key;
+mod global;
+mod resource;
 mod vars;
 
+pub use component_key::ComponentKey;
+pub use global::GlobalConfig;
+pub use resource::Resource;
 pub use vars::{InterpolationResult, interpolate};
 
 use serde::{Deserialize, Serialize};
