@@ -1,0 +1,46 @@
+[package]
+name = "blizzard-common"
+version = "0.1.0"
+description = "Shared components for blizzard and penguin crates"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Object storage
+object_store = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Error handling
+snafu = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# URL parsing
+url = { workspace = true }
+regex = { workspace = true }
+
+# Misc
+bytes = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
