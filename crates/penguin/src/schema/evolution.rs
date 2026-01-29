@@ -133,6 +133,7 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
 /// - Date widening: Date32 -> Date64
 /// - Timestamp precision coercion: Nanosecond/Millisecond -> Microsecond
 ///   (Delta Lake requires microsecond precision for timestamps)
+/// - Nested types (List, Struct): recursively checks inner types
 fn is_type_widening(from: &DataType, to: &DataType) -> bool {
     // Handle timestamp precision coercion (Delta Lake requires microsecond precision)
     if let (
@@ -150,6 +151,37 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
             (TimeUnit::Nanosecond, TimeUnit::Microsecond)
                 | (TimeUnit::Millisecond, TimeUnit::Microsecond)
         );
+    }
+
+    // Handle List types - recursively check inner field type
+    if let (DataType::List(from_field), DataType::List(to_field)) = (from, to) {
+        return is_type_widening(from_field.data_type(), to_field.data_type());
+    }
+
+    // Handle LargeList types
+    if let (DataType::LargeList(from_field), DataType::LargeList(to_field)) = (from, to) {
+        return is_type_widening(from_field.data_type(), to_field.data_type());
+    }
+
+    // Handle Struct types - all fields must be compatible
+    if let (DataType::Struct(from_fields), DataType::Struct(to_fields)) = (from, to) {
+        // Must have same number of fields for widening
+        if from_fields.len() != to_fields.len() {
+            return false;
+        }
+        // Check each field by position (names must match, types must be compatible)
+        for (from_field, to_field) in from_fields.iter().zip(to_fields.iter()) {
+            if from_field.name() != to_field.name() {
+                return false;
+            }
+            // If types differ, check if it's a valid widening
+            if from_field.data_type() != to_field.data_type()
+                && !is_type_widening(from_field.data_type(), to_field.data_type())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     matches!(
@@ -701,5 +733,185 @@ mod tests {
             EvolutionAction::None => {}
             action => panic!("Expected None action, got: {:?}", action),
         }
+    }
+
+    #[test]
+    fn test_compare_list_with_timestamp_coercion() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "timestamps",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "timestamps",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_list_with_integer_widening() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_list_incompatible_type_rejected() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible);
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_struct_with_timestamp_coercion() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "meta",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new(
+                        "created_at",
+                        DataType::Timestamp(TimeUnit::Nanosecond, None),
+                        true,
+                    )),
+                    Arc::new(Field::new("id", DataType::Int32, true)),
+                ]
+                .into(),
+            ),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "meta",
+            DataType::Struct(
+                vec![
+                    Arc::new(Field::new(
+                        "created_at",
+                        DataType::Timestamp(TimeUnit::Microsecond, None),
+                        true,
+                    )),
+                    Arc::new(Field::new("id", DataType::Int32, true)),
+                ]
+                .into(),
+            ),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_struct_field_name_mismatch_rejected() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "meta",
+            DataType::Struct(
+                vec![Arc::new(Field::new("id", DataType::Int32, true))].into(),
+            ),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "meta",
+            DataType::Struct(
+                vec![Arc::new(Field::new("user_id", DataType::Int32, true))].into(),
+            ),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible);
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_nested_list_in_struct_with_coercion() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![(
+            "data",
+            DataType::Struct(
+                vec![Arc::new(Field::new(
+                    "timestamps",
+                    DataType::List(Arc::new(Field::new(
+                        "item",
+                        DataType::Timestamp(TimeUnit::Nanosecond, None),
+                        true,
+                    ))),
+                    true,
+                ))]
+                .into(),
+            ),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "data",
+            DataType::Struct(
+                vec![Arc::new(Field::new(
+                    "timestamps",
+                    DataType::List(Arc::new(Field::new(
+                        "item",
+                        DataType::Timestamp(TimeUnit::Microsecond, None),
+                        true,
+                    ))),
+                    true,
+                ))]
+                .into(),
+            ),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
     }
 }
