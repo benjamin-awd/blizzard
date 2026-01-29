@@ -382,7 +382,9 @@ pub fn validate_schema_evolution(
                         .new_fields
                         .iter()
                         .find(|f| !f.is_nullable())
-                        .expect("has_new_required_fields returned true but no required field found");
+                        .expect(
+                            "has_new_required_fields returned true but no required field found",
+                        );
                     return Err(SchemaError::RequiredFieldAddition {
                         field_name: required_field.name().clone(),
                     });
