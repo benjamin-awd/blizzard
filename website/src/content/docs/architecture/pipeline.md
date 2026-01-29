@@ -1,15 +1,15 @@
 ---
 title: Pipeline Architecture
-description: How Blizzard's processing pipeline connects source, sink, and checkpoint components
+description: How Blizzard's processing pipeline connects source, sink, and staging components
 ---
 
-Blizzard's pipeline connects sources, sinks, and checkpoints into a streaming data flow with backpressure and graceful shutdown. It uses a producer-consumer pattern to maximize parallelism by separating I/O-bound work from CPU-bound processing.
+Blizzard's pipeline connects sources and sinks into a streaming data flow with backpressure and graceful shutdown. It uses a producer-consumer pattern to maximize parallelism by separating I/O-bound work from CPU-bound processing.
 
 The pipeline runs continuously, polling for new files at a configurable interval. This enables real-time ingestion where new files are automatically discovered and processed as they arrive.
 
 On each iteration:
-1. **Prepare**: Lists source files and compares against checkpoint to find pending work
-2. **Process**: Runs the full download → process → upload pipeline for pending files
+1. **Prepare**: Lists source files and identifies pending work
+2. **Process**: Runs the full download -> process -> upload pipeline for pending files
 3. **Wait**: Sleeps for the configured poll interval before checking for new files
 
 
@@ -28,30 +28,35 @@ On each iteration:
 │  │                                                                     │    │
 │  │  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐   │    │
 │  │  │  Downloader  │        │  Processor   │        │   Uploader   │   │    │
-│  │  │  (I/O bound) │───────▶│  (CPU bound) │───────▶│  (I/O bound) │   │    │
+│  │  │  (I/O bound) │───────>│  (CPU bound) │───────>│  (I/O bound) │   │    │
 │  │  │ async tokio  │ channel│   blocking   │ channel│ async tokio  │   │    │
 │  │  └──────────────┘        └──────────────┘        └──────────────┘   │    │
 │  │         │                       │                       │           │    │
 │  │         │ download              │ decompress            │ upload    │    │
 │  │         │ files                 │ parse NDJSON          │ parquet   │    │
-│  │         │                       │ write parquet         │ files     │    │
+│  │         │                       │ write parquet         │ + metadata│    │
 │  │         │                       │                       │           │    │
 │  └─────────┼───────────────────────┼───────────────────────┼───────────┘    │
 │            │                       │                       │                │
 │            │                       │                       ▼                │
 │            │                       │              ┌──────────────────┐      │
-│            │                       │              │   Delta Lake     │      │
-│            │                       └─────────────▶│     Table        │      │
+│            │                       │              │     Staging      │      │
+│            │                       └─────────────>│   Directory      │      │
 │            │                         parquet      │                  │      │
 │            │                         schema       └────────┬─────────┘      │
 │            │                                               │                │
-│            │                       ┌───────────────────────┘                │
-│            │                       │  atomic commit                         │
-│            │                       ▼                                        │
-│            │              ┌──────────────────┐                              │
-│            └─────────────▶│    Checkpoint    │◀── tracks file + record      │
-│              file state   │   Coordinator    │    positions for recovery    │
-│                           └──────────────────┘                              │
+│            │                                               │                │
+│            │                                               ▼                │
+│            │                                      ┌──────────────────┐      │
+│            │                                      │     Penguin      │      │
+│            │                                      │   (Committer)    │      │
+│            │                                      └────────┬─────────┘      │
+│            │                                               │                │
+│            │                                               ▼                │
+│            │                                      ┌──────────────────┐      │
+│            │                                      │   Delta Lake     │      │
+│            │                                      │     Table        │      │
+│            │                                      └──────────────────┘      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -64,7 +69,7 @@ The pipeline consists of three concurrent stages connected by bounded channels:
 |-------|-------------|-----------|-------------|
 | **Downloader** | Tokio async | I/O bound | Concurrent file downloads from cloud storage |
 | **Processor** | Tokio blocking | CPU bound | Decompress and parse NDJSON to Arrow batches |
-| **Uploader** | Tokio async | I/O bound | Concurrent multipart uploads to cloud storage |
+| **Uploader** | Tokio async | I/O bound | Concurrent multipart uploads to staging |
 
 ### Stage 1: Downloader
 
@@ -72,7 +77,6 @@ The downloader task manages concurrent file downloads:
 
 - Downloads compressed NDJSON files from source storage
 - Respects `max_concurrent_files` concurrency limit
-- Handles checkpoint recovery by tracking records to skip
 - Sends downloaded bytes through a bounded channel
 
 ```
@@ -121,12 +125,11 @@ Finished Parquet Files
 
 ### Stage 3: Uploader
 
-The uploader handles concurrent file uploads with parallel multipart:
+The uploader handles concurrent file uploads:
 
-- Uploads finished Parquet files to sink storage
+- Uploads finished Parquet files to staging directory
 - Uses parallel multipart uploads for large files
-- Commits files to Delta Lake in batches
-- Stores checkpoint state atomically with commits
+- Writes metadata files for Penguin to pick up
 
 ## Backpressure
 
@@ -134,8 +137,8 @@ Bounded channels between stages provide natural backpressure:
 
 | Channel | Buffer Size | Purpose |
 |---------|-------------|---------|
-| Download → Process | `max_concurrent_files` | Limits memory for downloaded files |
-| Process → Upload | `max_concurrent_uploads × 4` | Allows upload queue to stay ahead |
+| Download -> Process | `max_concurrent_files` | Limits memory for downloaded files |
+| Process -> Upload | `max_concurrent_uploads x 4` | Allows upload queue to stay ahead |
 
 When channels fill, upstream stages block until downstream catches up.
 
@@ -164,7 +167,7 @@ Shutdown sequence within a processing iteration:
 2. **Downloads stop**: No new downloads started
 3. **Processing drains**: Finish in-flight files
 4. **Final flush**: Close Parquet writer, upload remaining files
-5. **Checkpoint commit**: Final checkpoint with Delta commit
+5. **Exit**: Report stats and exit
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -174,9 +177,8 @@ Shutdown sequence within a processing iteration:
 │  2. Downloader: Stop accepting new files                        │
 │  3. Processor: Finish in-flight batches                         │
 │  4. Writer: Close and flush final Parquet file                  │
-│  5. Uploader: Upload remaining files                            │
-│  6. Delta: Commit with final checkpoint                         │
-│  7. Exit with stats                                             │
+│  5. Uploader: Upload remaining files to staging                 │
+│  6. Exit with stats                                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -190,8 +192,7 @@ The pipeline tracks comprehensive statistics:
 | `records_processed` | Total records written |
 | `bytes_written` | Total Parquet bytes written |
 | `parquet_files_written` | Number of Parquet files created |
-| `delta_commits` | Number of Delta Lake commits |
-| `checkpoints_saved` | Number of checkpoint saves |
+| `staging_files_written` | Number of files written to staging |
 
 ## Error Handling
 
@@ -205,16 +206,16 @@ The pipeline handles errors at each stage:
 | Upload failure | Retry or record to DLQ |
 | Max failures reached | Stop pipeline with error |
 
-See [Error Handling](/reference/errors/) for details.
+See [Error Handling](/blizzard/reference/errors/) for details.
 
 ## Code References
 
 | Component | File |
 |-----------|------|
-| Pipeline struct | `src/pipeline/mod.rs` |
-| Polling loop | `src/pipeline/mod.rs:253` |
-| Iteration prepare | `src/pipeline/mod.rs:590` |
-| Processing loop | `src/pipeline/mod.rs:320` |
-| Downloader task | `src/pipeline/tasks.rs:300` |
-| Uploader task | `src/pipeline/tasks.rs:97` |
-| Graceful shutdown | `src/pipeline/mod.rs:261` |
+| Pipeline struct | `crates/blizzard/src/pipeline/mod.rs` |
+| Polling loop | `crates/blizzard/src/pipeline/mod.rs:253` |
+| Iteration prepare | `crates/blizzard/src/pipeline/mod.rs:590` |
+| Processing loop | `crates/blizzard/src/pipeline/mod.rs:320` |
+| Downloader task | `crates/blizzard/src/pipeline/tasks.rs:300` |
+| Uploader task | `crates/blizzard/src/pipeline/tasks.rs:97` |
+| Graceful shutdown | `crates/blizzard/src/pipeline/mod.rs:261` |

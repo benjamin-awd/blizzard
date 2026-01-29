@@ -12,19 +12,28 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
+## Two-Stage Pipeline
+
+Blizzard uses a two-tool architecture for reliable Delta Lake ingestion:
+
+- **Blizzard** ingests NDJSON files and writes Parquet files to a staging area
+- **Penguin** watches the staging area and commits files to Delta Lake
+
+This separation provides fault tolerance—if one component fails, the other continues operating, and recovery is automatic on restart.
+
 ## Features
 
 <CardGrid>
 	<Card title="Delta Lake Native" icon="document">
-		Write directly to Delta Lake tables with ACID transactions and exactly-once semantics.
+		Write to Delta Lake tables with ACID transactions via the two-stage pipeline.
 	</Card>
 	<Card title="Crash Recovery" icon="setting">
-		Atomic checkpointing ensures no data loss or duplication, even after failures.
+		Staging-based coordination ensures no data loss or duplication, even after failures.
 	</Card>
 	<Card title="High Throughput" icon="rocket">
 		Built in Rust for maximum performance. Process terabytes of data efficiently.
 	</Card>
 	<Card title="Source Flexibility" icon="add-document">
-		Ingest from S3, GCS, Azure Blob, or local files in various formats.
+		Ingest from S3, GCS, Azure Blob, or local files in NDJSON format.
 	</Card>
 </CardGrid>

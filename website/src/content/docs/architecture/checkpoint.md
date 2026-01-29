@@ -1,178 +1,159 @@
 ---
-title: Checkpoints
-description: How Blizzard implements atomic checkpoints and crash recovery using Delta Lake transactions
+title: Fault Tolerance
+description: How Blizzard and Penguin provide crash recovery and exactly-once semantics
 ---
 
-Blizzard uses Delta Lake's `Txn` (Transaction) actions to implement atomic checkpointing. This ensures exactly-once processing semantics by storing checkpoint state atomically alongside data commits.
+The Blizzard/Penguin pipeline provides fault tolerance through a staging-based coordination protocol. This two-stage architecture ensures data is never lost or duplicated, even when either component crashes.
 
-## Checkpoint State
-
-A checkpoint captures three pieces of information:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | `u32` | Schema version for forward compatibility |
-| `source_state` | `SourceState` | Tracks file processing progress |
-| `delta_version` | `i64` | Last committed Delta table version |
-
-### Source State
-
-Source state tracks which files have been processed:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `files` | `HashMap<String, FileReadState>` | Map of file paths to their processing state |
-
-Each file can have one of two states:
-
-| State | Description |
-|-------|-------------|
-| `Finished` | File completely processed |
-| `RecordsRead(n)` | Partially processed with `n` records read |
-
-Example checkpoint (JSON representation):
-
-```json
-{
-    "schema_version": 1,
-    "source_state": {
-        "files": {
-            "s3://bucket/file1.ndjson.gz": "Finished",
-            "s3://bucket/file2.ndjson.gz": "Finished",
-            "s3://bucket/file3.ndjson.gz": { "RecordsRead": 5000 }
-        }
-    },
-    "delta_version": 42
-}
-```
-
-In this example, `file1` and `file2` are finished, while `file3` is in-progress with 5000 records read.
-
-## Storage Format
-
-Checkpoints are embedded directly in Delta Lake's transaction log rather than stored in separate files:
+## Architecture Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Delta Lake Transaction Log                   │
-├──────────────────────────────────────────────────────────────────┤
-│  Commit N:                                                       │
-│    ├── Add { path: "part-00001.parquet", ... }                   │
-│    ├── Add { path: "part-00002.parquet", ... }                   │
-│    └── Txn { app_id: "blizzard:<base64_checkpoint>", ... }       │
-│                              ▲                                   │
-│                              │                                   │
-│                    Atomic commit (all or nothing)                │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Fault Tolerance Flow                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐     ┌──────────────────┐     ┌─────────────┐  │
+│  │   Blizzard   │────▶│     Staging      │────▶│   Penguin   │  │
+│  │  (Parquet)   │     │   (Metadata)     │     │  (Commits)  │  │
+│  └──────────────┘     └──────────────────┘     └─────────────┘  │
+│                              │                        │          │
+│                              ▼                        ▼          │
+│                       _staging/pending/        _delta_log/       │
+│                       *.meta.json              *.json            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-The encoding process:
+## Coordination Protocol
 
-1. State is serialized to JSON
-2. JSON is base64-encoded
-3. Stored in `Txn.app_id` with prefix `blizzard:`
-4. Committed atomically with file `Add` actions
+### 1. Blizzard Writes to Staging
 
-```
-Txn.app_id = "blizzard:" + base64(json(CheckpointState))
-```
+When Blizzard finishes processing a source file:
 
-When Blizzard commits processed data, it includes the checkpoint state in the same atomic transaction. If the commit fails, neither the data nor checkpoint is written.
+1. Writes Parquet file to `{table_uri}/{partition}/{uuid}.parquet`
+2. Writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
 
-## When Checkpoints Occur
+The metadata file is written **last**, serving as an atomic signal that the Parquet file is complete.
 
-Checkpoints are triggered:
+### 2. Penguin Commits to Delta Lake
 
-| Trigger | Description |
-|---------|-------------|
-| **Batch threshold** | Every 10 uploaded Parquet files |
-| **Pipeline completion** | Final flush when all files processed |
+Penguin polls the staging directory and for each `.meta.json` file:
 
-The batch size balances checkpoint frequency against commit overhead.
+1. Reads the metadata to get file information
+2. Commits the Parquet file to Delta Lake
+3. Deletes the `.meta.json` file
 
----
+The deletion of the metadata file signals successful commit.
 
-## Recovery
+## Failure Scenarios
 
-On startup, Blizzard automatically recovers state from the Delta transaction log.
-
-### Phase 1: Find Latest Checkpoint
+### Blizzard Crashes Before Metadata Write
 
 ```
-┌────────────────────────────────────────────────────┐
-│            Delta Transaction Log                   │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐       │
-│  │ v96 │  │ v97 │  │ v98 │  │ v99 │  │v100 │       │
-│  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘       │
-│                                ▲                   │
-│                                │                   │
-│                    Scan backwards, find first Txn  │
-│                    with "blizzard:" prefix         │
-└────────────────────────────────────────────────────┘
+State: Parquet file written, no metadata
+Result: File is orphaned (not committed)
+Recovery: Re-run Blizzard to reprocess the source file
 ```
 
-- Scans **backwards** from latest Delta version
-- Searches last **100 commits** (configurable limit for efficiency)
-- Stops at first `Txn` action with `blizzard:` prefix
-- Decodes base64 → JSON → `CheckpointState`
+The orphaned Parquet file can be cleaned up manually or will be ignored by Penguin.
 
-### Phase 2: Restore State
-
-The recovered checkpoint is loaded into the checkpoint coordinator:
-
-- Source state map is restored
-- Delta version is recorded for consistency verification
-
-### Phase 3: Resume Processing
-
-When processing resumes:
-
-1. **Filter finished files**: Skip files marked as `Finished`
-2. **Skip processed records**: For `RecordsRead(n)` files, skip first `n` records
-3. **Continue normally**: Process remaining files and records
+### Blizzard Crashes After Metadata Write
 
 ```
-Source files: [file1, file2, file3, file4]
-Checkpoint:   file1=Finished, file2=RecordsRead(5000)
-
-Result:
-  - file1: skipped (finished)
-  - file2: skip first 5000 records, process remainder
-  - file3: process from beginning
-  - file4: process from beginning
+State: Parquet file + metadata written
+Result: Penguin will commit the file
+Recovery: Automatic - Penguin picks up pending files
 ```
 
-### Failure Scenarios
+### Penguin Crashes Before Commit
 
-| Scenario | Behavior |
-|----------|----------|
-| Crash before commit | No data or checkpoint written; restart from last checkpoint |
-| Crash during commit | Delta ensures atomicity; either all written or none |
-| Crash after commit | Next restart finds new checkpoint; continues from there |
-| Corrupted checkpoint | Falls back to previous checkpoint in log |
+```
+State: Metadata exists in _staging/pending/
+Result: File not yet committed
+Recovery: Automatic - Penguin picks up pending files on restart
+```
 
-### Guarantees
+### Penguin Crashes After Commit, Before Metadata Deletion
 
-- **Exactly-once semantics**: Records are never duplicated or lost
-- **Atomic state**: Data and checkpoint always consistent
-- **Crash resilience**: Safe recovery from any failure point
-- **No external dependencies**: Checkpoints stored in Delta log itself
+```
+State: File committed, metadata still exists
+Result: Penguin may attempt to re-commit
+Recovery: Delta Lake's optimistic concurrency handles duplicates
+```
 
----
+Delta Lake's transactional guarantees ensure that duplicate commits are rejected.
+
+## Guarantees
+
+| Guarantee | How It's Achieved |
+|-----------|-------------------|
+| **No data loss** | Files remain in staging until committed |
+| **No duplicates** | Delta Lake rejects duplicate file additions |
+| **Crash resilience** | Both components can restart and resume |
+| **Independent scaling** | Blizzard and Penguin operate independently |
+
+## Staging Directory Structure
+
+```
+table_uri/
+├── _delta_log/                    # Delta transaction log
+│   ├── 00000000000000000000.json
+│   ├── 00000000000000000001.json
+│   └── ...
+├── _staging/
+│   └── pending/                   # Pending commits
+│       ├── uuid1.meta.json
+│       └── uuid2.meta.json
+├── date=2024-01-01/               # Committed data files
+│   ├── uuid3.parquet
+│   └── uuid4.parquet
+└── date=2024-01-02/
+    └── uuid5.parquet
+```
+
+## Comparison to Single-Process Architecture
+
+The two-stage architecture has several advantages over a single process that does both ingestion and commits:
+
+| Aspect | Single Process | Two-Stage (Blizzard + Penguin) |
+|--------|----------------|--------------------------------|
+| **Failure isolation** | Crash loses in-flight data | Components fail independently |
+| **Backpressure** | Commit latency affects ingestion | Ingestion continues while commits catch up |
+| **Scaling** | Single bottleneck | Scale writers and committers independently |
+| **Recovery** | Must checkpoint all state atomically | Staging metadata is the checkpoint |
+
+## Operational Considerations
+
+### Monitoring Staging Backlog
+
+Monitor the number of pending files in `_staging/pending/`:
+
+```bash
+# Count pending files
+aws s3 ls s3://bucket/table/_staging/pending/ | wc -l
+```
+
+A growing backlog indicates Penguin is falling behind.
+
+### Cleaning Orphaned Files
+
+If Blizzard crashes repeatedly, orphaned Parquet files may accumulate. These can be identified as files without corresponding metadata and removed manually.
+
+### Penguin Polling Interval
+
+Configure Penguin's poll interval based on latency requirements:
+
+```yaml
+source:
+  poll_interval_secs: 10  # Check for new files every 10 seconds
+```
+
+Lower intervals reduce commit latency but increase API calls.
 
 ## Code References
 
 | Component | File |
 |-----------|------|
-| Checkpoint state structures | `src/checkpoint/state.rs` |
-| Checkpoint coordinator | `src/checkpoint/mod.rs` |
-| Delta storage & recovery | `src/sink/delta.rs` |
-| Source state tracking | `src/source/state.rs` |
-| Checkpoint triggering | `src/pipeline/tasks.rs` |
-
-## Tuning
-
-The checkpoint batch size (default: 10 files) can be adjusted by modifying `COMMIT_BATCH_SIZE` in `src/pipeline/tasks.rs`:
-
-- **Smaller batches**: More frequent checkpoints, less re-processing on failure, more Delta commits
-- **Larger batches**: Fewer commits, better throughput, more re-processing on failure
+| Staging writer | `crates/blizzard/src/staging.rs` |
+| Staging protocol | `crates/blizzard/src/staging.rs:17` |
+| Penguin committer | `crates/penguin/src/committer.rs` |

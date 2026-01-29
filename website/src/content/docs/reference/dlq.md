@@ -169,7 +169,7 @@ When `max_failures` is reached:
 1. DLQ is finalized (buffer flushed to storage)
 2. Failure statistics are logged
 3. Pipeline stops with `MaxFailuresExceeded` error
-4. Checkpoint is NOT committed (safe to retry)
+4. In-progress files may not be written to staging (safe to retry)
 
 ## Reprocessing Failed Files
 
