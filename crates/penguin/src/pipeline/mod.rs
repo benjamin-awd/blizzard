@@ -50,7 +50,7 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
     let mut processor = PenguinProcessor::new(config).await?;
 
     // Run the polling loop
-    let poll_interval = Duration::from_secs(processor.config.sink.poll_interval_secs);
+    let poll_interval = Duration::from_secs(processor.config.source.poll_interval_secs);
     run_polling_loop(&mut processor, poll_interval, shutdown).await?;
 
     Ok(processor.stats)
@@ -75,14 +75,14 @@ impl PenguinProcessor {
     async fn new(config: Config) -> Result<Self, PipelineError> {
         // Create staging reader (reads from {table_uri}/_staging/)
         let staging_reader =
-            StagingReader::new(&config.sink.table_uri, config.sink.storage_options.clone())
+            StagingReader::new(&config.source.table_uri, config.source.storage_options.clone())
                 .await
                 .context(StorageSnafu)?;
 
         // Create sink storage provider (same URI, parquet files already there)
         let sink_storage = StorageProvider::for_url_with_options(
-            &config.sink.table_uri,
-            config.sink.storage_options.clone(),
+            &config.source.table_uri,
+            config.source.storage_options.clone(),
         )
         .await
         .context(StorageSnafu)?;
@@ -100,7 +100,7 @@ impl PenguinProcessor {
         let delta_sink = DeltaSink::new(
             &sink_storage,
             &placeholder_schema,
-            config.sink.partition_by.clone(),
+            config.source.partition_by.clone(),
         )
         .await?;
 
@@ -157,7 +157,7 @@ impl PollingProcessor for PenguinProcessor {
             .commit_files(
                 &mut self.delta_sink,
                 &pending_files,
-                self.config.sink.delta_checkpoint_interval,
+                self.config.source.delta_checkpoint_interval,
             )
             .await;
 
