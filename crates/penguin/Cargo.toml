@@ -1,0 +1,56 @@
+[package]
+name = "penguin"
+version = "0.1.0"
+description = "Delta Lake checkpointer - watches staging directory and commits to Delta Lake"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "penguin"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+blizzard-common = { workspace = true }
+
+# Delta Lake
+deltalake = { workspace = true }
+
+# Object storage
+object_store = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+snafu = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-limit = { workspace = true }
+
+# URL parsing
+url = { workspace = true }
+
+# Misc
+bytes = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

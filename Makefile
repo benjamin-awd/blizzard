@@ -9,7 +9,7 @@ DOCKER_REGISTRY ?= asia-northeast1-docker.pkg.dev/data-dev-596660/main-asia/flow
 TAG ?= latest
 VERSION := $(shell cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[] | select(.name == "blizzard") | .version')
 
-.PHONY: docker-build docker-push docker-push-version docker-run
+.PHONY: docker-build docker-push docker-push-version docker-run docker-run-penguin
 
 docker-build: ## Build Docker image for linux/amd64
 	docker buildx build \
@@ -31,11 +31,19 @@ docker-push: ## Build and push Docker image with registry cache
 docker-push-version: ## Build and push Docker image tagged with Cargo.toml version
 	$(MAKE) docker-push TAG=$(VERSION)
 
-docker-run: ## Run Docker image locally with a config file (CONFIG=path/to/config.yaml)
+docker-run: ## Run blizzard Docker image locally (CONFIG=path/to/config.yaml)
 	docker run --rm \
 		-v $(CONFIG):/config/config.yaml:ro \
 		-p 8080:8080 \
 		$(DOCKER_REGISTRY):$(TAG)
+
+docker-run-penguin: ## Run penguin Docker image locally (CONFIG=path/to/config.yaml)
+	docker run --rm \
+		--entrypoint /penguin \
+		-v $(CONFIG):/config/config.yaml:ro \
+		-p 8080:8080 \
+		$(DOCKER_REGISTRY):$(TAG) \
+		--config /config/config.yaml
 
 .PHONY: bump-patch bump-minor bump-major
 

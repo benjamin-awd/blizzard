@@ -1,0 +1,839 @@
+//! Multi-cloud storage abstraction.
+//!
+//! Provides a unified interface for working with S3, GCS, Azure Blob Storage,
+//! and local filesystem.
+
+mod azure;
+mod gcs;
+mod local;
+mod prefix;
+mod s3;
+
+pub use prefix::DatePrefixGenerator;
+
+use bytes::Bytes;
+use futures::{Stream, StreamExt, TryStreamExt, future::ready};
+use object_store::multipart::{MultipartStore, PartId};
+use object_store::path::Path;
+use object_store::{ObjectStore, PutPayload};
+use regex::Regex;
+use snafu::prelude::*;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+use tracing::debug;
+
+use crate::emit;
+use crate::error::{InvalidUrlSnafu, ObjectStoreSnafu, StorageError};
+use crate::metrics::events::{
+    ActiveMultipartParts, MultipartUploadCompleted, RequestStatus, StorageOperation,
+    StorageRequest, StorageRequestDuration,
+};
+
+// Re-export config types
+pub use azure::AzureConfig;
+pub use gcs::GcsConfig;
+pub use local::LocalConfig;
+pub use s3::S3Config;
+
+/// A reference-counted storage provider.
+pub type StorageProviderRef = Arc<StorageProvider>;
+
+/// Storage provider that abstracts over different cloud storage backends.
+#[derive(Clone)]
+pub struct StorageProvider {
+    pub(crate) config: BackendConfig,
+    pub(crate) object_store: Arc<dyn ObjectStore>,
+    /// MultipartStore for parallel part uploads with explicit part numbering.
+    /// Some backends (S3, GCS, Azure) support this; local filesystem does not.
+    pub(crate) multipart_store: Option<Arc<dyn MultipartStore>>,
+    pub(crate) canonical_url: String,
+    pub(crate) storage_options: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for StorageProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StorageProvider<{}>", self.canonical_url)
+    }
+}
+
+// URL patterns for different storage backends
+const S3_PATH: &str =
+    r"^https://s3\.(?P<region>[\w\-]+)\.amazonaws\.com/(?P<bucket>[a-z0-9\-\.]+)(/(?P<key>.+))?$";
+const S3_VIRTUAL: &str =
+    r"^https://(?P<bucket>[a-z0-9\-\.]+)\.s3\.(?P<region>[\w\-]+)\.amazonaws\.com(/(?P<key>.+))?$";
+const S3_URL: &str = r"^[sS]3[aA]?://(?P<bucket>[a-z0-9\-\.]+)(/(?P<key>.+))?$";
+const S3_ENDPOINT_URL: &str = r"^[sS]3[aA]?::(?<protocol>https?)://(?P<endpoint>[^:/]+):(?<port>\d+)/(?P<bucket>[a-z0-9\-\.]+)(/(?P<key>.+))?$";
+
+const FILE_URI: &str = r"^file://(?P<path>.*)$";
+const FILE_URL: &str = r"^file:(?P<path>.*)$";
+const FILE_PATH: &str = r"^/(?P<path>.*)$";
+
+const GCS_VIRTUAL: &str =
+    r"^https://(?P<bucket>[a-z0-9\-_\.]+)\.storage\.googleapis\.com(/(?P<key>.+))?$";
+const GCS_PATH: &str =
+    r"^https://storage\.googleapis\.com/(?P<bucket>[a-z0-9\-_\.]+)(/(?P<key>.+))?$";
+const GCS_URL: &str = r"^[gG][sS]://(?P<bucket>[a-z0-9\-\._]+)(/(?P<key>.+))?$";
+
+const ABFS_URL: &str = r"^abfss?://(?P<container>[a-z0-9\-]+)@(?P<account>[a-z0-9]+)\.dfs\.core\.windows\.net(/(?P<key>.+))?$";
+const AZURE_HTTPS: &str = r"^https://(?P<account>[a-z0-9]+)\.(blob|dfs)\.core\.windows\.net/(?P<container>[a-z0-9\-]+)(/(?P<key>.+))?$";
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum Backend {
+    S3,
+    Gcs,
+    Azure,
+    Local,
+}
+
+fn matchers() -> &'static HashMap<Backend, Vec<Regex>> {
+    static MATCHERS: OnceLock<HashMap<Backend, Vec<Regex>>> = OnceLock::new();
+    MATCHERS.get_or_init(|| {
+        let mut m = HashMap::new();
+
+        m.insert(
+            Backend::S3,
+            vec![
+                Regex::new(S3_PATH).unwrap(),
+                Regex::new(S3_VIRTUAL).unwrap(),
+                Regex::new(S3_ENDPOINT_URL).unwrap(),
+                Regex::new(S3_URL).unwrap(),
+            ],
+        );
+
+        m.insert(
+            Backend::Gcs,
+            vec![
+                Regex::new(GCS_PATH).unwrap(),
+                Regex::new(GCS_VIRTUAL).unwrap(),
+                Regex::new(GCS_URL).unwrap(),
+            ],
+        );
+
+        m.insert(
+            Backend::Azure,
+            vec![
+                Regex::new(ABFS_URL).unwrap(),
+                Regex::new(AZURE_HTTPS).unwrap(),
+            ],
+        );
+
+        m.insert(
+            Backend::Local,
+            vec![
+                Regex::new(FILE_URI).unwrap(),
+                Regex::new(FILE_URL).unwrap(),
+                Regex::new(FILE_PATH).unwrap(),
+            ],
+        );
+
+        m
+    })
+}
+
+/// Backend configuration enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendConfig {
+    S3(S3Config),
+    Gcs(GcsConfig),
+    Azure(AzureConfig),
+    Local(LocalConfig),
+}
+
+impl BackendConfig {
+    /// Parse a URL into a backend configuration.
+    pub fn parse_url(url: &str, with_key: bool) -> Result<Self, StorageError> {
+        for (k, v) in matchers() {
+            if let Some(matches) = v.iter().filter_map(|r| r.captures(url)).next() {
+                return match k {
+                    Backend::S3 => Self::parse_s3(matches),
+                    Backend::Gcs => Self::parse_gcs(matches),
+                    Backend::Azure => Self::parse_azure(matches),
+                    Backend::Local => Self::parse_local(matches, with_key),
+                };
+            }
+        }
+
+        InvalidUrlSnafu {
+            url: url.to_string(),
+        }
+        .fail()
+    }
+
+    fn parse_s3(matches: regex::Captures) -> Result<Self, StorageError> {
+        let bucket = matches
+            .name("bucket")
+            .expect("bucket should always be available")
+            .as_str()
+            .to_string();
+
+        let region = std::env::var("AWS_DEFAULT_REGION")
+            .ok()
+            .or_else(|| matches.name("region").map(|m| m.as_str().to_string()));
+
+        let endpoint = std::env::var("AWS_ENDPOINT").ok().or_else(|| {
+            matches.name("endpoint").map(|endpoint| {
+                let port = matches
+                    .name("port")
+                    .and_then(|p| p.as_str().parse::<u16>().ok())
+                    .unwrap_or(443);
+                let protocol = matches
+                    .name("protocol")
+                    .map(|p| p.as_str())
+                    .unwrap_or("https");
+                format!("{}://{}:{}", protocol, endpoint.as_str(), port)
+            })
+        });
+
+        let key = matches.name("key").map(|m| m.as_str().into());
+
+        Ok(BackendConfig::S3(S3Config {
+            endpoint,
+            region,
+            bucket,
+            key,
+        }))
+    }
+
+    fn parse_gcs(matches: regex::Captures) -> Result<Self, StorageError> {
+        let bucket = matches
+            .name("bucket")
+            .expect("bucket should always be available")
+            .as_str()
+            .to_string();
+
+        let key = matches.name("key").map(|r| r.as_str().into());
+
+        Ok(BackendConfig::Gcs(GcsConfig { bucket, key }))
+    }
+
+    fn parse_azure(matches: regex::Captures) -> Result<Self, StorageError> {
+        let container = matches
+            .name("container")
+            .expect("container should always be available")
+            .as_str()
+            .to_string();
+
+        let account = matches
+            .name("account")
+            .expect("account should always be available")
+            .as_str()
+            .to_string();
+
+        let key = matches.name("key").map(|r| r.as_str().into());
+
+        Ok(BackendConfig::Azure(AzureConfig {
+            account,
+            container,
+            key,
+        }))
+    }
+
+    fn parse_local(matches: regex::Captures, with_key: bool) -> Result<Self, StorageError> {
+        let path = matches
+            .name("path")
+            .expect("path regex must contain a path group")
+            .as_str();
+
+        let mut path = if !path.starts_with('/') {
+            std::path::PathBuf::from(format!("/{path}"))
+        } else {
+            std::path::PathBuf::from(path)
+        };
+
+        let key = if with_key {
+            let key = path
+                .file_name()
+                .map(|k| k.to_str().unwrap().to_string().into());
+            path.pop();
+            key
+        } else {
+            None
+        };
+
+        Ok(BackendConfig::Local(LocalConfig {
+            path: path.to_str().unwrap().to_string(),
+            key,
+        }))
+    }
+
+    pub(crate) fn key(&self) -> Option<&Path> {
+        match self {
+            BackendConfig::S3(s3) => s3.key.as_ref(),
+            BackendConfig::Gcs(gcs) => gcs.key.as_ref(),
+            BackendConfig::Azure(azure) => azure.key.as_ref(),
+            BackendConfig::Local(local) => local.key.as_ref(),
+        }
+    }
+}
+
+impl StorageProvider {
+    /// Create a storage provider for the given URL with storage options.
+    pub async fn for_url_with_options(
+        url: &str,
+        options: HashMap<String, String>,
+    ) -> Result<Self, StorageError> {
+        let config = BackendConfig::parse_url(url, false)?;
+
+        match config {
+            BackendConfig::S3(config) => Self::construct_s3(config, options).await,
+            BackendConfig::Gcs(config) => Self::construct_gcs(config).await,
+            BackendConfig::Azure(config) => Self::construct_azure(config).await,
+            BackendConfig::Local(config) => Self::construct_local(config).await,
+        }
+    }
+
+    /// List files in the storage location.
+    /// Returns paths relative to the configured key prefix.
+    pub async fn list(
+        &self,
+        include_subdirectories: bool,
+    ) -> Result<impl Stream<Item = Result<Path, object_store::Error>> + '_, StorageError> {
+        // Emit metric for list operation initiation
+        emit!(StorageRequest {
+            operation: StorageOperation::List,
+            status: RequestStatus::Success,
+        });
+
+        let key_path: Option<Path> = self.config.key().map(|key| key.to_string().into());
+        let key_part_count = key_path
+            .as_ref()
+            .map(|key| key.parts().count())
+            .unwrap_or_default();
+
+        let list = self
+            .object_store
+            .list(key_path.as_ref())
+            .filter_map(move |meta| {
+                let result = match meta {
+                    Ok(metadata) => {
+                        let path = metadata.location;
+                        if !include_subdirectories && path.parts().count() != key_part_count + 1 {
+                            None
+                        } else {
+                            // Strip the prefix from the path so callers get relative paths
+                            // This matches the contract expected by get/put/etc which qualify paths
+                            let relative_path: Path = path.parts().skip(key_part_count).collect();
+                            Some(Ok(relative_path))
+                        }
+                    }
+                    Err(err) => Some(Err(err)),
+                };
+                ready(result)
+            });
+
+        Ok(list)
+    }
+
+    /// Get the contents of a file.
+    pub async fn get(&self, path: impl Into<Path>) -> Result<Bytes, StorageError> {
+        let path = path.into();
+        let start = Instant::now();
+        let result = self.object_store.get(&self.qualify_path(&path)).await;
+
+        let status = if result.is_ok() {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        emit!(StorageRequest {
+            operation: StorageOperation::Get,
+            status,
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::Get,
+            duration: start.elapsed(),
+        });
+
+        let bytes = result
+            .context(ObjectStoreSnafu)?
+            .bytes()
+            .await
+            .context(ObjectStoreSnafu)?;
+        Ok(bytes)
+    }
+
+    /// Put bytes to a path.
+    #[cfg(test)]
+    pub async fn put(&self, path: impl Into<Path>, bytes: Vec<u8>) -> Result<(), StorageError> {
+        let bytes = PutPayload::from(Bytes::from(bytes));
+        let path = path.into();
+        let path = self.qualify_path(&path);
+        let start = Instant::now();
+        let result = self.object_store.put(&path, bytes).await;
+
+        let status = if result.is_ok() {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        emit!(StorageRequest {
+            operation: StorageOperation::Put,
+            status,
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::Put,
+            duration: start.elapsed(),
+        });
+
+        result.context(ObjectStoreSnafu)?;
+        Ok(())
+    }
+
+    /// Qualify a path with the configured key prefix.
+    pub fn qualify_path<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
+        match self.config.key() {
+            Some(prefix) => Cow::Owned(prefix.parts().chain(path.parts()).collect()),
+            None => Cow::Borrowed(path),
+        }
+    }
+
+    /// List files under a specific prefix (relative to configured base prefix).
+    ///
+    /// The prefix is appended to the configured key prefix.
+    /// Returns paths relative to the configured base prefix.
+    pub async fn list_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<impl Stream<Item = Result<Path, object_store::Error>> + '_, StorageError> {
+        emit!(StorageRequest {
+            operation: StorageOperation::List,
+            status: RequestStatus::Success,
+        });
+
+        // Combine the configured key prefix with the additional prefix
+        let full_prefix: Path = match self.config.key() {
+            Some(key) => key.parts().chain(Path::from(prefix).parts()).collect(),
+            None => Path::from(prefix),
+        };
+
+        let key_part_count = self
+            .config
+            .key()
+            .map(|key| key.parts().count())
+            .unwrap_or_default();
+
+        let list = self
+            .object_store
+            .list(Some(&full_prefix))
+            .filter_map(move |meta| {
+                let result = match meta {
+                    Ok(metadata) => {
+                        // Strip the base prefix from the path so callers get relative paths
+                        let relative_path: Path =
+                            metadata.location.parts().skip(key_part_count).collect();
+                        Some(Ok(relative_path))
+                    }
+                    Err(err) => Some(Err(err)),
+                };
+                ready(result)
+            });
+
+        Ok(list)
+    }
+
+    /// Get storage options for external integrations (e.g., Delta Lake).
+    pub fn storage_options(&self) -> &HashMap<String, String> {
+        &self.storage_options
+    }
+
+    /// Get the backend configuration.
+    pub fn config(&self) -> &BackendConfig {
+        &self.config
+    }
+
+    /// Put a payload to a path.
+    pub async fn put_payload(&self, path: &Path, payload: PutPayload) -> Result<(), StorageError> {
+        let path = self.qualify_path(path);
+        let start = Instant::now();
+        let result = self.object_store.put(&path, payload).await;
+
+        let status = if result.is_ok() {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        emit!(StorageRequest {
+            operation: StorageOperation::Put,
+            status,
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::Put,
+            duration: start.elapsed(),
+        });
+
+        result.context(ObjectStoreSnafu)?;
+        Ok(())
+    }
+
+    /// Delete a file at the given path.
+    pub async fn delete(&self, path: &Path) -> Result<(), StorageError> {
+        let path = self.qualify_path(path);
+        let start = Instant::now();
+        let result = self.object_store.delete(&path).await;
+
+        let status = if result.is_ok() {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        emit!(StorageRequest {
+            operation: StorageOperation::Delete,
+            status,
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::Delete,
+            duration: start.elapsed(),
+        });
+
+        result.context(ObjectStoreSnafu)?;
+        Ok(())
+    }
+
+    /// Upload bytes using parallel multipart upload.
+    ///
+    /// Uses the `MultipartStore` trait which provides explicit part numbering,
+    /// allowing parts to be uploaded in parallel.
+    ///
+    /// For backends that don't support `MultipartStore` or for small files,
+    /// falls back to simple PUT.
+    pub async fn put_multipart_bytes_parallel(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        part_size: usize,
+        min_multipart_size: usize,
+        max_concurrent_parts: usize,
+    ) -> Result<(), StorageError> {
+        // Small files use simple PUT
+        if bytes.len() < min_multipart_size || self.multipart_store.is_none() {
+            return self.put_payload(path, PutPayload::from(bytes)).await;
+        }
+
+        let multipart_store = self.multipart_store.as_ref().unwrap();
+        let qualified_path = self.qualify_path(path).into_owned();
+
+        // Start multipart upload
+        let create_start = Instant::now();
+        let create_result = multipart_store.create_multipart(&qualified_path).await;
+        emit!(StorageRequest {
+            operation: StorageOperation::CreateMultipart,
+            status: if create_result.is_ok() {
+                RequestStatus::Success
+            } else {
+                RequestStatus::Error
+            },
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::CreateMultipart,
+            duration: create_start.elapsed(),
+        });
+        let multipart_id = create_result.context(ObjectStoreSnafu)?;
+
+        // Create parts with indices
+        let parts: Vec<(usize, Bytes)> = (0..)
+            .zip((0..bytes.len()).step_by(part_size))
+            .map(|(i, offset)| {
+                let end = std::cmp::min(offset + part_size, bytes.len());
+                (i, bytes.slice(offset..end))
+            })
+            .collect();
+
+        let total_parts = parts.len();
+        debug!(
+            "Starting parallel multipart upload for {} ({} bytes, {} parts, concurrency={})",
+            path,
+            bytes.len(),
+            total_parts,
+            max_concurrent_parts
+        );
+
+        // Upload parts in parallel using explicit part numbers
+        let multipart_id = Arc::new(multipart_id);
+        let qualified_path = Arc::new(qualified_path);
+        let active_parts = Arc::new(AtomicUsize::new(0));
+
+        let results: Vec<(usize, PartId)> = futures::stream::iter(parts)
+            .map(|(idx, data)| {
+                let multipart_store = multipart_store.clone();
+                let qualified_path = qualified_path.clone();
+                let multipart_id = multipart_id.clone();
+                let active_parts = active_parts.clone();
+                async move {
+                    let count = active_parts.fetch_add(1, Ordering::Relaxed) + 1;
+                    emit!(ActiveMultipartParts { count });
+
+                    let part_start = Instant::now();
+                    let result = multipart_store
+                        .put_part(&qualified_path, &multipart_id, idx, data.into())
+                        .await;
+
+                    emit!(StorageRequest {
+                        operation: StorageOperation::PutPart,
+                        status: if result.is_ok() {
+                            RequestStatus::Success
+                        } else {
+                            RequestStatus::Error
+                        },
+                    });
+                    emit!(StorageRequestDuration {
+                        operation: StorageOperation::PutPart,
+                        duration: part_start.elapsed(),
+                    });
+
+                    let count = active_parts.fetch_sub(1, Ordering::Relaxed) - 1;
+                    emit!(ActiveMultipartParts { count });
+
+                    let part_id = result.context(ObjectStoreSnafu)?;
+                    debug!("Uploaded part {}/{}", idx + 1, total_parts);
+                    Ok::<_, StorageError>((idx, part_id))
+                }
+            })
+            .buffer_unordered(max_concurrent_parts)
+            .try_collect()
+            .await?;
+
+        // Sort by index and extract PartIds (parts may complete out of order)
+        let mut results = results;
+        results.sort_by_key(|(idx, _)| *idx);
+        let part_ids: Vec<PartId> = results.into_iter().map(|(_, id)| id).collect();
+
+        // Complete the upload
+        let complete_start = Instant::now();
+        let complete_result = self
+            .multipart_store
+            .as_ref()
+            .unwrap()
+            .complete_multipart(&qualified_path, &multipart_id, part_ids)
+            .await;
+
+        emit!(StorageRequest {
+            operation: StorageOperation::CompleteMultipart,
+            status: if complete_result.is_ok() {
+                RequestStatus::Success
+            } else {
+                RequestStatus::Error
+            },
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::CompleteMultipart,
+            duration: complete_start.elapsed(),
+        });
+
+        complete_result.context(ObjectStoreSnafu)?;
+        emit!(MultipartUploadCompleted);
+        debug!("Completed parallel multipart upload for {}", path);
+
+        Ok(())
+    }
+}
+
+/// List NDJSON.gz files recursively.
+pub async fn list_ndjson_files(storage: &StorageProvider) -> Result<Vec<String>, StorageError> {
+    let mut files = Vec::new();
+    let mut stream = storage.list(true).await?;
+    let mut total_listed = 0;
+
+    while let Some(result) = stream.next().await {
+        let path = result.context(ObjectStoreSnafu)?;
+        total_listed += 1;
+
+        // Check extension without allocating for non-matching files
+        if path.as_ref().ends_with(".ndjson.gz") {
+            files.push(path.to_string());
+        }
+    }
+
+    tracing::debug!(
+        "Listed {} total files, {} are .ndjson.gz",
+        total_listed,
+        files.len()
+    );
+
+    // Sort by path for consistent ordering
+    files.sort();
+
+    Ok(files)
+}
+
+/// List NDJSON.gz files with optional prefix filtering.
+///
+/// When prefixes are provided, only lists files under those prefixes.
+/// This is much more efficient for partitioned data where only recent
+/// partitions need to be processed.
+///
+/// Results are deduplicated and sorted for consistent ordering.
+pub async fn list_ndjson_files_with_prefixes(
+    storage: &StorageProvider,
+    prefixes: Option<&[String]>,
+) -> Result<Vec<String>, StorageError> {
+    match prefixes {
+        None => list_ndjson_files(storage).await,
+        Some([]) => list_ndjson_files(storage).await,
+        Some(prefixes) => {
+            let mut files = Vec::new();
+            let mut total_listed = 0;
+
+            tracing::info!(
+                "Listing files under {} date prefixes: {:?}",
+                prefixes.len(),
+                if prefixes.len() <= 5 {
+                    prefixes.to_vec()
+                } else {
+                    let mut preview = prefixes[..3].to_vec();
+                    preview.push(format!("... and {} more", prefixes.len() - 3));
+                    preview
+                }
+            );
+
+            for prefix in prefixes {
+                let stream_result = storage.list_with_prefix(prefix).await;
+
+                // Handle missing prefixes gracefully - they just return empty results
+                let mut stream = match stream_result {
+                    Ok(s) => s,
+                    Err(e) if e.is_not_found() => {
+                        tracing::debug!("Prefix not found (skipping): {}", prefix);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(path) => {
+                            total_listed += 1;
+                            if path.as_ref().ends_with(".ndjson.gz") {
+                                files.push(path.to_string());
+                            }
+                        }
+                        Err(e) => {
+                            // Not found errors during listing are fine (empty prefix)
+                            if !e.to_string().contains("not found") {
+                                return Err(StorageError::ObjectStore { source: e });
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "Listed {} total files under {} prefixes, {} are .ndjson.gz",
+                total_listed,
+                prefixes.len(),
+                files.len()
+            );
+
+            // Sort and deduplicate (prefixes might overlap at boundaries)
+            files.sort();
+            files.dedup();
+
+            Ok(files)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_s3_url_parsing() {
+        let config = BackendConfig::parse_url("s3://mybucket/path/to/data", false).unwrap();
+        match config {
+            BackendConfig::S3(s3) => {
+                assert_eq!(s3.bucket, "mybucket");
+                assert_eq!(s3.key, Some(Path::from("path/to/data")));
+            }
+            _ => panic!("Expected S3 config"),
+        }
+    }
+
+    #[test]
+    fn test_gcs_url_parsing() {
+        let config = BackendConfig::parse_url("gs://mybucket/path/to/data", false).unwrap();
+        match config {
+            BackendConfig::Gcs(gcs) => {
+                assert_eq!(gcs.bucket, "mybucket");
+                assert_eq!(gcs.key, Some(Path::from("path/to/data")));
+            }
+            _ => panic!("Expected Gcs config"),
+        }
+    }
+
+    #[test]
+    fn test_local_url_parsing() {
+        let config = BackendConfig::parse_url("/local/path/to/data", false).unwrap();
+        match config {
+            BackendConfig::Local(local) => {
+                assert_eq!(local.path, "/local/path/to/data");
+            }
+            _ => panic!("Expected Local config"),
+        }
+    }
+
+    #[test]
+    fn test_azure_url_parsing() {
+        let config = BackendConfig::parse_url(
+            "abfss://mycontainer@mystorageaccount.dfs.core.windows.net/path/to/data",
+            false,
+        )
+        .unwrap();
+        match config {
+            BackendConfig::Azure(azure) => {
+                assert_eq!(azure.account, "mystorageaccount");
+                assert_eq!(azure.container, "mycontainer");
+                assert_eq!(azure.key, Some(Path::from("path/to/data")));
+            }
+            _ => panic!("Expected Azure config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_returns_relative_paths() {
+        // Create a temp directory with nested structure simulating partitioned data
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create nested directories: prefix/partition1/partition2/file.ndjson.gz
+        let prefix = "region=us-east-1/subject=orders";
+        let nested_path = base_path.join(prefix).join("date=2024-01-01");
+        std::fs::create_dir_all(&nested_path).unwrap();
+
+        // Create test files
+        let file1 = nested_path.join("file1.ndjson.gz");
+        let file2 = nested_path.join("file2.ndjson.gz");
+        std::fs::write(&file1, b"test data 1").unwrap();
+        std::fs::write(&file2, b"test data 2").unwrap();
+
+        // Create storage provider pointing to the prefix
+        let storage_url = format!("{}/{}", base_path.display(), prefix);
+        let storage = StorageProvider::for_url_with_options(&storage_url, HashMap::new())
+            .await
+            .unwrap();
+
+        // List files - should return relative paths (not including the prefix)
+        let mut stream = storage.list(true).await.unwrap();
+        let mut listed_paths = Vec::new();
+        while let Some(result) = stream.next().await {
+            let path = result.unwrap();
+            listed_paths.push(path.to_string());
+        }
+
+        listed_paths.sort();
+
+        // Paths should be relative to the prefix, e.g., "date=2024-01-01/file1.ndjson.gz"
+        assert_eq!(listed_paths.len(), 2);
+        assert_eq!(listed_paths[0], "date=2024-01-01/file1.ndjson.gz");
+        assert_eq!(listed_paths[1], "date=2024-01-01/file2.ndjson.gz");
+
+        // Verify that we can get() these files using the relative paths
+        for path in &listed_paths {
+            let content = storage.get(path.as_str()).await.unwrap();
+            assert!(!content.is_empty());
+        }
+    }
+}
