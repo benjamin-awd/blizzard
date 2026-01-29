@@ -173,6 +173,10 @@ pub enum PipelineError {
     Metrics {
         source: blizzard_common::MetricsError,
     },
+
+    /// Internal state error - delta sink not initialized when expected.
+    #[snafu(display("Internal error: delta sink not initialized"))]
+    DeltaSinkNotInitialized,
 }
 
 impl From<StorageError> for PipelineError {
