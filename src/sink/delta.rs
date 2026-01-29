@@ -39,22 +39,29 @@ pub struct DeltaSink {
     table: DeltaTable,
     last_version: i64,
     checkpoint_version: i64,
+    /// Partition columns for this table.
+    partition_by: Vec<String>,
 }
 
 impl DeltaSink {
     /// Load or create a Delta Lake table.
-    pub async fn new(storage: StorageProviderRef, schema: &Schema) -> Result<Self, DeltaError> {
+    pub async fn new(
+        storage: StorageProviderRef,
+        schema: &Schema,
+        partition_by: Vec<String>,
+    ) -> Result<Self, DeltaError> {
         // Register Delta Lake handlers for cloud storage
         deltalake::aws::register_handlers(None);
         deltalake::gcp::register_handlers(None);
 
-        let table = load_or_create_table(&storage, schema).await?;
+        let table = load_or_create_table(&storage, schema, &partition_by).await?;
         let last_version = table.version().unwrap_or(-1);
 
         Ok(Self {
             table,
             last_version,
             checkpoint_version: 0,
+            partition_by,
         })
     }
 
@@ -85,6 +92,7 @@ impl DeltaSink {
             &mut self.table,
             add_actions,
             Some((&checkpoint_with_version, self.checkpoint_version)),
+            &self.partition_by,
         )
         .await?;
 
@@ -217,6 +225,7 @@ fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructTyp
 pub async fn load_or_create_table(
     storage_provider: &StorageProvider,
     schema: &Schema,
+    partition_by: &[String],
 ) -> Result<DeltaTable, DeltaError> {
     let empty_path = &Path::parse("").map_err(|_| {
         PathParseSnafu {
@@ -274,12 +283,18 @@ pub async fn load_or_create_table(
             // Convert Arrow schema to Delta schema
             let delta_schema = arrow_schema_to_delta(schema)?;
 
-            let table = CreateBuilder::new()
+            let mut builder = CreateBuilder::new()
                 .with_location(&table_url)
                 .with_columns(delta_schema.fields().cloned())
-                .with_storage_options(storage_provider.storage_options().clone())
-                .await
-                .context(DeltaLakeSnafu)?;
+                .with_storage_options(storage_provider.storage_options().clone());
+
+            // Add partition columns if configured
+            if !partition_by.is_empty() {
+                info!("Creating table with partition columns: {:?}", partition_by);
+                builder = builder.with_partition_columns(partition_by);
+            }
+
+            let table = builder.await.context(DeltaLakeSnafu)?;
 
             Ok(table)
         }
@@ -295,10 +310,17 @@ fn create_add_action(file: &FinishedFile) -> Action {
 
     let subpath = file.filename.trim_start_matches('/');
 
+    // Convert partition_values to Option<String> as required by Delta Lake
+    let partition_values: HashMap<String, Option<String>> = file
+        .partition_values
+        .iter()
+        .map(|(k, v)| (k.clone(), Some(v.clone())))
+        .collect();
+
     Action::Add(Add {
         path: subpath.to_string(),
         size: file.size as i64,
-        partition_values: HashMap::new(),
+        partition_values,
         modification_time: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -348,6 +370,7 @@ async fn commit_to_delta_with_checkpoint(
     table: &mut DeltaTable,
     add_actions: Vec<Action>,
     checkpoint: Option<(&CheckpointState, i64)>,
+    partition_by: &[String],
 ) -> Result<i64, DeltaError> {
     use deltalake::kernel::transaction::CommitBuilder;
 
@@ -368,6 +391,13 @@ async fn commit_to_delta_with_checkpoint(
 
     all_actions.extend(add_actions);
 
+    // Convert partition_by to Option<Vec<String>> for Delta operation
+    let partition_by_opt = if partition_by.is_empty() {
+        None
+    } else {
+        Some(partition_by.to_vec())
+    };
+
     let version = CommitBuilder::default()
         .with_actions(all_actions)
         .build(
@@ -375,7 +405,7 @@ async fn commit_to_delta_with_checkpoint(
             table.log_store(),
             deltalake::protocol::DeltaOperation::Write {
                 mode: SaveMode::Append,
-                partition_by: None,
+                partition_by: partition_by_opt,
                 predicate: None,
             },
         )
@@ -400,11 +430,14 @@ mod tests {
 
     #[test]
     fn test_create_add_action() {
+        use std::collections::HashMap;
+
         let file = FinishedFile {
             filename: "test-file.parquet".to_string(),
             size: 1024,
             record_count: 100,
             bytes: None,
+            partition_values: HashMap::new(),
         };
 
         let action = create_add_action(&file);
@@ -414,6 +447,7 @@ mod tests {
                 assert_eq!(add.path, "test-file.parquet");
                 assert_eq!(add.size, 1024);
                 assert!(add.data_change);
+                assert!(add.partition_values.is_empty());
             }
             _ => panic!("Expected Add action"),
         }
@@ -421,11 +455,14 @@ mod tests {
 
     #[test]
     fn test_create_add_action_strips_leading_slash() {
+        use std::collections::HashMap;
+
         let file = FinishedFile {
             filename: "/path/to/file.parquet".to_string(),
             size: 2048,
             record_count: 200,
             bytes: None,
+            partition_values: HashMap::new(),
         };
 
         let action = create_add_action(&file);
@@ -433,6 +470,35 @@ mod tests {
         match action {
             Action::Add(add) => {
                 assert_eq!(add.path, "path/to/file.parquet");
+            }
+            _ => panic!("Expected Add action"),
+        }
+    }
+
+    #[test]
+    fn test_create_add_action_with_partition_values() {
+        use std::collections::HashMap;
+
+        let mut partition_values = HashMap::new();
+        partition_values.insert("date".to_string(), "2026-01-28".to_string());
+
+        let file = FinishedFile {
+            filename: "date=2026-01-28/test-file.parquet".to_string(),
+            size: 1024,
+            record_count: 100,
+            bytes: None,
+            partition_values,
+        };
+
+        let action = create_add_action(&file);
+
+        match action {
+            Action::Add(add) => {
+                assert_eq!(add.path, "date=2026-01-28/test-file.parquet");
+                assert_eq!(
+                    add.partition_values.get("date"),
+                    Some(&Some("2026-01-28".to_string()))
+                );
             }
             _ => panic!("Expected Add action"),
         }

@@ -10,6 +10,7 @@ use deltalake::parquet::arrow::ArrowWriter;
 use deltalake::parquet::basic::{GzipLevel, ZstdLevel};
 use deltalake::parquet::file::properties::WriterProperties;
 use snafu::prelude::*;
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -179,6 +180,8 @@ pub struct ParquetWriter {
     /// Records in the current row group (resets on flush).
     row_group_records: usize,
     finished_files: Vec<FinishedFile>,
+    /// Current partition values for file naming and metadata.
+    current_partition_values: HashMap<String, String>,
 }
 
 impl ParquetWriter {
@@ -194,7 +197,8 @@ impl ParquetWriter {
         );
         let buffer = SharedBuffer::new(64 * MB);
         let writer = Self::create_writer(&schema, &config, buffer.clone())?;
-        let current_file_name = Self::generate_filename();
+        let partition_values = HashMap::new();
+        let current_file_name = Self::generate_filename(&partition_values);
 
         Ok(Self {
             schema,
@@ -205,6 +209,7 @@ impl ParquetWriter {
             stats: WriterStats::new(),
             row_group_records: 0,
             finished_files: Vec::new(),
+            current_partition_values: partition_values,
         })
     }
 
@@ -239,9 +244,46 @@ impl ParquetWriter {
         builder.build()
     }
 
-    fn generate_filename() -> String {
+    fn generate_filename(partition_values: &HashMap<String, String>) -> String {
         let uuid = Uuid::now_v7();
-        format!("{}.parquet", uuid)
+        if partition_values.is_empty() {
+            format!("{}.parquet", uuid)
+        } else {
+            // Build path like "date=2026-01-28/uuid.parquet"
+            // Sort keys to ensure deterministic ordering
+            let mut keys: Vec<_> = partition_values.keys().collect();
+            keys.sort();
+            let prefix = keys
+                .iter()
+                .map(|k| format!("{}={}", k, partition_values[*k]))
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("{}/{}.parquet", prefix, uuid)
+        }
+    }
+
+    /// Set partition context for the current and subsequent files.
+    ///
+    /// When partition values change, the current file is rolled and a new
+    /// file is started with the updated partition prefix.
+    pub fn set_partition_context(
+        &mut self,
+        partition_values: HashMap<String, String>,
+    ) -> Result<(), ParquetError> {
+        // Only roll if partition values actually changed and we have written data
+        if partition_values != self.current_partition_values && self.stats.records_written > 0 {
+            tracing::debug!(
+                "Partition context changed from {:?} to {:?}, rolling file",
+                self.current_partition_values,
+                partition_values
+            );
+            self.roll_file()?;
+        }
+
+        self.current_partition_values = partition_values;
+        // Update current filename with new partition prefix
+        self.current_file_name = Self::generate_filename(&self.current_partition_values);
+        Ok(())
     }
 
     /// Write a batch to the current file.
@@ -325,6 +367,7 @@ impl ParquetWriter {
             size: bytes.len(),
             record_count: self.stats.records_written,
             bytes: Some(bytes),
+            partition_values: self.current_partition_values.clone(),
         };
         self.finished_files.push(finished);
 
@@ -334,7 +377,7 @@ impl ParquetWriter {
             &self.config,
             self.buffer.clone(),
         )?);
-        self.current_file_name = Self::generate_filename();
+        self.current_file_name = Self::generate_filename(&self.current_partition_values);
         self.stats = WriterStats::new();
         self.row_group_records = 0;
 
@@ -360,6 +403,7 @@ impl ParquetWriter {
                 size: bytes.len(),
                 record_count: self.stats.records_written,
                 bytes: Some(bytes),
+                partition_values: self.current_partition_values.clone(),
             };
             self.finished_files.push(finished);
         }

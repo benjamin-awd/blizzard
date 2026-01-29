@@ -200,6 +200,11 @@ pub struct SinkConfig {
     /// Parquet compression codec.
     #[serde(default)]
     pub compression: ParquetCompression,
+
+    /// Columns to partition output by (e.g., ["date"]).
+    /// Partition values are extracted from source file paths.
+    #[serde(default)]
+    pub partition_by: Vec<String>,
 }
 
 fn default_file_size_mb() -> usize {
@@ -410,6 +415,7 @@ mod tests {
                 max_concurrent_parts: 8,
                 storage_options: HashMap::new(),
                 compression: ParquetCompression::Snappy,
+                partition_by: Vec::new(),
             },
             schema: SchemaConfig {
                 fields: vec![

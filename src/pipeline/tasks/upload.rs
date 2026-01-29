@@ -10,6 +10,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+use std::collections::HashMap;
+
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{MB, SinkConfig};
 use crate::dlq::DeadLetterQueue;
@@ -31,6 +33,7 @@ struct UploadResult {
     filename: String,
     size: usize,
     record_count: usize,
+    partition_values: HashMap<String, String>,
 }
 
 /// Result of the uploader task finalization.
@@ -166,12 +169,13 @@ impl Uploader {
                                 size: upload_result.size,
                                 record_count: upload_result.record_count,
                                 bytes: None,
+                                partition_values: upload_result.partition_values,
                             });
                             emit!(PendingCommitFiles { count: files_to_commit.len() });
 
                             // Batch commit every N files with atomic checkpoint
                             if files_to_commit.len() >= COMMIT_BATCH_SIZE {
-                                let commit_files: Vec<FinishedFile> = files_to_commit.drain(..).collect();
+                                let commit_files = std::mem::take(&mut files_to_commit);
                                 checkpoint_coordinator
                                     .commit_files(&mut delta_sink, &commit_files)
                                     .await;
@@ -240,6 +244,7 @@ impl Uploader {
                     size: upload_result.size,
                     record_count: upload_result.record_count,
                     bytes: None,
+                    partition_values: upload_result.partition_values,
                 });
             }
         }
@@ -281,6 +286,7 @@ async fn upload_file(
             filename: file.filename,
             size: file.size,
             record_count: file.record_count,
+            partition_values: file.partition_values,
         });
     };
 
@@ -299,5 +305,6 @@ async fn upload_file(
         filename: file.filename,
         size: file.size,
         record_count: file.record_count,
+        partition_values: file.partition_values,
     })
 }

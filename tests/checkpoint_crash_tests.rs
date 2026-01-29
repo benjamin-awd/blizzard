@@ -43,7 +43,7 @@ async fn test_atomic_checkpoint_prevents_data_loss() {
         Field::new("value", DataType::Int64, true),
     ]);
 
-    let mut delta_sink = DeltaSink::new(storage.clone(), &schema).await.unwrap();
+    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
 
     // Commit multiple batches with checkpoints
     for i in 1..=3 {
@@ -61,6 +61,7 @@ async fn test_atomic_checkpoint_prevents_data_loss() {
             size: 1024,
             record_count: i * 1000,
             bytes: None,
+            partition_values: std::collections::HashMap::new(),
         }];
 
         delta_sink
@@ -70,7 +71,7 @@ async fn test_atomic_checkpoint_prevents_data_loss() {
     }
 
     // Create new sink and recover (simulating restart)
-    let mut new_sink = DeltaSink::new(storage, &schema).await.unwrap();
+    let mut new_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
     let recovered = new_sink.recover_checkpoint_from_log().await.unwrap();
 
     assert!(recovered.is_some(), "Should recover checkpoint");
@@ -181,7 +182,7 @@ async fn test_recovery_scans_commits() {
 
     let schema = Schema::new(vec![Field::new("data", DataType::Utf8, false)]);
 
-    let mut delta_sink = DeltaSink::new(storage.clone(), &schema).await.unwrap();
+    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
 
     // Commit with checkpoint at version 1
     let mut source_state = SourceState::new();
@@ -200,6 +201,7 @@ async fn test_recovery_scans_commits() {
                 size: 512,
                 record_count: 100,
                 bytes: None,
+                partition_values: std::collections::HashMap::new(),
             }],
             &checkpoint,
         )
@@ -225,6 +227,7 @@ async fn test_recovery_scans_commits() {
                 size: 1024,
                 record_count: 200,
                 bytes: None,
+                partition_values: std::collections::HashMap::new(),
             }],
             &checkpoint2,
         )
@@ -232,7 +235,7 @@ async fn test_recovery_scans_commits() {
         .unwrap();
 
     // Recover should find the LATEST checkpoint (version 2)
-    let mut new_sink = DeltaSink::new(storage, &schema).await.unwrap();
+    let mut new_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
     let recovered = new_sink.recover_checkpoint_from_log().await.unwrap();
 
     assert!(recovered.is_some(), "Should recover checkpoint");
@@ -268,7 +271,7 @@ async fn test_empty_files_with_checkpoint() {
     );
 
     let schema = Schema::new(vec![Field::new("data", DataType::Utf8, false)]);
-    let mut delta_sink = DeltaSink::new(storage, &schema).await.unwrap();
+    let mut delta_sink = DeltaSink::new(storage, &schema, vec![]).await.unwrap();
 
     // Commit with files and checkpoint
     let checkpoint = CheckpointState::default();
@@ -277,6 +280,7 @@ async fn test_empty_files_with_checkpoint() {
         size: 1024,
         record_count: 100,
         bytes: None,
+        partition_values: std::collections::HashMap::new(),
     }];
 
     let result = delta_sink
