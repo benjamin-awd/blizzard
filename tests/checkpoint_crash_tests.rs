@@ -43,7 +43,9 @@ async fn test_atomic_checkpoint_prevents_data_loss() {
         Field::new("value", DataType::Int64, true),
     ]);
 
-    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
+    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![])
+        .await
+        .unwrap();
 
     // Commit multiple batches with checkpoints
     for i in 1..=3 {
@@ -182,7 +184,9 @@ async fn test_recovery_scans_commits() {
 
     let schema = Schema::new(vec![Field::new("data", DataType::Utf8, false)]);
 
-    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![]).await.unwrap();
+    let mut delta_sink = DeltaSink::new(storage.clone(), &schema, vec![])
+        .await
+        .unwrap();
 
     // Commit with checkpoint at version 1
     let mut source_state = SourceState::new();

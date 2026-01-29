@@ -49,6 +49,7 @@ struct UploaderConfig {
     min_multipart_size: usize,
     max_concurrent_uploads: usize,
     max_concurrent_parts: usize,
+    delta_checkpoint_interval: usize,
 }
 
 /// Handle to the background uploader task.
@@ -75,6 +76,7 @@ impl Uploader {
             min_multipart_size: sink_config.min_multipart_size_mb * MB,
             max_concurrent_uploads: sink_config.max_concurrent_uploads,
             max_concurrent_parts: sink_config.max_concurrent_parts,
+            delta_checkpoint_interval: sink_config.delta_checkpoint_interval,
         };
 
         let handle = tokio::spawn(Self::run(
@@ -177,7 +179,11 @@ impl Uploader {
                             if files_to_commit.len() >= COMMIT_BATCH_SIZE {
                                 let commit_files = std::mem::take(&mut files_to_commit);
                                 checkpoint_coordinator
-                                    .commit_files(&mut delta_sink, &commit_files)
+                                    .commit_files(
+                                        &mut delta_sink,
+                                        &commit_files,
+                                        config.delta_checkpoint_interval,
+                                    )
                                     .await;
                                 emit!(PendingCommitFiles { count: files_to_commit.len() });
                             }
@@ -251,7 +257,11 @@ impl Uploader {
 
         // Final commit with checkpoint
         checkpoint_coordinator
-            .commit_files(&mut delta_sink, &files_to_commit)
+            .commit_files(
+                &mut delta_sink,
+                &files_to_commit,
+                config.delta_checkpoint_interval,
+            )
             .await;
 
         // Reset gauges to 0 on completion

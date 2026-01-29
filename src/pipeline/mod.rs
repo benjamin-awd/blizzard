@@ -605,7 +605,11 @@ impl Pipeline {
             .iter()
             .filter_map(|path| {
                 let skip = source_state.records_to_skip(path);
-                if skip > 0 { Some((path.clone(), skip)) } else { None }
+                if skip > 0 {
+                    Some((path.clone(), skip))
+                } else {
+                    None
+                }
             })
             .collect();
         drop(source_state); // Free the cloned SourceState

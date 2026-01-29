@@ -81,7 +81,7 @@ fn parquet_writing_benchmarks(c: &mut Criterion) {
                 b.iter(|| {
                     let schema = bench_utils::benchmark_schema();
                     let config = ParquetWriterConfig::default();
-                    let mut writer = ParquetWriter::new(schema, config);
+                    let mut writer = ParquetWriter::new(schema, config).unwrap();
                     for batch in batches {
                         writer.write_batch(batch).unwrap();
                     }
