@@ -377,11 +377,12 @@ pub fn validate_schema_evolution(
                     });
                 }
                 if comparison.has_new_required_fields() {
+                    // Safe: has_new_required_fields() guarantees at least one non-nullable field exists
                     let required_field = comparison
                         .new_fields
                         .iter()
                         .find(|f| !f.is_nullable())
-                        .unwrap();
+                        .expect("has_new_required_fields returned true but no required field found");
                     return Err(SchemaError::RequiredFieldAddition {
                         field_name: required_field.name().clone(),
                     });
