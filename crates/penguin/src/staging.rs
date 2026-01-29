@@ -97,14 +97,8 @@ impl StagingReader {
         let mut results = Vec::with_capacity(meta_files.len());
 
         for meta_path in meta_files {
-            match self.read_metadata(&meta_path).await {
-                Ok(metadata) => {
-                    results.push(metadata);
-                }
-                Err(e) => {
-                    warn!("Failed to read metadata file {}: {}", meta_path, e);
-                }
-            }
+            let metadata = self.read_metadata(&meta_path).await?;
+            results.push(metadata);
         }
 
         Ok(results)

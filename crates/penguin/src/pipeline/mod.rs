@@ -272,9 +272,10 @@ impl PollingProcessor for PenguinProcessor {
             for file in &pending_files {
                 if let Err(e) = self.staging_reader.mark_committed(file).await {
                     tracing::warn!("Failed to mark file as committed: {}", e);
+                    continue;
                 }
 
-                // Update stats
+                // Update stats only on successful commit
                 self.stats.files_committed += 1;
                 self.stats.records_committed += file.record_count;
 
