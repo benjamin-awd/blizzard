@@ -27,12 +27,18 @@ struct CoercedField {
 impl CoercedField {
     /// Create a result indicating the field was unchanged.
     fn unchanged(field: FieldRef) -> Self {
-        Self { field, changed: false }
+        Self {
+            field,
+            changed: false,
+        }
     }
 
     /// Create a result indicating the field was changed.
     fn changed(field: FieldRef) -> Self {
-        Self { field, changed: true }
+        Self {
+            field,
+            changed: true,
+        }
     }
 }
 
@@ -281,8 +287,10 @@ fn coerce_field_inner(field: FieldRef) -> CoercedField {
         }
         // Recursively coerce Struct field types
         DataType::Struct(fields) => {
-            let coerced: Vec<CoercedField> =
-                fields.iter().map(|f| coerce_field_inner(f.clone())).collect();
+            let coerced: Vec<CoercedField> = fields
+                .iter()
+                .map(|f| coerce_field_inner(f.clone()))
+                .collect();
 
             let any_changed = coerced.iter().any(|c| c.changed);
 

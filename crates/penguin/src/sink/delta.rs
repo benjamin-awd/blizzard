@@ -35,8 +35,12 @@ const TXN_APP_ID_PREFIX: &str = "blizzard:";
 ///
 /// This limits how far back we search in the transaction log to avoid scanning
 /// the entire history of long-lived tables. If no checkpoint is found within
-/// this range, we start fresh.
-const CHECKPOINT_RECOVERY_SCAN_LIMIT: i64 = 100;
+/// this range, we start fresh (which may cause duplicate data if files were
+/// already processed).
+///
+/// 1000 versions is generous enough to handle mixed workloads where other
+/// applications write to the same Delta table, while still bounding scan time.
+const CHECKPOINT_RECOVERY_SCAN_LIMIT: i64 = 1000;
 
 /// Ensure Delta Lake cloud storage handlers are registered.
 ///
@@ -351,9 +355,12 @@ impl DeltaSink {
             }
         }
 
-        debug!(
-            "No Blizzard checkpoint found in Delta transaction log (scanned versions {}..{})",
-            start_version, current_version
+        warn!(
+            "No Blizzard checkpoint found in Delta log after scanning {} versions ({}..{}). \
+             Starting fresh - previously processed files may be re-ingested causing duplicates.",
+            current_version - start_version + 1,
+            start_version,
+            current_version
         );
         Ok(None)
     }
