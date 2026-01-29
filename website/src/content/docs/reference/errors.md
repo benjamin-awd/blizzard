@@ -194,13 +194,3 @@ Stage labels: `download`, `decompress`, `parse`, `upload`
 3. **Monitor failure metrics** to detect data quality issues
 4. **Review DLQ periodically** and fix underlying data issues
 5. **Use appropriate compression** to avoid decompression failures
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Error types | `src/error.rs` |
-| Dead Letter Queue | `src/dlq.rs` |
-| Failure stages | `src/metrics/events.rs:72` |
-| Error handling in pipeline | `src/pipeline/mod.rs:379` |
-| Max failures check | `src/pipeline/mod.rs:311` |

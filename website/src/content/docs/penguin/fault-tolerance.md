@@ -149,11 +149,3 @@ source:
 ```
 
 Lower intervals reduce commit latency but increase API calls.
-
-## Code References
-
-| Component | File |
-|-----------|------|
-| Staging writer | `crates/blizzard/src/staging.rs` |
-| Staging protocol | `crates/blizzard/src/staging.rs:17` |
-| Penguin committer | `crates/penguin/src/committer.rs` |
