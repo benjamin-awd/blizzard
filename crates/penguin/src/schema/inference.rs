@@ -3,22 +3,29 @@
 //! This module provides utilities to infer Arrow schema from parquet files,
 //! allowing Penguin to create Delta tables with the correct schema instead
 //! of using a placeholder.
+//!
+//! Inferred schemas are automatically coerced to be Delta Lake compatible
+//! (e.g., timestamp precision is converted to microseconds).
 
 use bytes::Bytes;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::parquet::arrow::parquet_to_arrow_schema;
 use deltalake::parquet::file::reader::{FileReader, SerializedFileReader};
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 use blizzard_common::{FinishedFile, StorageProvider};
 
 use crate::error::SchemaError;
+use crate::schema::evolution::coerce_schema;
 
 /// Infer Arrow schema from parquet file bytes.
 ///
 /// This reads only the parquet footer (metadata), not the actual data,
 /// making it efficient for schema inference.
+///
+/// The inferred schema is automatically coerced to be Delta Lake compatible:
+/// - Timestamp precision is converted to microseconds (ns/ms -> μs)
+/// - Nested types (List, Struct) are recursively coerced
 pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, SchemaError> {
     // Create a serialized file reader from the bytes
     let reader = SerializedFileReader::new(bytes.clone())
@@ -31,7 +38,8 @@ pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, Schem
     let schema = parquet_to_arrow_schema(metadata.file_metadata().schema_descr(), None)
         .map_err(|source| SchemaError::ArrowConversion { source })?;
 
-    Ok(Arc::new(schema))
+    // Coerce schema to be Delta Lake compatible (e.g., timestamp precision)
+    Ok(coerce_schema(&schema))
 }
 
 /// Infer schema from the first available parquet file.
@@ -170,6 +178,48 @@ mod tests {
 
         assert!(!inferred.field(0).is_nullable());
         assert!(inferred.field(1).is_nullable());
+    }
+
+    #[test]
+    fn test_infer_schema_coerces_timestamp_to_microseconds() {
+        use deltalake::arrow::array::TimestampNanosecondArray;
+        use deltalake::arrow::datatypes::TimeUnit;
+
+        // Create a schema with nanosecond timestamp (not Delta-compatible)
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(TimestampNanosecondArray::from(vec![Some(1234567890123456789i64)])),
+            ],
+        )
+        .unwrap();
+
+        let mut buffer = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut buffer, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        let bytes = Bytes::from(buffer);
+        let inferred = infer_schema_from_parquet_bytes(&bytes).unwrap();
+
+        // Timestamp should be coerced to microseconds for Delta Lake compatibility
+        assert_eq!(inferred.fields().len(), 2);
+        assert_eq!(
+            inferred.field(1).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
     }
 
     #[tokio::test]
