@@ -9,6 +9,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod pipeline;
+pub mod schema;
 pub mod sink;
 pub mod staging;
 

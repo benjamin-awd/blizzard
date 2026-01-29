@@ -1,14 +1,9 @@
-//! Tests that verify checkpoint mechanism behavior with atomic Txn-based checkpointing.
+//! Integration tests for checkpoint mechanism with atomic Txn-based checkpointing.
 //!
-//! With the new atomic checkpointing system using Delta Lake's Txn actions,
-//! many of the original crash vulnerabilities are now fixed:
+//! These tests verify penguin's checkpoint embedding and recovery logic in DeltaSink.
+//! Unit tests for CheckpointCoordinator and CheckpointState are in the respective modules.
 //!
-//! - Checkpoints are committed atomically with data files
-//! - No separate latest.json pointer file
-//! - No race conditions between separate locks (single consolidated state)
-//! - Schema versioning included in checkpoint state
-//!
-//! Run with: cargo test --test checkpoint_crash_tests
+//! Run with: cargo test -p penguin --test checkpoint_crash_tests
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,15 +12,17 @@ use blizzard_common::FinishedFile;
 use blizzard_common::storage::StorageProvider;
 use blizzard_common::types::SourceState;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
+use penguin::schema::infer_schema_from_first_file;
 use penguin::sink::DeltaSink;
 
-/// Test: Atomic checkpoint commits prevent data loss
+/// Test: Checkpoint commit and recovery via Delta Lake Txn actions.
 ///
-/// With Txn-based checkpointing, the checkpoint state is committed atomically
-/// with the Add actions. This means a crash cannot result in orphaned
-/// checkpoint data.
+/// Verifies that:
+/// - Checkpoints are embedded in Txn actions and committed atomically with data
+/// - Recovery scans the log and finds the latest checkpoint
+/// - Source state (including finished files) is correctly preserved
 #[tokio::test]
-async fn test_atomic_checkpoint_prevents_data_loss() {
+async fn test_checkpoint_commit_and_recovery() {
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use tempfile::TempDir;
 
@@ -43,56 +40,85 @@ async fn test_atomic_checkpoint_prevents_data_loss() {
 
     let mut delta_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
 
-    // Commit multiple batches with checkpoints
-    for i in 1..=3 {
-        let mut source_state = SourceState::new();
-        source_state.update_records(&format!("file{}.ndjson.gz", i), i * 1000);
+    // Commit first batch - file partially processed
+    let mut source_state1 = SourceState::new();
+    source_state1.update_records("file1.ndjson.gz", 100);
 
-        let checkpoint = CheckpointState {
-            schema_version: 1,
-            source_state,
-            delta_version: delta_sink.version(),
-        };
+    let checkpoint1 = CheckpointState {
+        schema_version: 1,
+        source_state: source_state1,
+        delta_version: 0,
+    };
 
-        let files = vec![FinishedFile::without_bytes(
-            format!("batch{}.parquet", i),
-            1024,
-            i * 1000,
-            std::collections::HashMap::new(),
-            None,
-        )];
+    delta_sink
+        .commit_files_with_checkpoint(
+            &[FinishedFile::without_bytes(
+                "batch1.parquet".to_string(),
+                512,
+                100,
+                HashMap::new(),
+                None,
+            )],
+            &checkpoint1,
+        )
+        .await
+        .unwrap();
 
-        delta_sink
-            .commit_files_with_checkpoint(&files, &checkpoint)
-            .await
-            .unwrap();
-    }
+    // Commit second batch - first file finished, second file in progress
+    let mut source_state2 = SourceState::new();
+    source_state2.update_records("file1.ndjson.gz", 100);
+    source_state2.mark_finished("file1.ndjson.gz");
+    source_state2.update_records("file2.ndjson.gz", 200);
 
-    // Create new sink and recover (simulating restart)
+    let checkpoint2 = CheckpointState {
+        schema_version: 1,
+        source_state: source_state2,
+        delta_version: delta_sink.version(),
+    };
+
+    delta_sink
+        .commit_files_with_checkpoint(
+            &[FinishedFile::without_bytes(
+                "batch2.parquet".to_string(),
+                1024,
+                200,
+                HashMap::new(),
+                None,
+            )],
+            &checkpoint2,
+        )
+        .await
+        .unwrap();
+
+    // Simulate restart - create new sink and recover
     let mut new_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
     let recovered = new_sink.recover_checkpoint_from_log().await.unwrap();
 
-    assert!(recovered.is_some(), "Should recover checkpoint");
+    assert!(recovered.is_some(), "Should recover checkpoint from log");
     let (state, version) = recovered.unwrap();
 
-    // Should have the latest checkpoint (version 3)
-    assert_eq!(version, 3);
-    assert!(state.source_state.files.contains_key("file3.ndjson.gz"));
-
-    println!("✓ Atomic checkpoint prevents data loss");
-    println!("  - Committed 3 checkpoints atomically with data");
-    println!("  - Recovered latest checkpoint (version {})", version);
+    // Should recover the LATEST checkpoint (version 2)
+    assert_eq!(version, 2);
+    assert!(
+        state.source_state.is_file_finished("file1.ndjson.gz"),
+        "file1 should be marked finished"
+    );
+    assert!(
+        state.source_state.files.contains_key("file2.ndjson.gz"),
+        "file2 should be tracked"
+    );
+    assert_eq!(state.source_state.records_to_skip("file2.ndjson.gz"), 200);
 }
 
-/// Test: Consolidated state capture eliminates race conditions
+/// Test: CheckpointCoordinator handles concurrent updates safely.
 ///
-/// With the new CheckpointCoordinator using a single consolidated lock,
-/// state capture is atomic and consistent.
+/// Verifies that concurrent updates and captures don't cause data races
+/// or inconsistent state due to the single consolidated lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_consolidated_state_capture() {
+async fn test_concurrent_coordinator_access() {
     let coordinator = Arc::new(CheckpointCoordinator::new());
 
-    // Spawn multiple tasks that update and capture state
+    // Spawn multiple tasks that update state concurrently
     let mut handles = Vec::new();
 
     for task_id in 0..4 {
@@ -127,212 +153,115 @@ async fn test_consolidated_state_capture() {
 
     let captured_states = capture_handle.await.unwrap();
 
-    // With consolidated state, each capture should be internally consistent
-    // The source_state and delta_version should reflect the same point in time
-    println!("✓ Consolidated state capture");
-    println!(
-        "  - Captured {} states during concurrent updates",
-        captured_states.len()
-    );
-    println!("  - Each capture uses a single lock, ensuring consistency");
+    // All captures should complete without panic (no data races)
+    assert_eq!(captured_states.len(), 100);
+
+    // Final state should have all 400 files
+    let final_state = coordinator.capture_state().await;
+    assert_eq!(final_state.source_state.files.len(), 400);
 }
 
-/// Test: Schema versioning is included in checkpoints
-#[tokio::test]
-async fn test_schema_versioning_present() {
-    let state = CheckpointState::default();
-
-    // Serialize and verify schema_version is present
-    let json = serde_json::to_string(&state).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-    assert!(
-        parsed.get("schema_version").is_some(),
-        "schema_version should be present in checkpoint"
-    );
-    assert_eq!(
-        parsed["schema_version"].as_u64().unwrap(),
-        1,
-        "Default schema_version should be 1"
-    );
-
-    println!("✓ Schema versioning present in checkpoints");
-    println!("  - schema_version field: {}", parsed["schema_version"]);
-}
-
-/// Test: Checkpoint recovery scans recent commits
+/// Test: Lazy schema inference creates Delta table with correct schema.
 ///
-/// The recovery mechanism scans backwards through the last N commits
-/// to find the most recent checkpoint.
+/// Verifies that:
+/// - try_open fails for non-existent table
+/// - Schema is correctly inferred from parquet file
+/// - Table is created with the inferred schema
+/// - Data can be committed and queried with correct column names
 #[tokio::test]
-async fn test_recovery_scans_commits() {
+async fn test_lazy_schema_inference_creates_correct_table() {
+    use deltalake::arrow::array::{Int64Array, StringArray};
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::record_batch::RecordBatch;
+    use deltalake::parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
     let temp_dir = TempDir::new().unwrap();
-    let table_path = temp_dir.path().to_str().unwrap();
+    let table_path = temp_dir.path();
 
-    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
+    // Step 1: Verify try_open fails for non-existent table
+    let storage =
+        StorageProvider::for_url_with_options(table_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+    let try_open_result = DeltaSink::try_open(&storage, vec![]).await;
+    match try_open_result {
+        Ok(_) => panic!("Expected error for non-existent table"),
+        Err(e) => assert!(e.is_table_not_found(), "Expected table not found error"),
+    }
+
+    // Step 2: Create a parquet file with a specific schema
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("user_id", DataType::Int64, false),
+        Field::new("username", DataType::Utf8, true),
+        Field::new("score", DataType::Int64, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(StringArray::from(vec!["alice", "bob", "charlie"])),
+            Arc::new(Int64Array::from(vec![100, 200, 300])),
+        ],
+    )
+    .unwrap();
+
+    let parquet_path = table_path.join("data.parquet");
+    let mut buffer = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut buffer, schema.clone(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    std::fs::write(&parquet_path, &buffer).unwrap();
+
+    // Step 3: Infer schema from the parquet file
+    let files = vec![FinishedFile::without_bytes(
+        "data.parquet".to_string(),
+        buffer.len(),
+        3,
+        HashMap::new(),
+        None,
+    )];
+
+    let inferred_schema = infer_schema_from_first_file(&storage, &files)
         .await
         .unwrap();
 
-    let schema = Schema::new(vec![Field::new("data", DataType::Utf8, false)]);
+    // Verify inferred schema matches
+    assert_eq!(inferred_schema.fields().len(), 3);
+    assert_eq!(inferred_schema.field(0).name(), "user_id");
+    assert_eq!(inferred_schema.field(1).name(), "username");
+    assert_eq!(inferred_schema.field(2).name(), "score");
 
-    let mut delta_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
+    // Step 4: Create Delta table with inferred schema
+    let mut delta_sink = DeltaSink::new(&storage, &inferred_schema, vec![])
+        .await
+        .unwrap();
 
-    // Commit with checkpoint at version 1
-    let mut source_state = SourceState::new();
-    source_state.update_records("early.ndjson.gz", 100);
-
+    // Step 5: Commit the parquet file
     let checkpoint = CheckpointState {
         schema_version: 1,
-        source_state,
+        source_state: SourceState::new(),
         delta_version: 0,
     };
 
     delta_sink
-        .commit_files_with_checkpoint(
-            &[FinishedFile::without_bytes(
-                "early.parquet".to_string(),
-                512,
-                100,
-                std::collections::HashMap::new(),
-                None,
-            )],
-            &checkpoint,
-        )
-        .await
-        .unwrap();
-
-    // Commit more data with checkpoint
-    let mut source_state2 = SourceState::new();
-    source_state2.update_records("early.ndjson.gz", 100);
-    source_state2.mark_finished("early.ndjson.gz");
-    source_state2.update_records("later.ndjson.gz", 200);
-
-    let checkpoint2 = CheckpointState {
-        schema_version: 1,
-        source_state: source_state2,
-        delta_version: delta_sink.version(),
-    };
-
-    delta_sink
-        .commit_files_with_checkpoint(
-            &[FinishedFile::without_bytes(
-                "later.parquet".to_string(),
-                1024,
-                200,
-                std::collections::HashMap::new(),
-                None,
-            )],
-            &checkpoint2,
-        )
-        .await
-        .unwrap();
-
-    // Recover should find the LATEST checkpoint (version 2)
-    let mut new_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
-    let recovered = new_sink.recover_checkpoint_from_log().await.unwrap();
-
-    assert!(recovered.is_some(), "Should recover checkpoint");
-    let (state, version) = recovered.unwrap();
-
-    assert_eq!(version, 2, "Should recover latest checkpoint");
-    assert!(state.source_state.is_file_finished("early.ndjson.gz"));
-    assert!(state.source_state.files.contains_key("later.ndjson.gz"));
-
-    println!("✓ Recovery finds latest checkpoint");
-    println!("  - Checkpoint version: {}", version);
-    println!(
-        "  - Files tracked: {:?}",
-        state.source_state.files.keys().collect::<Vec<_>>()
-    );
-}
-
-/// Test: Empty commits are not created
-///
-/// When there are no files to commit, no commit should be made.
-#[tokio::test]
-async fn test_empty_files_with_checkpoint() {
-    use deltalake::arrow::datatypes::{DataType, Field, Schema};
-    use tempfile::TempDir;
-
-    let temp_dir = TempDir::new().unwrap();
-    let table_path = temp_dir.path().to_str().unwrap();
-
-    let storage = StorageProvider::for_url_with_options(table_path, HashMap::new())
-        .await
-        .unwrap();
-
-    let schema = Schema::new(vec![Field::new("data", DataType::Utf8, false)]);
-    let mut delta_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
-
-    // Commit with files and checkpoint
-    let checkpoint = CheckpointState::default();
-    let files = vec![FinishedFile::without_bytes(
-        "data.parquet".to_string(),
-        1024,
-        100,
-        std::collections::HashMap::new(),
-        None,
-    )];
-
-    let result = delta_sink
         .commit_files_with_checkpoint(&files, &checkpoint)
-        .await;
+        .await
+        .unwrap();
 
-    assert!(result.is_ok());
-    assert!(
-        result.unwrap().is_some(),
-        "Commit with files should succeed"
-    );
+    // Step 6: Verify table can be opened
+    let reopened_sink = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    assert!(reopened_sink.version() >= 0);
 
-    println!("✓ Commit with files succeeds");
-}
-
-/// Test: Checkpoint coordinator state management
-#[tokio::test]
-async fn test_checkpoint_coordinator_state() {
-    let coordinator = CheckpointCoordinator::new();
-
-    // Update state
-    coordinator
-        .update_source_state("file1.ndjson.gz", 1000, false)
-        .await;
-    coordinator
-        .update_source_state("file2.ndjson.gz", 500, true)
-        .await;
-    coordinator.update_delta_version(5).await;
-
-    // Capture state
-    let captured = coordinator.capture_state().await;
-
-    assert_eq!(captured.schema_version, 1);
-    assert_eq!(captured.delta_version, 5);
-    assert!(captured.source_state.is_file_finished("file2.ndjson.gz"));
-    assert!(!captured.source_state.is_file_finished("file1.ndjson.gz"));
-
-    // Restore and verify
-    let restored_state = CheckpointState {
-        schema_version: 1,
-        source_state: {
-            let mut s = SourceState::new();
-            s.update_records("restored_file.ndjson.gz", 999);
-            s
-        },
-        delta_version: 10,
-    };
-
-    coordinator.restore_from_state(restored_state).await;
-
-    let after_restore = coordinator.capture_state().await;
-    assert_eq!(after_restore.delta_version, 10);
-    assert!(
-        after_restore
-            .source_state
-            .files
-            .contains_key("restored_file.ndjson.gz")
-    );
-
-    println!("✓ Checkpoint coordinator state management works correctly");
+    // Step 7: Verify we can recover checkpoint from the new table
+    let mut sink_for_recovery = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    let recovered = sink_for_recovery
+        .recover_checkpoint_from_log()
+        .await
+        .unwrap();
+    assert!(recovered.is_some(), "Should find checkpoint in new table");
 }

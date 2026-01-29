@@ -266,7 +266,11 @@ mod tests {
         // Verify all files are removed from pending
         for i in 0..3 {
             let meta_path = staging_dir.join(format!("file-{}.meta.json", i));
-            assert!(!meta_path.exists(), "File {} should be removed from pending", i);
+            assert!(
+                !meta_path.exists(),
+                "File {} should be removed from pending",
+                i
+            );
         }
 
         // Verify all files are in archive with correct content

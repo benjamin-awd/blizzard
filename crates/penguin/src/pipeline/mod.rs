@@ -4,9 +4,7 @@
 //! trait from blizzard-common.
 
 use async_trait::async_trait;
-use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use snafu::ResultExt;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -17,6 +15,7 @@ use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::Config;
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
+use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 use crate::staging::StagingReader;
 
@@ -76,7 +75,8 @@ struct PreparedState {
 struct PenguinProcessor {
     config: Config,
     staging_reader: StagingReader,
-    delta_sink: DeltaSink,
+    sink_storage: StorageProvider,
+    delta_sink: Option<DeltaSink>,
     checkpoint_coordinator: CheckpointCoordinator,
     stats: PipelineStats,
 }
@@ -99,30 +99,64 @@ impl PenguinProcessor {
         .await
         .context(StorageSnafu)?;
 
-        // For penguin, we infer the schema from the first parquet file we see.
-        // For now, use a placeholder schema - in production this would be loaded
-        // from the existing Delta table or the first parquet file.
-        let placeholder_schema = Arc::new(Schema::new(vec![Field::new(
-            "_placeholder",
-            DataType::Utf8,
-            true,
-        )]));
-
-        // Create Delta sink
-        let delta_sink = DeltaSink::new(
-            &sink_storage,
-            &placeholder_schema,
-            config.source.partition_by.clone(),
-        )
-        .await?;
+        // Try to open existing Delta table without creating it
+        let delta_sink =
+            match DeltaSink::try_open(&sink_storage, config.source.partition_by.clone()).await {
+                Ok(sink) => {
+                    info!("Opened existing Delta table");
+                    Some(sink)
+                }
+                Err(e) if e.is_table_not_found() => {
+                    info!("No existing Delta table found, will create on first file");
+                    None
+                }
+                Err(e) => return Err(e.into()),
+            };
 
         Ok(Self {
             config,
             staging_reader,
+            sink_storage,
             delta_sink,
             checkpoint_coordinator: CheckpointCoordinator::new(),
             stats: PipelineStats::default(),
         })
+    }
+
+    /// Ensure the delta sink is initialized.
+    ///
+    /// If no sink exists yet, infers the schema from the first parquet file
+    /// and creates the Delta table with the correct schema.
+    async fn ensure_delta_sink(
+        &mut self,
+        pending_files: &[FinishedFile],
+    ) -> Result<(), PipelineError> {
+        if self.delta_sink.is_some() {
+            return Ok(());
+        }
+
+        info!("Inferring schema from first parquet file to create Delta table");
+
+        // Infer schema from the first available parquet file
+        let schema = infer_schema_from_first_file(&self.sink_storage, pending_files).await?;
+
+        info!(
+            "Inferred schema with {} fields: {:?}",
+            schema.fields().len(),
+            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+        );
+
+        // Create the Delta sink with the inferred schema
+        let sink = DeltaSink::new(
+            &self.sink_storage,
+            &schema,
+            self.config.source.partition_by.clone(),
+        )
+        .await?;
+
+        self.delta_sink = Some(sink);
+
+        Ok(())
     }
 }
 
@@ -132,12 +166,27 @@ impl PollingProcessor for PenguinProcessor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
+        // Read pending files from staging first
+        let pending_files = self.staging_reader.read_pending_files().await?;
+
+        if pending_files.is_empty() {
+            return Ok(None);
+        }
+
+        info!("Found {} files to commit", pending_files.len());
+
+        // Ensure delta sink exists (creates table with inferred schema if needed)
+        self.ensure_delta_sink(&pending_files).await?;
+
         // On cold start, recover checkpoint from Delta log
+        // This must happen AFTER ensure_delta_sink so we have a table to read from
         if cold_start {
             info!("Cold start - recovering checkpoint from Delta log");
+            // delta_sink is guaranteed to be Some after ensure_delta_sink
+            let delta_sink = self.delta_sink.as_mut().unwrap();
             match self
                 .checkpoint_coordinator
-                .restore_from_delta_log(&mut self.delta_sink)
+                .restore_from_delta_log(delta_sink)
                 .await
             {
                 Ok(true) => info!("Recovered checkpoint from Delta log"),
@@ -148,26 +197,20 @@ impl PollingProcessor for PenguinProcessor {
             }
         }
 
-        // Read pending files from staging
-        let pending_files = self.staging_reader.read_pending_files().await?;
-
-        if pending_files.is_empty() {
-            return Ok(None);
-        }
-
-        info!("Found {} files to commit", pending_files.len());
-
         Ok(Some(PreparedState { pending_files }))
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
         let PreparedState { pending_files } = state;
 
+        // delta_sink is guaranteed to be Some after prepare() calls ensure_delta_sink
+        let delta_sink = self.delta_sink.as_mut().unwrap();
+
         // Commit files to Delta Lake (parquet files are already in table directory)
         let committed_count = self
             .checkpoint_coordinator
             .commit_files(
-                &mut self.delta_sink,
+                delta_sink,
                 &pending_files,
                 self.config.source.delta_checkpoint_interval,
             )
@@ -195,7 +238,7 @@ impl PollingProcessor for PenguinProcessor {
             info!(
                 "Committed {} files to Delta Lake (version {})",
                 committed_count,
-                self.delta_sink.version()
+                delta_sink.version()
             );
         }
 

@@ -5,6 +5,38 @@ use snafu::prelude::*;
 // Re-export common errors
 pub use blizzard_common::error::{ConfigError, StorageError};
 
+/// Errors that can occur during schema inference.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+#[snafu(module)]
+pub enum SchemaError {
+    /// Failed to decode parquet footer.
+    #[snafu(display("Failed to decode parquet footer: {source}"))]
+    ParquetFooter {
+        source: deltalake::parquet::errors::ParquetError,
+    },
+
+    /// Failed to decode parquet metadata.
+    #[snafu(display("Failed to decode parquet metadata: {source}"))]
+    ParquetMetadata {
+        source: deltalake::parquet::errors::ParquetError,
+    },
+
+    /// Failed to convert parquet schema to Arrow schema.
+    #[snafu(display("Failed to convert schema: {source}"))]
+    ArrowConversion {
+        source: deltalake::parquet::errors::ParquetError,
+    },
+
+    /// No files available for schema inference.
+    #[snafu(display("No files available for schema inference"))]
+    NoFilesAvailable,
+
+    /// Storage error while reading file for schema inference.
+    #[snafu(display("Storage error during schema inference: {source}"))]
+    StorageRead { source: StorageError },
+}
+
 /// Errors that can occur during Delta Lake operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -48,6 +80,25 @@ pub enum DeltaError {
     PathParse { path: String },
 }
 
+impl DeltaError {
+    /// Check if this error indicates that the table was not found.
+    pub fn is_table_not_found(&self) -> bool {
+        match self {
+            DeltaError::DeltaOperation { source } => {
+                // Check for common "not found" patterns in the error message
+                let msg = source.to_string().to_lowercase();
+                msg.contains("not found")
+                    || msg.contains("no such file")
+                    || msg.contains("does not exist")
+                    || msg.contains("no log files")
+                    || msg.contains("no files in log")
+                    || msg.contains("not a table")
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Errors that can occur during staging operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -89,6 +140,10 @@ pub enum PipelineError {
     #[snafu(display("Staging error: {source}"))]
     Staging { source: StagingError },
 
+    /// Schema inference error.
+    #[snafu(display("Schema error: {source}"))]
+    Schema { source: SchemaError },
+
     /// Task join error.
     #[snafu(display("Task join error: {source}"))]
     TaskJoin { source: tokio::task::JoinError },
@@ -125,5 +180,11 @@ impl From<DeltaError> for PipelineError {
 impl From<StagingError> for PipelineError {
     fn from(source: StagingError) -> Self {
         PipelineError::Staging { source }
+    }
+}
+
+impl From<SchemaError> for PipelineError {
+    fn from(source: SchemaError) -> Self {
+        PipelineError::Schema { source }
     }
 }
