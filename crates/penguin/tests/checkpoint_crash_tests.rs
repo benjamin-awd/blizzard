@@ -228,7 +228,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
 
     // Step 3: Infer schema from the parquet file (reads from staging)
     let files = vec![FinishedFile::without_bytes(
-        "data.parquet".to_string(),  // Target path (UUID extracted for staging lookup)
+        "data.parquet".to_string(), // Target path (UUID extracted for staging lookup)
         buffer.len(),
         3,
         HashMap::new(),
