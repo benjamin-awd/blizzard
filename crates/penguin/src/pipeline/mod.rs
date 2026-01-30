@@ -76,11 +76,8 @@ impl MultiTableStats {
 ///
 pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineError> {
     // 1. Initialize metrics once (shared across all tables)
-    if config.metrics.enabled {
-        let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
-        blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
-        info!("Metrics server started on {}", config.metrics.address);
-    }
+    let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
+    blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
 
     // 2. Set up shared shutdown handling
     let shutdown = CancellationToken::new();

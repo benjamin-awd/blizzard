@@ -24,9 +24,6 @@ pub const MB: usize = 1024 * KB;
 /// Metrics configuration for Prometheus endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsConfig {
-    /// Whether metrics collection is enabled (default: true).
-    #[serde(default = "default_metrics_enabled")]
-    pub enabled: bool,
     /// Address to bind the metrics HTTP server (default: "0.0.0.0:9090").
     #[serde(default = "default_metrics_address")]
     pub address: String,
@@ -35,7 +32,6 @@ pub struct MetricsConfig {
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            enabled: default_metrics_enabled(),
             address: default_metrics_address(),
         }
     }
@@ -44,15 +40,10 @@ impl Default for MetricsConfig {
 impl MetricsConfig {
     /// Merge values from another MetricsConfig (last-write-wins).
     pub fn merge_from(&mut self, other: Self) {
-        self.enabled = other.enabled;
         if other.address != default_metrics_address() {
             self.address = other.address;
         }
     }
-}
-
-fn default_metrics_enabled() -> bool {
-    true
 }
 
 fn default_metrics_address() -> String {

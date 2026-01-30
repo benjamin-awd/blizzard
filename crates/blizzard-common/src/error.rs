@@ -133,6 +133,14 @@ pub enum MetricsError {
     PrometheusInit {
         source: metrics_exporter_prometheus::BuildError,
     },
+
+    /// Metrics server already initialized (double-init attempted).
+    #[snafu(display("Metrics server already initialized"))]
+    AlreadyInitialized,
+
+    /// Metrics server not initialized (controller accessed before init).
+    #[snafu(display("Metrics server not initialized"))]
+    NotInitialized,
 }
 
 // ============ DLQ Errors ============

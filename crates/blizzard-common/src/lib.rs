@@ -27,7 +27,10 @@ pub use config::{
     Resource,
 };
 pub use error::{ConfigError, DlqError, MetricsError, StorageError};
-pub use metrics::{UtilizationTimer, init as init_metrics};
+pub use metrics::{
+    DEFAULT_METRICS_ADDR, MetricsController, UtilizationTimer, init_global as init_metrics,
+    init_test as init_metrics_test,
+};
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
