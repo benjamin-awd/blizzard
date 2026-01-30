@@ -668,6 +668,7 @@ pub async fn list_ndjson_files(storage: &StorageProvider) -> Result<Vec<String>,
 pub async fn list_ndjson_files_with_prefixes(
     storage: &StorageProvider,
     prefixes: Option<&[String]>,
+    pipeline: &str,
 ) -> Result<Vec<String>, StorageError> {
     match prefixes {
         None => list_ndjson_files(storage).await,
@@ -677,6 +678,7 @@ pub async fn list_ndjson_files_with_prefixes(
             let mut total_listed = 0;
 
             tracing::info!(
+                pipeline = %pipeline,
                 "Listing files under {} date prefixes: {:?}",
                 prefixes.len(),
                 if prefixes.len() <= 5 {

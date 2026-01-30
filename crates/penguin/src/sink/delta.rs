@@ -74,7 +74,7 @@ impl DeltaSink {
     ) -> Result<Self, DeltaError> {
         ensure_handlers_registered();
 
-        let table = load_or_create_table(storage, schema, &partition_by).await?;
+        let table = load_or_create_table(storage, schema, &partition_by, &table_name).await?;
         let last_version = table.version().unwrap_or(-1);
 
         // Cache the schema from the created/loaded table
@@ -106,7 +106,7 @@ impl DeltaSink {
     ) -> Result<Self, DeltaError> {
         ensure_handlers_registered();
 
-        let table = try_open_table(storage).await?;
+        let table = try_open_table(storage, &table_name).await?;
         let last_version = table.version().unwrap_or(-1);
 
         // Cache the schema from the opened table
@@ -161,6 +161,7 @@ impl DeltaSink {
 
         self.last_version = new_version;
         info!(
+            table = %self.table_name,
             "Committed {} files with checkpoint v{} to Delta Lake, version {}",
             files.len(),
             self.checkpoint_version,
@@ -221,6 +222,7 @@ impl DeltaSink {
             }
             EvolutionAction::Merge { new_schema } => {
                 info!(
+                    table = %self.table_name,
                     "Evolving schema: adding {} new fields",
                     new_schema.fields().len()
                         - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
@@ -231,6 +233,7 @@ impl DeltaSink {
             }
             EvolutionAction::Overwrite { new_schema } => {
                 warn!(
+                    table = %self.table_name,
                     "Overwriting schema with {} fields",
                     new_schema.fields().len()
                 );
@@ -287,7 +290,7 @@ impl DeltaSink {
             .map_err(|source| DeltaError::DeltaOperation { source })?;
 
         self.last_version = version;
-        info!("Schema evolution committed at version {}", version);
+        info!(table = %self.table_name, "Schema evolution committed at version {}", version);
 
         Ok(())
     }
@@ -312,11 +315,12 @@ impl DeltaSink {
 
         let current_version = self.table.version().unwrap_or(-1);
         info!(
+            table = %self.table_name,
             "Recovering checkpoint from Delta log, current_version={}",
             current_version
         );
         if current_version < 0 {
-            debug!("Empty Delta table, no checkpoint to recover");
+            debug!(table = %self.table_name, "Empty Delta table, no checkpoint to recover");
             return Ok(None);
         }
 
@@ -367,6 +371,7 @@ impl DeltaSink {
         // table won't have any checkpoint and there's nothing to re-ingest
         if current_version > 0 {
             warn!(
+                table = %self.table_name,
                 "No Blizzard checkpoint found in Delta log after scanning {} versions ({}..{}). \
                  Starting fresh - previously processed files may be re-ingested causing duplicates.",
                 current_version - start_version + 1,
@@ -374,7 +379,7 @@ impl DeltaSink {
                 current_version
             );
         } else {
-            debug!("New Delta table (version 0), no checkpoint expected");
+            debug!(table = %self.table_name, "New Delta table (version 0), no checkpoint expected");
         }
         Ok(None)
     }
@@ -446,7 +451,10 @@ fn build_table_url(storage_provider: &StorageProvider) -> Result<String, DeltaEr
 ///
 /// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
 /// to check if the error indicates a missing table.
-async fn try_open_table(storage_provider: &StorageProvider) -> Result<DeltaTable, DeltaError> {
+async fn try_open_table(
+    storage_provider: &StorageProvider,
+    table_name: &str,
+) -> Result<DeltaTable, DeltaError> {
     let table_url = build_table_url(storage_provider)?;
 
     let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
@@ -461,6 +469,7 @@ async fn try_open_table(storage_provider: &StorageProvider) -> Result<DeltaTable
     .map_err(|source| DeltaError::DeltaOperation { source })?;
 
     info!(
+        table = %table_name,
         "Opened existing Delta table at version {}",
         table.version().unwrap_or(-1)
     );
@@ -472,6 +481,7 @@ pub async fn load_or_create_table(
     storage_provider: &StorageProvider,
     schema: &Schema,
     partition_by: &[String],
+    table_name: &str,
 ) -> Result<DeltaTable, DeltaError> {
     let table_url = build_table_url(storage_provider)?;
 
@@ -487,6 +497,7 @@ pub async fn load_or_create_table(
     {
         Ok(table) => {
             info!(
+                table = %table_name,
                 "Loaded existing Delta table at version {}",
                 table.version().unwrap_or(-1)
             );
@@ -494,7 +505,7 @@ pub async fn load_or_create_table(
         }
         Err(_) => {
             // Table doesn't exist, create it
-            info!("Creating new Delta table at {}", table_url);
+            info!(table = %table_name, "Creating new Delta table at {}", table_url);
 
             // Convert Arrow schema to Delta schema
             let delta_schema = arrow_schema_to_delta(schema)?;
@@ -506,7 +517,7 @@ pub async fn load_or_create_table(
 
             // Add partition columns if configured
             if !partition_by.is_empty() {
-                info!("Creating table with partition columns: {:?}", partition_by);
+                info!(table = %table_name, "Creating table with partition columns: {:?}", partition_by);
                 builder = builder.with_partition_columns(partition_by);
             }
 
@@ -604,6 +615,7 @@ async fn commit_to_delta_with_checkpoint(
     if let Some((state, version)) = checkpoint {
         all_actions.push(create_txn_action(state, version)?);
         debug!(
+            table = %table_name,
             "Including checkpoint v{} in commit ({} files)",
             version,
             add_actions.len()

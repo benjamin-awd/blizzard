@@ -70,7 +70,7 @@ impl StagingReader {
                     }
                 }
                 Err(e) => {
-                    warn!("Error listing staging file: {}", e);
+                    warn!(table = %self.table, "Error listing staging file: {}", e);
                 }
             }
         }
@@ -154,6 +154,7 @@ impl StagingReader {
             })?;
 
         debug!(
+            table = %self.table,
             "Archived staging metadata: {} -> {}",
             meta_path, archive_path
         );
