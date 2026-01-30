@@ -253,7 +253,13 @@ async fn run_single_pipeline(
     );
 
     // Run the polling loop with jittered interval
-    run_polling_loop(&mut processor, effective_interval, shutdown).await?;
+    run_polling_loop(
+        &mut processor,
+        effective_interval,
+        shutdown,
+        pipeline_key.id(),
+    )
+    .await?;
 
     Ok(processor.stats)
 }

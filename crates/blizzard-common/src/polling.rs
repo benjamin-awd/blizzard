@@ -51,10 +51,13 @@ pub trait PollingProcessor {
 /// 2. Call `process()` if there's work to do
 /// 3. Wait for poll_interval or shutdown signal
 /// 4. Repeat until shutdown
+///
+/// The `name` parameter identifies the pipeline/table in log messages.
 pub async fn run_polling_loop<P: PollingProcessor>(
     processor: &mut P,
     poll_interval: Duration,
     shutdown: CancellationToken,
+    name: &str,
 ) -> Result<(), P::Error> {
     let mut first_iteration = true;
 
@@ -65,7 +68,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             biased;
 
             _ = shutdown_clone.cancelled() => {
-                info!("Shutdown requested during initialization");
+                info!(name, "Shutdown requested during initialization");
                 return Ok(());
             }
 
@@ -84,7 +87,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                     biased;
 
                     _ = shutdown_clone.cancelled() => {
-                        info!("Shutdown requested during processing");
+                        info!(name, "Shutdown requested during processing");
                         IterationResult::Shutdown
                     }
 
@@ -92,7 +95,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                 }
             }
             None => {
-                info!("No items to process");
+                info!(name, "No items to process");
                 IterationResult::NoItems
             }
         };
@@ -102,12 +105,14 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             IterationResult::Shutdown => break,
             IterationResult::NoItems => {
                 info!(
+                    name,
                     "No new items, waiting {}s before next poll",
                     poll_interval.as_secs()
                 );
             }
             IterationResult::ProcessedItems => {
                 info!(
+                    name,
                     "Iteration complete, waiting {}s before next poll",
                     poll_interval.as_secs()
                 );
@@ -120,7 +125,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             .await
             .is_none()
         {
-            info!("Shutdown requested during poll wait");
+            info!(name, "Shutdown requested during poll wait");
             break;
         }
     }

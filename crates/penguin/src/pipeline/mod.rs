@@ -227,7 +227,7 @@ async fn run_single_table(
     );
 
     // Run the polling loop with jittered interval
-    run_polling_loop(&mut processor, effective_interval, shutdown).await?;
+    run_polling_loop(&mut processor, effective_interval, shutdown, table_key.id()).await?;
 
     Ok(processor.stats)
 }
