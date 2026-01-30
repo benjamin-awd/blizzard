@@ -127,6 +127,14 @@ pub enum StagingError {
     #[snafu(display("Failed to deserialize staging metadata: {source}"))]
     Deserialize { source: serde_json::Error },
 
+    /// Failed to move/rename file.
+    #[snafu(display("Failed to move file from {from} to {to}: {source}"))]
+    Move {
+        from: String,
+        to: String,
+        source: StorageError,
+    },
+
     /// Failed to delete file.
     #[snafu(display("Failed to delete file {path}: {source}"))]
     Delete { path: String, source: StorageError },

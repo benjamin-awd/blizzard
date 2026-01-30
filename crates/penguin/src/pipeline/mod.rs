@@ -477,25 +477,41 @@ impl PollingProcessor for PenguinProcessor {
             .as_mut()
             .context(DeltaSinkNotInitializedSnafu)?;
 
-        // Commit files to Delta Lake (parquet files are already in table directory)
+        // Step 1: Move parquet files from staging to table directory BEFORE Delta commit.
+        // This ensures files exist at the paths referenced in the Delta transaction log.
+        let mut files_to_commit = Vec::with_capacity(pending_files.len());
+        for file in &pending_files {
+            if let Err(e) = self.staging_reader.move_to_table(file).await {
+                tracing::warn!(
+                    table = %self.table_key,
+                    file = %file.filename,
+                    error = %e,
+                    "Failed to move parquet from staging to table, skipping file"
+                );
+                continue;
+            }
+            files_to_commit.push(file.clone());
+        }
+
+        // Step 2: Commit files to Delta Lake (parquet files are now in table directory)
         let committed_count = self
             .checkpoint_coordinator
             .commit_files(
                 delta_sink,
-                &pending_files,
+                &files_to_commit,
                 self.table_config.delta_checkpoint_interval,
             )
             .await;
 
         if committed_count > 0 {
-            // Mark files as committed by deleting .meta.json files
-            for file in &pending_files {
-                if let Err(e) = self.staging_reader.mark_committed(file).await {
-                    tracing::warn!(table = %self.table_key, error = %e, "Failed to mark file as committed");
-                    continue;
+            // Step 3: Archive metadata files after successful Delta commit
+            for file in &files_to_commit {
+                if let Err(e) = self.staging_reader.archive_meta(file).await {
+                    // Non-fatal: file is committed, meta archive is just for debugging
+                    tracing::warn!(table = %self.table_key, error = %e, "Failed to archive metadata");
                 }
 
-                // Update stats only on successful commit
+                // Update stats
                 self.stats.files_committed += 1;
                 self.stats.records_committed += file.record_count;
 
