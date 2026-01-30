@@ -47,17 +47,13 @@ pub struct CheckpointCoordinator {
     last_checkpoint: Arc<Mutex<Instant>>,
     /// Number of commits since last Delta checkpoint file was created.
     commits_since_delta_checkpoint: Arc<Mutex<usize>>,
-}
-
-impl Default for CheckpointCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Table identifier for metrics labeling.
+    table: String,
 }
 
 impl CheckpointCoordinator {
     /// Create a new checkpoint coordinator.
-    pub fn new() -> Self {
+    pub fn new(table: String) -> Self {
         Self {
             state: Arc::new(Mutex::new(CheckpointStateInner {
                 source_state: SourceState::new(),
@@ -65,6 +61,7 @@ impl CheckpointCoordinator {
             })),
             last_checkpoint: Arc::new(Mutex::new(Instant::now())),
             commits_since_delta_checkpoint: Arc::new(Mutex::new(0)),
+            table,
         }
     }
 
@@ -77,7 +74,10 @@ impl CheckpointCoordinator {
         let file_count = checkpoint.source_state.files.len();
         state.source_state = checkpoint.source_state;
         state.delta_version = checkpoint.delta_version;
-        emit!(SourceStateFiles { count: file_count });
+        emit!(SourceStateFiles {
+            count: file_count,
+            pipeline: self.table.clone(),
+        });
     }
 
     /// Update the source state for a file.
@@ -89,7 +89,8 @@ impl CheckpointCoordinator {
             state.source_state.update_records(path, records_read);
         }
         emit!(SourceStateFiles {
-            count: state.source_state.files.len()
+            count: state.source_state.files.len(),
+            pipeline: self.table.clone(),
         });
     }
 
@@ -261,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_coordinator_capture_state() {
-        let coordinator = CheckpointCoordinator::new();
+        let coordinator = CheckpointCoordinator::new("test".to_string());
 
         // Update some state
         coordinator

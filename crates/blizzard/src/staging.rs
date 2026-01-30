@@ -39,6 +39,8 @@ use crate::error::{SerializeSnafu, StagingError, StagingWriteSnafu};
 /// metadata to `_staging/pending/` for penguin to pick up and commit.
 pub struct StagingWriter {
     storage: Arc<StorageProvider>,
+    /// Pipeline identifier for metrics labeling.
+    pipeline: String,
 }
 
 impl StagingWriter {
@@ -46,6 +48,7 @@ impl StagingWriter {
     pub async fn new(
         table_uri: &str,
         storage_options: HashMap<String, String>,
+        pipeline: String,
     ) -> Result<Self, StagingError> {
         let storage = StorageProvider::for_url_with_options(table_uri, storage_options)
             .await
@@ -53,6 +56,7 @@ impl StagingWriter {
 
         Ok(Self {
             storage: Arc::new(storage),
+            pipeline,
         })
     }
 
@@ -94,7 +98,10 @@ impl StagingWriter {
             .await
             .context(StagingWriteSnafu)?;
 
-        emit!(StagingFileWritten { bytes: file.size });
+        emit!(StagingFileWritten {
+            bytes: file.size,
+            pipeline: self.pipeline.clone(),
+        });
         info!(
             "Wrote table file: {} ({} bytes, {} records)",
             file.filename, file.size, file.record_count
@@ -125,7 +132,9 @@ mod tests {
         // Create _staging/pending directory
         std::fs::create_dir_all(temp_dir.path().join("_staging/pending")).unwrap();
 
-        let writer = StagingWriter::new(table_uri, HashMap::new()).await.unwrap();
+        let writer = StagingWriter::new(table_uri, HashMap::new(), "test".to_string())
+            .await
+            .unwrap();
 
         let file = FinishedFile {
             filename: "date=2026-01-28/test-uuid.parquet".to_string(),

@@ -70,6 +70,30 @@ pub enum ConfigError {
     #[snafu(display("Table URI cannot be empty"))]
     EmptyTableUri,
 
+    /// Table URI is empty for a specific table.
+    #[snafu(display("Table '{table}' has empty table_uri"))]
+    EmptyTableUriForTable { table: String },
+
+    /// Source path is empty for a specific pipeline.
+    #[snafu(display("Pipeline '{pipeline}' has empty source path"))]
+    EmptySourcePathForPipeline { pipeline: String },
+
+    /// Table URI is empty for a specific pipeline.
+    #[snafu(display("Pipeline '{pipeline}' has empty table_uri"))]
+    EmptyTableUriForPipeline { pipeline: String },
+
+    /// Schema is empty for a specific pipeline.
+    #[snafu(display(
+        "Pipeline '{pipeline}' has empty schema (specify either 'infer: true' or 'fields')"
+    ))]
+    EmptySchemaForPipeline { pipeline: String },
+
+    /// Schema has conflicting options.
+    #[snafu(display(
+        "Pipeline '{pipeline}' has invalid schema: cannot specify both 'infer: true' and 'fields'"
+    ))]
+    SchemaConflict { pipeline: String },
+
     /// Environment variable interpolation failed.
     #[snafu(display("Environment variable interpolation failed:\n{message}"))]
     EnvInterpolation { message: String },
@@ -81,6 +105,29 @@ pub enum ConfigError {
     /// Failed to read configuration file.
     #[snafu(display("Failed to read configuration file"))]
     ReadFile { source: std::io::Error },
+
+    /// Resource conflict detected (e.g., two tables using the same staging directory).
+    #[snafu(display("Resource conflict: {message}"))]
+    ResourceConflict { message: String },
+
+    /// Duplicate component keys found across config files.
+    #[snafu(display("Duplicate component keys: {}", keys.join(", ")))]
+    DuplicateComponents { keys: Vec<String> },
+
+    /// Unsupported config file format.
+    #[snafu(display("Unsupported config format for {}: only .yaml/.yml supported", path.display()))]
+    UnsupportedFormat { path: std::path::PathBuf },
+
+    /// Failed to read configuration directory.
+    #[snafu(display("Failed to read directory {}", path.display()))]
+    ReadDir {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    /// Multiple configuration errors occurred.
+    #[snafu(display("Multiple config errors:\n{}", errors.join("\n")))]
+    MultipleErrors { errors: Vec<String> },
 }
 
 // ============ Metrics Errors ============
@@ -94,6 +141,14 @@ pub enum MetricsError {
     PrometheusInit {
         source: metrics_exporter_prometheus::BuildError,
     },
+
+    /// Metrics server already initialized (double-init attempted).
+    #[snafu(display("Metrics server already initialized"))]
+    AlreadyInitialized,
+
+    /// Metrics server not initialized (controller accessed before init).
+    #[snafu(display("Metrics server not initialized"))]
+    NotInitialized,
 }
 
 // ============ DLQ Errors ============

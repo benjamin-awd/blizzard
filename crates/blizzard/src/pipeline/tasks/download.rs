@@ -45,6 +45,7 @@ impl Downloader {
         storage: StorageProviderRef,
         shutdown: CancellationToken,
         max_concurrent: usize,
+        pipeline: String,
     ) -> Self {
         let (tx, rx) = mpsc::channel(max_concurrent);
 
@@ -55,6 +56,7 @@ impl Downloader {
             tx,
             shutdown,
             max_concurrent,
+            pipeline,
         ));
 
         Self { rx, handle }
@@ -74,6 +76,7 @@ impl Downloader {
         download_tx: mpsc::Sender<Result<DownloadedFile, StorageError>>,
         shutdown: CancellationToken,
         max_concurrent: usize,
+        pipeline: String,
     ) {
         let mut downloads: FuturesUnordered<DownloadFuture> = FuturesUnordered::new();
 
@@ -88,19 +91,26 @@ impl Downloader {
                 emit!(RecoveredRecords { count: skip as u64 });
             }
             let storage = storage.clone();
+            let pipeline_clone = pipeline.clone();
             // First download starts working state
             if active_downloads == 0 {
                 util_timer.stop_wait();
             }
             active_downloads += 1;
             emit!(ActiveDownloads {
-                count: active_downloads
+                count: active_downloads,
+                pipeline: pipeline.clone(),
             });
             debug!(
                 "[download] Starting {} (active: {})",
                 file_path, active_downloads
             );
-            downloads.push(Box::pin(download_file(storage, file_path, skip)));
+            downloads.push(Box::pin(download_file(
+                storage,
+                file_path,
+                skip,
+                pipeline_clone,
+            )));
         }
 
         // Process downloads and start new ones as they complete
@@ -114,7 +124,8 @@ impl Downloader {
 
             active_downloads -= 1;
             emit!(ActiveDownloads {
-                count: active_downloads
+                count: active_downloads,
+                pipeline: pipeline.clone(),
             });
 
             // Update utilization state: waiting if no active downloads
@@ -155,24 +166,31 @@ impl Downloader {
                     emit!(RecoveredRecords { count: skip as u64 });
                 }
                 let storage = storage.clone();
+                let pipeline_clone = pipeline.clone();
                 // Transition to working state when we have downloads
                 if active_downloads == 0 {
                     util_timer.stop_wait();
                 }
                 active_downloads += 1;
                 emit!(ActiveDownloads {
-                    count: active_downloads
+                    count: active_downloads,
+                    pipeline: pipeline.clone(),
                 });
                 debug!(
                     "[download] Starting {} (active: {})",
                     next_file, active_downloads
                 );
-                downloads.push(Box::pin(download_file(storage, next_file, skip)));
+                downloads.push(Box::pin(download_file(
+                    storage,
+                    next_file,
+                    skip,
+                    pipeline_clone,
+                )));
             }
         }
 
         // Reset gauge to 0 on completion
-        emit!(ActiveDownloads { count: 0 });
+        emit!(ActiveDownloads { count: 0, pipeline });
         debug!("[download] All downloads complete");
     }
 }
@@ -182,11 +200,13 @@ async fn download_file(
     storage: StorageProviderRef,
     path: String,
     skip_records: usize,
+    pipeline: String,
 ) -> Result<DownloadedFile, StorageError> {
     let start = Instant::now();
     let compressed_data = storage.get(path.as_str()).await?;
     emit!(FileDownloadCompleted {
-        duration: start.elapsed()
+        duration: start.elapsed(),
+        pipeline,
     });
     Ok(DownloadedFile {
         path,

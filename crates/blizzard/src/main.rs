@@ -1,13 +1,16 @@
 //! Blizzard CLI: File loader for streaming NDJSON.gz files to Parquet staging.
 
-use clap::Parser;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use tracing::info;
+
+use clap::Parser;
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use blizzard::Config;
+use blizzard::config::ConfigPath;
 use blizzard::run_pipeline;
 
 /// Blizzard - NDJSON.gz file loader
@@ -15,9 +18,23 @@ use blizzard::run_pipeline;
 #[command(name = "blizzard")]
 #[command(about = "Streams NDJSON.gz files to Parquet staging for Delta Lake ingestion")]
 struct Args {
-    /// Path to the configuration file
+    /// Path to configuration file (can be specified multiple times)
     #[arg(short, long)]
-    config: String,
+    config: Vec<PathBuf>,
+
+    /// Path to configuration directory (can be specified multiple times)
+    #[arg(short = 'C', long = "config-dir")]
+    config_dirs: Vec<PathBuf>,
+}
+
+impl Args {
+    fn config_paths(&self) -> Vec<ConfigPath> {
+        self.config
+            .iter()
+            .map(ConfigPath::file)
+            .chain(self.config_dirs.iter().map(ConfigPath::dir))
+            .collect()
+    }
 }
 
 fn init_tracing() {
@@ -40,9 +57,15 @@ async fn main() -> ExitCode {
 
     let args = Args::parse();
 
-    info!("Loading config from {}", args.config);
+    let paths = args.config_paths();
+    if paths.is_empty() {
+        eprintln!("Error: no config files or directories specified");
+        return ExitCode::FAILURE;
+    }
 
-    let config = match Config::from_file(&args.config) {
+    info!("Loading config from {} source(s)", paths.len());
+
+    let config = match Config::from_paths(&paths) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to load config: {}", e);
@@ -50,21 +73,53 @@ async fn main() -> ExitCode {
         }
     };
 
-    info!("Starting blizzard file loader");
-    info!("  Source: {}", config.source.path);
-    info!("  Sink: {}", config.sink.table_uri);
+    let pipeline_count = config.pipeline_count();
+    info!(
+        "Starting blizzard file loader with {} pipeline(s)",
+        pipeline_count
+    );
+
+    for (pipeline_key, pipeline_config) in config.pipelines() {
+        info!(
+            "  Pipeline: {} ({} -> {})",
+            pipeline_key, pipeline_config.source.path, pipeline_config.sink.table_uri
+        );
+    }
 
     match run_pipeline(config).await {
         Ok(stats) => {
-            info!("Pipeline completed successfully");
             info!(
-                "  Files processed: {}, Records: {}, Bytes written: {}, Staging files: {}",
-                stats.files_processed,
-                stats.records_processed,
-                stats.bytes_written,
-                stats.staging_files_written
+                "All pipelines completed: {} files processed, {} records, {} bytes written, {} staging files",
+                stats.total_files_processed(),
+                stats.total_records_processed(),
+                stats.total_bytes_written(),
+                stats.total_staging_files_written()
             );
-            ExitCode::SUCCESS
+
+            // Exit code logic based on failure behavior defined in plan
+            if stats.pipelines.is_empty() && !stats.errors.is_empty() {
+                // All pipelines failed to start
+                error!("All {} pipeline(s) failed", stats.errors.len());
+                for (key, err) in &stats.errors {
+                    error!("  {}: {}", key, err);
+                }
+                ExitCode::FAILURE
+            } else if stats.errors.is_empty() {
+                // All pipelines succeeded
+                info!(
+                    "All {} pipeline(s) completed successfully",
+                    stats.pipelines.len()
+                );
+                ExitCode::SUCCESS
+            } else {
+                // Partial success: some pipelines worked, some failed
+                let total = stats.pipelines.len() + stats.errors.len();
+                warn!("{}/{} pipeline(s) failed", stats.errors.len(), total);
+                for (key, err) in &stats.errors {
+                    warn!("  {}: {}", key, err);
+                }
+                ExitCode::from(2) // Distinguish from total failure
+            }
         }
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);

@@ -18,6 +18,8 @@ pub struct FailureTracker {
     count: usize,
     max_failures: usize,
     dlq: Option<Arc<DeadLetterQueue>>,
+    /// Pipeline identifier for metrics labeling.
+    pipeline: String,
 }
 
 impl FailureTracker {
@@ -26,11 +28,13 @@ impl FailureTracker {
     /// # Arguments
     /// * `max_failures` - Maximum failures before stopping (0 = unlimited)
     /// * `dlq` - Optional DLQ for recording failures
-    pub fn new(max_failures: usize, dlq: Option<Arc<DeadLetterQueue>>) -> Self {
+    /// * `pipeline` - Pipeline identifier for metrics labeling
+    pub fn new(max_failures: usize, dlq: Option<Arc<DeadLetterQueue>>, pipeline: String) -> Self {
         Self {
             count: 0,
             max_failures,
             dlq,
+            pipeline,
         }
     }
 
@@ -44,9 +48,13 @@ impl FailureTracker {
     ) -> Result<(), PipelineError> {
         self.count += 1;
         emit!(FileProcessed {
-            status: FileStatus::Failed
+            status: FileStatus::Failed,
+            pipeline: self.pipeline.clone(),
         });
-        emit!(FileFailed { stage });
+        emit!(FileFailed {
+            stage,
+            pipeline: self.pipeline.clone(),
+        });
 
         if let Some(dlq) = &self.dlq {
             dlq.record_failure("unknown", error, stage).await;

@@ -9,9 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use blizzard_common::metrics::events::{InternalEvent, StagingFileCommitted};
 use blizzard_common::storage::StorageProvider;
 use blizzard_common::{FinishedFile, StorageError};
+
+use crate::metrics::events::{InternalEvent, StagingFileCommitted};
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::PutPayload;
@@ -27,6 +28,8 @@ pub struct StagingReader {
     storage: Arc<StorageProvider>,
     pending_prefix: String,
     archive_prefix: String,
+    /// Table identifier for metrics labeling.
+    table: String,
 }
 
 impl StagingReader {
@@ -36,6 +39,7 @@ impl StagingReader {
     pub async fn new(
         table_uri: &str,
         storage_options: HashMap<String, String>,
+        table: String,
     ) -> Result<Self, StorageError> {
         let storage =
             Arc::new(StorageProvider::for_url_with_options(table_uri, storage_options).await?);
@@ -44,6 +48,7 @@ impl StagingReader {
             storage,
             pending_prefix: "_staging/pending/".to_string(),
             archive_prefix: "_staging/archive/".to_string(),
+            table,
         })
     }
 
@@ -153,7 +158,10 @@ impl StagingReader {
             meta_path, archive_path
         );
 
-        StagingFileCommitted.emit();
+        StagingFileCommitted {
+            table: self.table.clone(),
+        }
+        .emit();
 
         Ok(())
     }
@@ -191,7 +199,9 @@ mod tests {
         std::fs::write(&meta_path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
 
         // Create the reader
-        let reader = StagingReader::new(table_uri, HashMap::new()).await.unwrap();
+        let reader = StagingReader::new(table_uri, HashMap::new(), "test".to_string())
+            .await
+            .unwrap();
 
         // Read pending files
         let pending = reader.read_pending_files().await.unwrap();
@@ -246,7 +256,9 @@ mod tests {
             std::fs::write(&meta_path, serde_json::to_vec_pretty(file).unwrap()).unwrap();
         }
 
-        let reader = StagingReader::new(table_uri, HashMap::new()).await.unwrap();
+        let reader = StagingReader::new(table_uri, HashMap::new(), "test".to_string())
+            .await
+            .unwrap();
 
         // Verify all pending files are found
         let pending = reader.read_pending_files().await.unwrap();
