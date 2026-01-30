@@ -7,6 +7,7 @@
 //! - `metrics/` - Prometheus metrics infrastructure
 //! - `config/` - Common configuration types and environment variable interpolation
 //! - `topology/` - Shared orchestration primitives for multi-component pipelines
+//! - `resource/` - Resource management (storage pool, memory budget)
 //! - `polling` - Generic polling loop trait and runner
 //! - `signal` - Signal handling for graceful shutdown
 //! - `types` - Common types like `FinishedFile`
@@ -16,6 +17,7 @@ pub mod config;
 pub mod error;
 pub mod metrics;
 pub mod polling;
+pub mod resource;
 pub mod signal;
 pub mod storage;
 pub mod topology;
@@ -32,6 +34,7 @@ pub use metrics::{
     init_test as init_metrics_test,
 };
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
+pub use resource::StoragePool;
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};
