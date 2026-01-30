@@ -50,12 +50,18 @@ pub struct ReadResult {
 pub struct NdjsonReader {
     schema: SchemaRef,
     config: NdjsonReaderConfig,
+    /// Pipeline identifier for metrics labeling.
+    pipeline: String,
 }
 
 impl NdjsonReader {
     /// Create a new NDJSON reader with the given schema and configuration.
-    pub fn new(schema: SchemaRef, config: NdjsonReaderConfig) -> Self {
-        Self { schema, config }
+    pub fn new(schema: SchemaRef, config: NdjsonReaderConfig, pipeline: String) -> Self {
+        Self {
+            schema,
+            config,
+            pipeline,
+        }
     }
 
     /// Read compressed data and parse it into record batches.
@@ -79,6 +85,7 @@ impl NdjsonReader {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
+            pipeline: self.pipeline.clone(),
         });
 
         let start = Instant::now();
@@ -145,7 +152,8 @@ impl NdjsonReader {
         }
 
         emit!(FileDecompressionCompleted {
-            duration: start.elapsed()
+            duration: start.elapsed(),
+            pipeline: self.pipeline.clone(),
         });
 
         debug!(

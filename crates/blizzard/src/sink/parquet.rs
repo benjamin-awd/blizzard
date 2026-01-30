@@ -182,11 +182,17 @@ pub struct ParquetWriter {
     finished_files: Vec<FinishedFile>,
     /// Current partition values for file naming and metadata.
     current_partition_values: HashMap<String, String>,
+    /// Pipeline identifier for metrics labeling.
+    pipeline: String,
 }
 
 impl ParquetWriter {
     /// Create a new Parquet writer.
-    pub fn new(schema: SchemaRef, config: ParquetWriterConfig) -> Result<Self, ParquetError> {
+    pub fn new(
+        schema: SchemaRef,
+        config: ParquetWriterConfig,
+        pipeline: String,
+    ) -> Result<Self, ParquetError> {
         tracing::info!(
             "Creating ParquetWriter with config: target_file_size={} bytes ({:.2} MB), row_group_size_bytes={} ({:.2} MB), rolling_policies={:?}",
             config.target_file_size,
@@ -210,6 +216,7 @@ impl ParquetWriter {
             row_group_records: 0,
             finished_files: Vec::new(),
             current_partition_values: partition_values,
+            pipeline,
         })
     }
 
@@ -358,7 +365,8 @@ impl ParquetWriter {
         .freeze();
 
         emit!(ParquetWriteCompleted {
-            duration: start.elapsed()
+            duration: start.elapsed(),
+            pipeline: self.pipeline.clone(),
         });
 
         // Create finished file record with bytes
@@ -390,13 +398,15 @@ impl ParquetWriter {
     pub fn close(mut self) -> Result<Vec<FinishedFile>, ParquetError> {
         if self.stats.records_written > 0 {
             let start = Instant::now();
+            let pipeline = self.pipeline.clone();
             let writer = self.writer.take().context(WriterUnavailableSnafu)?;
             writer.close().context(ParquetWriteSnafu)?;
 
             let bytes = self.buffer.into_inner()?.freeze();
 
             emit!(ParquetWriteCompleted {
-                duration: start.elapsed()
+                duration: start.elapsed(),
+                pipeline,
             });
 
             let finished = FinishedFile {
@@ -461,7 +471,7 @@ mod tests {
     fn test_parquet_writer_basic() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config).unwrap();
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
 
         let batch = test_batch(100);
         writer.write_batch(&batch).unwrap();

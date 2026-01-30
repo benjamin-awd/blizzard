@@ -17,6 +17,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use blizzard_common::emit;
+use blizzard_common::metrics::events::{
+    DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted,
+};
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
 
@@ -218,6 +222,7 @@ impl PenguinProcessor {
         let staging_reader = StagingReader::new(
             &table_config.table_uri,
             table_config.storage_options.clone(),
+            table_key.id().to_string(),
         )
         .await
         .context(StorageSnafu)?;
@@ -231,8 +236,12 @@ impl PenguinProcessor {
         .context(StorageSnafu)?;
 
         // Try to open existing Delta table without creating it
-        let delta_sink = match DeltaSink::try_open(&sink_storage, table_config.partition_by.clone())
-            .await
+        let delta_sink = match DeltaSink::try_open(
+            &sink_storage,
+            table_config.partition_by.clone(),
+            table_key.id().to_string(),
+        )
+        .await
         {
             Ok(sink) => {
                 info!(table = %table_key, "Opened existing Delta table");
@@ -245,13 +254,14 @@ impl PenguinProcessor {
             Err(e) => return Err(e.into()),
         };
 
+        let table_id = table_key.id().to_string();
         Ok(Self {
             table_key,
             table_config,
             staging_reader,
             sink_storage,
             delta_sink,
-            checkpoint_coordinator: CheckpointCoordinator::new(),
+            checkpoint_coordinator: CheckpointCoordinator::new(table_id),
             stats: PipelineStats::default(),
             global_semaphore,
         })
@@ -290,6 +300,7 @@ impl PenguinProcessor {
                 &self.sink_storage,
                 &incoming_schema,
                 self.table_config.partition_by.clone(),
+                self.table_key.id().to_string(),
             )
             .await?;
 
@@ -386,6 +397,12 @@ impl PollingProcessor for PenguinProcessor {
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
         let PreparedState { pending_files } = state;
 
+        // Emit pending files metric
+        emit!(PendingFiles {
+            table: self.table_key.id().to_string(),
+            count: pending_files.len(),
+        });
+
         let delta_sink = self
             .delta_sink
             .as_mut()
@@ -421,6 +438,20 @@ impl PollingProcessor for PenguinProcessor {
                 }
             }
 
+            // Emit metrics for committed files
+            emit!(FilesCommitted {
+                table: self.table_key.id().to_string(),
+                count: committed_count as u64,
+            });
+            emit!(RecordsCommitted {
+                table: self.table_key.id().to_string(),
+                count: self.stats.records_committed as u64,
+            });
+            emit!(DeltaTableVersion {
+                table: self.table_key.id().to_string(),
+                version: delta_sink.version(),
+            });
+
             info!(
                 table = %self.table_key,
                 files = committed_count,
@@ -428,6 +459,12 @@ impl PollingProcessor for PenguinProcessor {
                 "Committed files to Delta Lake"
             );
         }
+
+        // Reset pending files gauge after processing
+        emit!(PendingFiles {
+            table: self.table_key.id().to_string(),
+            count: 0,
+        });
 
         Ok(IterationResult::ProcessedItems)
     }

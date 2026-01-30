@@ -256,6 +256,7 @@ impl BlizzardProcessor {
         let staging_writer = StagingWriter::new(
             &pipeline_config.sink.table_uri,
             pipeline_config.sink.storage_options.clone(),
+            pipeline_key.id().to_string(),
         )
         .await?;
 
@@ -267,6 +268,7 @@ impl BlizzardProcessor {
         let reader = Arc::new(NdjsonReader::new(
             pipeline_config.schema.to_arrow_schema(),
             reader_config,
+            pipeline_key.id().to_string(),
         ));
 
         // Set up DLQ if configured
@@ -276,6 +278,7 @@ impl BlizzardProcessor {
             failure_tracker: FailureTracker::new(
                 pipeline_config.error_handling.max_failures,
                 dlq.map(Arc::new),
+                pipeline_key.id().to_string(),
             ),
             pipeline_key,
             pipeline_config,
@@ -376,8 +379,11 @@ impl PollingProcessor for BlizzardProcessor {
             .with_file_size_mb(self.pipeline_config.sink.file_size_mb)
             .with_row_group_size_bytes(self.pipeline_config.sink.row_group_size_bytes)
             .with_compression(self.pipeline_config.sink.compression);
-        let mut parquet_writer =
-            ParquetWriter::new(self.pipeline_config.schema.to_arrow_schema(), writer_config)?;
+        let mut parquet_writer = ParquetWriter::new(
+            self.pipeline_config.schema.to_arrow_schema(),
+            writer_config,
+            self.pipeline_key.id().to_string(),
+        )?;
 
         // Create downloader using shared shutdown token
         let downloader = Downloader::spawn(
@@ -386,6 +392,7 @@ impl PollingProcessor for BlizzardProcessor {
             self.source_storage.clone(),
             self.shutdown.clone(),
             self.pipeline_config.source.max_concurrent_files,
+            self.pipeline_key.id().to_string(),
         );
 
         // Process downloaded files
@@ -408,7 +415,8 @@ impl PollingProcessor for BlizzardProcessor {
 
             let bytes: usize = finished_files.iter().map(|f| f.size).sum();
             emit!(BytesWritten {
-                bytes: bytes as u64
+                bytes: bytes as u64,
+                pipeline: self.pipeline_key.id().to_string(),
             });
             self.stats.bytes_written += bytes;
         }
@@ -436,10 +444,12 @@ impl BlizzardProcessor {
 
         loop {
             emit!(DecompressionQueueDepth {
-                count: processing.len()
+                count: processing.len(),
+                pipeline: self.pipeline_key.id().to_string(),
             });
             emit!(SourceStateFiles {
-                count: self.source_state.files.len()
+                count: self.source_state.files.len(),
+                pipeline: self.pipeline_key.id().to_string(),
             });
 
             tokio::select! {
@@ -521,13 +531,16 @@ impl BlizzardProcessor {
         self.stats.records_processed += total_records;
 
         emit!(FileProcessed {
-            status: FileStatus::Success
+            status: FileStatus::Success,
+            pipeline: self.pipeline_key.id().to_string(),
         });
         emit!(RecordsProcessed {
-            count: total_records as u64
+            count: total_records as u64,
+            pipeline: self.pipeline_key.id().to_string(),
         });
         emit!(BatchesProcessed {
-            count: batch_count as u64
+            count: batch_count as u64,
+            pipeline: self.pipeline_key.id().to_string(),
         });
 
         let short_name = path.split('/').next_back().unwrap_or(&path);
