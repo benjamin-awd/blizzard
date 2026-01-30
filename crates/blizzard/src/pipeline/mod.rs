@@ -33,7 +33,7 @@ use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 use crate::sink::{ParquetWriter, ParquetWriterConfig};
-use crate::source::{NdjsonReader, NdjsonReaderConfig};
+use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 use crate::staging::StagingWriter;
 
 use tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
@@ -221,6 +221,8 @@ struct BlizzardProcessor {
     source_storage: StorageProviderRef,
     /// Writer for staging metadata and parquet files.
     staging_writer: StagingWriter,
+    /// Arrow schema (from config or inferred).
+    schema: deltalake::arrow::datatypes::SchemaRef,
     /// NDJSON reader with schema validation.
     reader: Arc<NdjsonReader>,
     /// Tracks which source files have been processed.
@@ -257,13 +259,30 @@ impl BlizzardProcessor {
         )
         .await?;
 
+        // Get schema - either from explicit config or by inference
+        let schema = if pipeline_config.schema.should_infer() {
+            // Generate date prefixes for partition filtering (if configured)
+            let prefixes = pipeline_config.source.partition_filter.as_ref().map(|pf| {
+                DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
+            });
+
+            infer_schema_from_source(
+                &source_storage,
+                pipeline_config.source.compression,
+                prefixes.as_deref(),
+            )
+            .await?
+        } else {
+            pipeline_config.schema.to_arrow_schema()
+        };
+
         // Create NDJSON reader
         let reader_config = NdjsonReaderConfig::new(
             pipeline_config.source.batch_size,
             pipeline_config.source.compression,
         );
         let reader = Arc::new(NdjsonReader::new(
-            pipeline_config.schema.to_arrow_schema(),
+            schema.clone(),
             reader_config,
             pipeline_key.id().to_string(),
         ));
@@ -281,6 +300,7 @@ impl BlizzardProcessor {
             pipeline_config,
             source_storage,
             staging_writer,
+            schema,
             reader,
             source_state: SourceState::new(),
             stats: PipelineStats::default(),
@@ -377,7 +397,7 @@ impl PollingProcessor for BlizzardProcessor {
             .with_row_group_size_bytes(self.pipeline_config.sink.row_group_size_bytes)
             .with_compression(self.pipeline_config.sink.compression);
         let mut parquet_writer = ParquetWriter::new(
-            self.pipeline_config.schema.to_arrow_schema(),
+            self.schema.clone(),
             writer_config,
             self.pipeline_key.id().to_string(),
         )?;

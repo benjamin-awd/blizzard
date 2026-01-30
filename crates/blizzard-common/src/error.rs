@@ -83,8 +83,16 @@ pub enum ConfigError {
     EmptyTableUriForPipeline { pipeline: String },
 
     /// Schema is empty for a specific pipeline.
-    #[snafu(display("Pipeline '{pipeline}' has empty schema"))]
+    #[snafu(display(
+        "Pipeline '{pipeline}' has empty schema (specify either 'infer: true' or 'fields')"
+    ))]
     EmptySchemaForPipeline { pipeline: String },
+
+    /// Schema has conflicting options.
+    #[snafu(display(
+        "Pipeline '{pipeline}' has invalid schema: cannot specify both 'infer: true' and 'fields'"
+    ))]
+    SchemaConflict { pipeline: String },
 
     /// Environment variable interpolation failed.
     #[snafu(display("Environment variable interpolation failed:\n{message}"))]

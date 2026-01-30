@@ -5,6 +5,31 @@ use snafu::prelude::*;
 // Re-export common errors
 pub use blizzard_common::error::{ConfigError, DlqError, StorageError};
 
+/// Errors that can occur during schema inference from NDJSON files.
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum InferenceError {
+    /// No files found for schema inference.
+    #[snafu(display("No files found for schema inference"))]
+    NoFilesFound,
+
+    /// Failed to read file for inference.
+    #[snafu(display("Failed to read file for inference: {source}"))]
+    ReadFile { source: StorageError },
+
+    /// Failed to decompress file for inference.
+    #[snafu(display("Failed to decompress file for inference: {message}"))]
+    Decompression { message: String },
+
+    /// Failed to parse JSON during inference.
+    #[snafu(display("Failed to parse JSON during inference: {message}"))]
+    JsonParse { message: String },
+
+    /// No valid JSON records found for inference.
+    #[snafu(display("No valid JSON records found for schema inference"))]
+    NoValidRecords,
+}
+
 /// Errors that can occur during NDJSON reading and parsing.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -82,6 +107,10 @@ pub enum PipelineError {
     /// Storage error.
     #[snafu(display("Storage error: {source}"))]
     Storage { source: StorageError },
+
+    /// Schema inference error.
+    #[snafu(display("Schema inference error: {source}"))]
+    Inference { source: InferenceError },
 
     /// Reader error.
     #[snafu(display("Reader error: {source}"))]
@@ -165,5 +194,11 @@ impl From<DlqError> for PipelineError {
 impl From<ReaderError> for PipelineError {
     fn from(source: ReaderError) -> Self {
         PipelineError::Reader { source }
+    }
+}
+
+impl From<InferenceError> for PipelineError {
+    fn from(source: InferenceError) -> Self {
+        PipelineError::Inference { source }
     }
 }
