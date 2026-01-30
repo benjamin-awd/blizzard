@@ -11,37 +11,38 @@ mod config_tests {
     #[test]
     fn test_config_yaml_parsing() {
         let yaml = r#"
-source:
-  path: "s3://bucket/input/*.ndjson.gz"
-  compression: gzip
-  batch_size: 4096
-
-sink:
-  table_uri: "s3://bucket/output/table"
-  file_size_mb: 64
-  compression: zstd
-
-schema:
-  fields:
-    - name: id
-      type: string
-    - name: timestamp
-      type: timestamp
-    - name: value
-      type: float64
-      nullable: true
-    - name: count
-      type: int64
+pipelines:
+  events:
+    source:
+      path: "s3://bucket/input/*.ndjson.gz"
+      compression: gzip
+      batch_size: 4096
+    sink:
+      table_uri: "s3://bucket/output/table"
+      file_size_mb: 64
+      compression: zstd
+    schema:
+      fields:
+        - name: id
+          type: string
+        - name: timestamp
+          type: timestamp
+        - name: value
+          type: float64
+          nullable: true
+        - name: count
+          type: int64
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
 
-        assert_eq!(config.source.path, "s3://bucket/input/*.ndjson.gz");
-        assert_eq!(config.source.batch_size, 4096);
-        assert_eq!(config.sink.file_size_mb, 64);
-        assert_eq!(config.schema.fields.len(), 4);
+        assert_eq!(pipeline.source.path, "s3://bucket/input/*.ndjson.gz");
+        assert_eq!(pipeline.source.batch_size, 4096);
+        assert_eq!(pipeline.sink.file_size_mb, 64);
+        assert_eq!(pipeline.schema.fields.len(), 4);
 
         // Test schema conversion
-        let arrow_schema = config.schema.to_arrow_schema();
+        let arrow_schema = pipeline.schema.to_arrow_schema();
         assert_eq!(arrow_schema.fields().len(), 4);
         assert_eq!(arrow_schema.field(0).name(), "id");
         assert_eq!(arrow_schema.field(0).data_type(), &DataType::Utf8);
@@ -50,22 +51,23 @@ schema:
     #[test]
     fn test_config_defaults() {
         let yaml = r#"
-source:
-  path: "/input/*.ndjson.gz"
-
-sink:
-  table_uri: "/output/table"
-
-schema:
-  fields:
-    - name: data
-      type: string
+pipelines:
+  events:
+    source:
+      path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+    schema:
+      fields:
+        - name: data
+          type: string
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
 
         // Check defaults
-        assert_eq!(config.source.batch_size, 8192);
-        assert_eq!(config.sink.file_size_mb, 128);
+        assert_eq!(pipeline.source.batch_size, 8192);
+        assert_eq!(pipeline.sink.file_size_mb, 128);
     }
 
     #[test]
@@ -84,19 +86,22 @@ schema:
         for (name, _field_type, expected_arrow) in types {
             let yaml = format!(
                 r#"
-source:
-  path: "/input"
-sink:
-  table_uri: "/output"
-schema:
-  fields:
-    - name: test_field
-      type: {}
+pipelines:
+  test:
+    source:
+      path: "/input"
+    sink:
+      table_uri: "/output"
+    schema:
+      fields:
+        - name: test_field
+          type: {}
 "#,
                 name
             );
             let config: blizzard::config::Config = serde_yaml::from_str(&yaml).unwrap();
-            let schema = config.schema.to_arrow_schema();
+            let (_, pipeline) = config.pipelines().next().unwrap();
+            let schema = pipeline.schema.to_arrow_schema();
             assert_eq!(
                 schema.field(0).data_type(),
                 &expected_arrow,
@@ -470,25 +475,25 @@ mod dlq_tests {
     #[tokio::test]
     async fn test_error_handling_config_yaml_parsing() {
         let yaml = r#"
-source:
-  path: "/input/*.ndjson.gz"
-
-sink:
-  table_uri: "/output/table"
-
-schema:
-  fields:
-    - name: id
-      type: string
-
-error_handling:
-  max_failures: 100
-  dlq_path: "/var/log/blizzard/dlq"
+pipelines:
+  events:
+    source:
+      path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+    schema:
+      fields:
+        - name: id
+          type: string
+    error_handling:
+      max_failures: 100
+      dlq_path: "/var/log/blizzard/dlq"
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.error_handling.max_failures, 100);
+        let (_, pipeline) = config.pipelines().next().unwrap();
+        assert_eq!(pipeline.error_handling.max_failures, 100);
         assert_eq!(
-            config.error_handling.dlq_path,
+            pipeline.error_handling.dlq_path,
             Some("/var/log/blizzard/dlq".to_string())
         );
     }
@@ -500,22 +505,23 @@ mod polling_tests {
     #[test]
     fn test_polling_config_defaults() {
         let yaml = r#"
-source:
-  path: "/input/*.ndjson.gz"
-
-sink:
-  table_uri: "/output/table"
-
-schema:
-  fields:
-    - name: id
-      type: string
+pipelines:
+  events:
+    source:
+      path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+    schema:
+      fields:
+        - name: id
+          type: string
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
 
         // Check default poll interval
         assert_eq!(
-            config.source.poll_interval_secs, 60,
+            pipeline.source.poll_interval_secs, 60,
             "default poll interval should be 60s"
         );
     }
@@ -523,22 +529,23 @@ schema:
     #[test]
     fn test_polling_config_yaml_parsing() {
         let yaml = r#"
-source:
-  path: "s3://bucket/input/*.ndjson.gz"
-  poll_interval_secs: 30
-
-sink:
-  table_uri: "s3://bucket/output/table"
-
-schema:
-  fields:
-    - name: id
-      type: string
+pipelines:
+  events:
+    source:
+      path: "s3://bucket/input/*.ndjson.gz"
+      poll_interval_secs: 30
+    sink:
+      table_uri: "s3://bucket/output/table"
+    schema:
+      fields:
+        - name: id
+          type: string
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
 
         assert_eq!(
-            config.source.poll_interval_secs, 30,
+            pipeline.source.poll_interval_secs, 30,
             "poll interval should be 30s"
         );
     }

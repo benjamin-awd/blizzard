@@ -45,6 +45,9 @@ tracing-limit = { workspace = true }
 # URL parsing
 url = { workspace = true }
 
+# Ordered maps
+indexmap = { workspace = true }
+
 # Misc
 bytes = { workspace = true }
 uuid = { workspace = true }

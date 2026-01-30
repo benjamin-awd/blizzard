@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use std::process::ExitCode;
-use tracing::info;
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -50,21 +50,53 @@ async fn main() -> ExitCode {
         }
     };
 
-    info!("Starting blizzard file loader");
-    info!("  Source: {}", config.source.path);
-    info!("  Sink: {}", config.sink.table_uri);
+    let pipeline_count = config.pipeline_count();
+    info!(
+        "Starting blizzard file loader with {} pipeline(s)",
+        pipeline_count
+    );
+
+    for (pipeline_key, pipeline_config) in config.pipelines() {
+        info!(
+            "  Pipeline: {} ({} -> {})",
+            pipeline_key, pipeline_config.source.path, pipeline_config.sink.table_uri
+        );
+    }
 
     match run_pipeline(config).await {
         Ok(stats) => {
-            info!("Pipeline completed successfully");
             info!(
-                "  Files processed: {}, Records: {}, Bytes written: {}, Staging files: {}",
-                stats.files_processed,
-                stats.records_processed,
-                stats.bytes_written,
-                stats.staging_files_written
+                "All pipelines completed: {} files processed, {} records, {} bytes written, {} staging files",
+                stats.total_files_processed(),
+                stats.total_records_processed(),
+                stats.total_bytes_written(),
+                stats.total_staging_files_written()
             );
-            ExitCode::SUCCESS
+
+            // Exit code logic based on failure behavior defined in plan
+            if stats.pipelines.is_empty() && !stats.errors.is_empty() {
+                // All pipelines failed to start
+                error!("All {} pipeline(s) failed", stats.errors.len());
+                for (key, err) in &stats.errors {
+                    error!("  {}: {}", key, err);
+                }
+                ExitCode::FAILURE
+            } else if stats.errors.is_empty() {
+                // All pipelines succeeded
+                info!(
+                    "All {} pipeline(s) completed successfully",
+                    stats.pipelines.len()
+                );
+                ExitCode::SUCCESS
+            } else {
+                // Partial success: some pipelines worked, some failed
+                let total = stats.pipelines.len() + stats.errors.len();
+                warn!("{}/{} pipeline(s) failed", stats.errors.len(), total);
+                for (key, err) in &stats.errors {
+                    warn!("  {}: {}", key, err);
+                }
+                ExitCode::from(2) // Distinguish from total failure
+            }
         }
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);
