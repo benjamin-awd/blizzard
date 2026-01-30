@@ -122,14 +122,21 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
         };
 
         handles.spawn(async move {
-            // Stagger start times
+            // Stagger start times, but respect shutdown signal
             if !start_jitter.is_zero() {
                 info!(
                     table = %key,
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying table start for jitter"
                 );
-                tokio::time::sleep(start_jitter).await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        info!(table = %key, "Shutdown requested during jitter delay");
+                        return (key, Ok(PipelineStats::default()));
+                    }
+                    _ = tokio::time::sleep(start_jitter) => {}
+                }
             }
 
             let result = run_single_table(
@@ -337,9 +344,12 @@ impl PenguinProcessor {
         pending_files: &[FinishedFile],
     ) -> Result<(), PipelineError> {
         // Infer schema from incoming files
-        let incoming_schema =
-            infer_schema_from_first_file(&self.sink_storage, pending_files, self.table_key.as_ref())
-                .await?;
+        let incoming_schema = infer_schema_from_first_file(
+            &self.sink_storage,
+            pending_files,
+            self.table_key.as_ref(),
+        )
+        .await?;
 
         if self.delta_sink.is_none() {
             info!(table = %self.table_key, "Creating new Delta table with inferred schema");

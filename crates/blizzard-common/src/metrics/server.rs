@@ -67,9 +67,9 @@ pub fn init_global(addr: SocketAddr) -> Result<(), MetricsError> {
         .map_err(|_| AlreadyInitializedSnafu.build())?;
 
     // Spawn the HTTP server in the background
+    // Note: "started" is logged after successful bind in run_server()
     tokio::spawn(run_server(addr));
 
-    info!(%addr, "Metrics server started");
     Ok(())
 }
 
@@ -136,7 +136,10 @@ async fn run_server(addr: SocketAddr) {
         .layer(Extension(controller.handle.clone()));
 
     let listener = match TcpListener::bind(addr).await {
-        Ok(l) => l,
+        Ok(l) => {
+            info!(%addr, "Metrics server started");
+            l
+        }
         Err(e) => {
             error!("Failed to bind metrics server to {}: {}", addr, e);
             return;

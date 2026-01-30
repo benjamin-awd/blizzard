@@ -144,7 +144,8 @@ mod tests {
 
     #[test]
     fn test_serde_with_all_fields() {
-        let json = r#"{"total_concurrency": 16, "connection_pooling": false, "poll_jitter_secs": 60}"#;
+        let json =
+            r#"{"total_concurrency": 16, "connection_pooling": false, "poll_jitter_secs": 60}"#;
         let config: GlobalConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.total_concurrency, Some(16));
         assert!(!config.connection_pooling);

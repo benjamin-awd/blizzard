@@ -144,14 +144,21 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
         };
 
         handles.spawn(async move {
-            // Stagger start times
+            // Stagger start times, but respect shutdown signal
             if !start_jitter.is_zero() {
                 info!(
                     pipeline = %key,
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying pipeline start for jitter"
                 );
-                tokio::time::sleep(start_jitter).await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        info!(pipeline = %key, "Shutdown requested during jitter delay");
+                        return (key, Ok(PipelineStats::default()));
+                    }
+                    _ = tokio::time::sleep(start_jitter) => {}
+                }
             }
 
             let result = run_single_pipeline(
