@@ -2603,6 +2603,7 @@ dependencies = [
  "deltalake",
  "futures",
  "indexmap",
+ "metrics",
  "object_store",
  "serde",
  "serde_json",

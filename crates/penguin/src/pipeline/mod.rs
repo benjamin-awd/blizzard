@@ -16,12 +16,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use blizzard_common::emit;
-use blizzard_common::metrics::events::{
-    DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted,
-};
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
+
+use crate::emit;
+use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{Config, TableConfig, TableKey};
