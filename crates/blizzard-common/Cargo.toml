@@ -35,6 +35,7 @@ regex = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+indexmap = { workspace = true }
 
 # Metrics
 metrics = { workspace = true }

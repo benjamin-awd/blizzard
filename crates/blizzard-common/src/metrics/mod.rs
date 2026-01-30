@@ -10,7 +10,7 @@ pub mod server;
 pub mod utilization;
 
 // Re-export commonly used items
-pub use server::init;
+pub use server::{DEFAULT_METRICS_ADDR, MetricsController, init_global, init_test};
 pub use utilization::UtilizationTimer;
 
 ///

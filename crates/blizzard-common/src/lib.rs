@@ -6,6 +6,7 @@
 //! - `storage/` - Multi-cloud storage abstraction (S3, GCS, Azure, local)
 //! - `metrics/` - Prometheus metrics infrastructure
 //! - `config/` - Common configuration types and environment variable interpolation
+//! - `topology/` - Shared orchestration primitives for multi-component pipelines
 //! - `polling` - Generic polling loop trait and runner
 //! - `signal` - Signal handling for graceful shutdown
 //! - `types` - Common types like `FinishedFile`
@@ -17,13 +18,21 @@ pub mod metrics;
 pub mod polling;
 pub mod signal;
 pub mod storage;
+pub mod topology;
 pub mod types;
 
 // Re-export commonly used items
-pub use config::{ErrorHandlingConfig, KB, MB, MetricsConfig, ParquetCompression};
+pub use config::{
+    ComponentKey, ErrorHandlingConfig, GlobalConfig, KB, MB, MetricsConfig, ParquetCompression,
+    Resource,
+};
 pub use error::{ConfigError, DlqError, MetricsError, StorageError};
-pub use metrics::{UtilizationTimer, init as init_metrics};
+pub use metrics::{
+    DEFAULT_METRICS_ADDR, MetricsController, UtilizationTimer, init_global as init_metrics,
+    init_test as init_metrics_test,
+};
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
+pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};
 pub use types::FinishedFile;

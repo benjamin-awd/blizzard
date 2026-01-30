@@ -42,8 +42,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-limit = { workspace = true }
 
+# Metrics
+metrics = { workspace = true }
+
 # URL parsing
 url = { workspace = true }
+
+# Ordered maps
+indexmap = { workspace = true }
 
 # Misc
 bytes = { workspace = true }
