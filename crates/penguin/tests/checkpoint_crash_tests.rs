@@ -196,7 +196,10 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         Err(e) => assert!(e.is_table_not_found(), "Expected table not found error"),
     }
 
-    // Step 2: Create a parquet file with a specific schema
+    // Step 2: Create a parquet file with a specific schema in staging directory
+    let staging_dir = table_path.join("_staging/pending");
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("user_id", DataType::Int64, false),
         Field::new("username", DataType::Utf8, true),
@@ -213,7 +216,8 @@ async fn test_lazy_schema_inference_creates_correct_table() {
     )
     .unwrap();
 
-    let parquet_path = table_path.join("data.parquet");
+    // Write to staging directory (as blizzard does)
+    let parquet_path = staging_dir.join("data.parquet");
     let mut buffer = Vec::new();
     {
         let mut writer = ArrowWriter::try_new(&mut buffer, schema.clone(), None).unwrap();
@@ -222,9 +226,9 @@ async fn test_lazy_schema_inference_creates_correct_table() {
     }
     std::fs::write(&parquet_path, &buffer).unwrap();
 
-    // Step 3: Infer schema from the parquet file
+    // Step 3: Infer schema from the parquet file (reads from staging)
     let files = vec![FinishedFile::without_bytes(
-        "data.parquet".to_string(),
+        "data.parquet".to_string(),  // Target path (UUID extracted for staging lookup)
         buffer.len(),
         3,
         HashMap::new(),

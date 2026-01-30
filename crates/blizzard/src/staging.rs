@@ -1,24 +1,31 @@
-//! Direct table writer for blizzard/penguin communication.
+//! Atomic staging writer for blizzard/penguin communication.
 //!
-//! Blizzard writes Parquet files directly to the Delta table directory,
-//! with coordination metadata stored in `{table_uri}/_staging/`.
+//! Blizzard writes both Parquet files and coordination metadata to the staging
+//! directory. Penguin then uses server-side rename to move parquet files to
+//! the table directory (free on GCS/S3), ensuring crash-safe operation.
 //!
 //! ## Directory Structure
 //!
 //! ```text
 //! table_uri/
 //! ├── _delta_log/              # Delta transaction log (managed by penguin)
-//! ├── _staging/pending/        # Coordination metadata (.meta.json files)
-//! ├── date=2024-01-01/         # Partitioned parquet files
+//! ├── _staging/
+//! │   ├── pending/             # Uncommitted files (parquet + meta)
+//! │   │   ├── {uuid}.parquet
+//! │   │   └── {uuid}.meta.json
+//! │   └── archive/             # Committed metadata (for debugging)
+//! ├── date=2024-01-01/         # Partitioned parquet files (after commit)
 //! │   └── uuid.parquet
 //! └── ...
 //! ```
 //!
 //! ## Protocol
 //!
-//! 1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuid}.parquet`
+//! 1. Blizzard writes parquet file to `{table_uri}/_staging/pending/{uuid}.parquet`
 //! 2. Blizzard writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
-//! 3. Penguin reads `.meta.json`, commits to Delta log, deletes `.meta.json`
+//! 3. Penguin reads `.meta.json`, commits to Delta log
+//! 4. Penguin renames parquet from staging to table directory (server-side, free)
+//! 5. Penguin renames meta from pending to archive
 
 use object_store::PutPayload;
 use snafu::prelude::*;
@@ -60,10 +67,13 @@ impl StagingWriter {
         })
     }
 
-    /// Write a finished file to the table directory.
+    /// Write a finished file to the staging directory.
     ///
-    /// Writes parquet data directly to `{partition}/{uuid}.parquet` and
-    /// metadata JSON to `_staging/pending/{uuid}.meta.json`.
+    /// Writes both parquet data and metadata JSON to `_staging/pending/`.
+    /// This ensures atomic crash recovery: if we crash after writing parquet
+    /// but before writing meta, both files are in the same directory and
+    /// penguin can retry cleanly.
+    ///
     /// The metadata file is written last so penguin can use it as an
     /// atomic signal that the Parquet file is complete.
     pub async fn write_file(&self, file: &FinishedFile) -> Result<(), StagingError> {
@@ -75,12 +85,13 @@ impl StagingWriter {
             .unwrap_or(&file.filename)
             .trim_end_matches(".parquet");
 
-        // Write the Parquet file directly to table directory (at partition path)
-        // file.filename is already in format "{partition}/{uuid}.parquet"
+        // Write the Parquet file to staging directory (not table directory)
+        // Penguin will rename it to the table directory after Delta commit
         if let Some(bytes) = &file.bytes {
+            let staging_parquet_path = format!("_staging/pending/{}.parquet", uuid);
             self.storage
                 .put_payload(
-                    &object_store::path::Path::from(file.filename.as_str()),
+                    &object_store::path::Path::from(staging_parquet_path.as_str()),
                     PutPayload::from(bytes.clone()),
                 )
                 .await
@@ -103,7 +114,7 @@ impl StagingWriter {
             pipeline: self.pipeline.clone(),
         });
         info!(
-            "Wrote table file: {} ({} bytes, {} records)",
+            "Wrote staging file: {} ({} bytes, {} records)",
             file.filename, file.size, file.record_count
         );
 
@@ -125,7 +136,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn test_staging_writer() {
+    async fn test_staging_writer_writes_to_staging() {
         let temp_dir = TempDir::new().unwrap();
         let table_uri = temp_dir.path().to_str().unwrap();
 
@@ -147,18 +158,32 @@ mod tests {
 
         writer.write_file(&file).await.unwrap();
 
-        // Verify parquet written to table directory (at partition path)
-        let parquet_path = temp_dir.path().join("date=2026-01-28/test-uuid.parquet");
-        // Verify metadata written to _staging/pending/
+        // Verify parquet written to _staging/pending/ (not table directory)
+        let staging_parquet_path = temp_dir.path().join("_staging/pending/test-uuid.parquet");
+        let table_parquet_path = temp_dir.path().join("date=2026-01-28/test-uuid.parquet");
         let meta_path = temp_dir.path().join("_staging/pending/test-uuid.meta.json");
 
-        assert!(parquet_path.exists());
-        assert!(meta_path.exists());
+        assert!(
+            staging_parquet_path.exists(),
+            "Parquet should be in staging directory"
+        );
+        assert!(
+            !table_parquet_path.exists(),
+            "Parquet should NOT be in table directory yet"
+        );
+        assert!(meta_path.exists(), "Meta should be in staging directory");
 
-        // Verify metadata content
+        // Verify parquet content
+        let parquet_content = std::fs::read(&staging_parquet_path).unwrap();
+        assert_eq!(parquet_content, vec![1, 2, 3, 4]);
+
+        // Verify metadata content (should reference final table path, not staging path)
         let meta_content = std::fs::read_to_string(&meta_path).unwrap();
         let parsed: FinishedFile = serde_json::from_str(&meta_content).unwrap();
-        assert_eq!(parsed.filename, "date=2026-01-28/test-uuid.parquet");
+        assert_eq!(
+            parsed.filename, "date=2026-01-28/test-uuid.parquet",
+            "Metadata should reference final table path"
+        );
         assert_eq!(parsed.record_count, 50);
     }
 }

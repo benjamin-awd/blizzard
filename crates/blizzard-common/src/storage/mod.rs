@@ -492,6 +492,44 @@ impl StorageProvider {
         Ok(())
     }
 
+    /// Server-side rename (move) operation.
+    ///
+    /// This is a zero-copy operation on cloud storage (GCS, S3, Azure).
+    /// The object is NOT downloaded - it's renamed server-side.
+    ///
+    /// Backend implementations:
+    /// - **GCS**: Server-side `rewriteObject` API (free, no egress)
+    /// - **S3**: Server-side `CopyObject` + `DeleteObject` (free, no egress)
+    /// - **Ceph RadosGW**: Server-side `CopyObject` + `DeleteObject` (S3-compatible, free)
+    /// - **Azure**: Server-side copy operation
+    /// - **Local**: `std::fs::rename`
+    pub async fn rename(&self, from: &Path, to: &Path) -> Result<(), StorageError> {
+        let from_qualified = self.qualify_path(from);
+        let to_qualified = self.qualify_path(to);
+        let start = Instant::now();
+        let result = self
+            .object_store
+            .rename(&from_qualified, &to_qualified)
+            .await;
+
+        let status = if result.is_ok() {
+            RequestStatus::Success
+        } else {
+            RequestStatus::Error
+        };
+        emit!(StorageRequest {
+            operation: StorageOperation::Rename,
+            status,
+        });
+        emit!(StorageRequestDuration {
+            operation: StorageOperation::Rename,
+            duration: start.elapsed(),
+        });
+
+        result.context(ObjectStoreSnafu)?;
+        Ok(())
+    }
+
     /// Upload bytes using parallel multipart upload.
     ///
     /// Uses the `MultipartStore` trait which provides explicit part numbering,
@@ -837,5 +875,43 @@ mod tests {
             let content = storage.get(path.as_str()).await.unwrap();
             assert!(!content.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn test_storage_provider_rename() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create source directory and file
+        let staging_dir = base_path.join("_staging/pending");
+        let target_dir = base_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let source_file = staging_dir.join("test.parquet");
+        std::fs::write(&source_file, b"parquet data").unwrap();
+
+        // Create storage provider
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
+
+        // Rename file from staging to table directory
+        let from = Path::from("_staging/pending/test.parquet");
+        let to = Path::from("date=2024-01-01/test.parquet");
+        storage.rename(&from, &to).await.unwrap();
+
+        // Verify source no longer exists
+        assert!(!source_file.exists(), "Source file should be removed");
+
+        // Verify destination exists with correct content
+        let dest_file = target_dir.join("test.parquet");
+        assert!(dest_file.exists(), "Destination file should exist");
+        assert_eq!(
+            std::fs::read(&dest_file).unwrap(),
+            b"parquet data",
+            "Content should be preserved"
+        );
     }
 }
