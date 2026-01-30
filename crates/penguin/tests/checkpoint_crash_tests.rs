@@ -259,11 +259,15 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         .unwrap();
 
     // Step 6: Verify table can be opened
-    let reopened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
+    let reopened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string())
+        .await
+        .unwrap();
     assert!(reopened_sink.version() >= 0);
 
     // Step 7: Verify we can recover checkpoint from the new table
-    let mut sink_for_recovery = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
+    let mut sink_for_recovery = DeltaSink::try_open(&storage, vec![], "test".to_string())
+        .await
+        .unwrap();
     let recovered = sink_for_recovery
         .recover_checkpoint_from_log()
         .await
@@ -331,7 +335,9 @@ async fn test_schema_evolution_merge_mode() {
     assert_eq!(delta_sink.schema().unwrap().fields().len(), 3);
 
     // Verify we can reopen the table and see the evolved schema
-    let reopened = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
+    let reopened = DeltaSink::try_open(&storage, vec![], "test".to_string())
+        .await
+        .unwrap();
     assert_eq!(reopened.schema().unwrap().fields().len(), 3);
 }
 

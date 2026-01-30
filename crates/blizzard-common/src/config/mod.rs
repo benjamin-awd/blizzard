@@ -2,11 +2,15 @@
 
 mod component_key;
 mod global;
+mod loader;
+mod path;
 mod resource;
 mod vars;
 
 pub use component_key::ComponentKey;
 pub use global::GlobalConfig;
+pub use loader::{Mergeable, load_from_paths};
+pub use path::{ConfigPath, is_yaml_file};
 pub use resource::Resource;
 pub use vars::{InterpolationResult, interpolate};
 
@@ -33,6 +37,16 @@ impl Default for MetricsConfig {
         Self {
             enabled: default_metrics_enabled(),
             address: default_metrics_address(),
+        }
+    }
+}
+
+impl MetricsConfig {
+    /// Merge values from another MetricsConfig (last-write-wins).
+    pub fn merge_from(&mut self, other: Self) {
+        self.enabled = other.enabled;
+        if other.address != default_metrics_address() {
+            self.address = other.address;
         }
     }
 }

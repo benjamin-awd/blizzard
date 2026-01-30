@@ -54,6 +54,13 @@ impl GlobalConfig {
             total_concurrency: Some(limit),
         }
     }
+
+    /// Merge values from another GlobalConfig (last-write-wins).
+    pub fn merge_from(&mut self, other: Self) {
+        if other.total_concurrency.is_some() {
+            self.total_concurrency = other.total_concurrency;
+        }
+    }
 }
 
 #[cfg(test)]

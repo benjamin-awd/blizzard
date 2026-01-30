@@ -825,6 +825,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "indexmap",
  "metrics",
  "metrics-exporter-prometheus",
  "object_store",
