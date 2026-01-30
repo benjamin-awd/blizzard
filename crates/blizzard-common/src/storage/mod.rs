@@ -285,6 +285,26 @@ impl StorageProvider {
         }
     }
 
+    /// Create a storage provider with a shared ObjectStore connection.
+    ///
+    /// This allows multiple providers to share the same HTTP connection
+    /// while having different path prefixes (configs).
+    pub(crate) fn with_shared_store(
+        config: BackendConfig,
+        object_store: Arc<dyn ObjectStore>,
+        multipart_store: Option<Arc<dyn MultipartStore>>,
+        canonical_url: String,
+        storage_options: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            config,
+            object_store,
+            multipart_store,
+            canonical_url,
+            storage_options,
+        }
+    }
+
     /// List files in the storage location.
     /// Returns paths relative to the configured key prefix.
     pub async fn list(
