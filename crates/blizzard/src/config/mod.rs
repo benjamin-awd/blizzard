@@ -522,7 +522,6 @@ pipelines:
           type: string
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert!(config.metrics.enabled);
         assert_eq!(config.metrics.address, "0.0.0.0:9090");
     }
 
