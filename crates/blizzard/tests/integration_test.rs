@@ -256,7 +256,7 @@ mod parquet_tests {
     fn test_parquet_writer_basic() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config).unwrap();
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
 
         let batch = create_test_batch(100);
         writer.write_batch(&batch).unwrap();
@@ -268,7 +268,7 @@ mod parquet_tests {
     fn test_parquet_writer_multiple_batches() {
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config).unwrap();
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
 
         for _ in 0..5 {
             let batch = create_test_batch(100);

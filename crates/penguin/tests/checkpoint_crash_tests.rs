@@ -39,7 +39,9 @@ async fn test_checkpoint_commit_and_recovery() {
         Field::new("value", DataType::Int64, true),
     ]);
 
-    let mut delta_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
+    let mut delta_sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string())
+        .await
+        .unwrap();
 
     // Commit first batch - file partially processed
     let mut source_state1 = SourceState::new();
@@ -92,7 +94,9 @@ async fn test_checkpoint_commit_and_recovery() {
         .unwrap();
 
     // Simulate restart - create new sink and recover
-    let mut new_sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
+    let mut new_sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string())
+        .await
+        .unwrap();
     let recovered = new_sink.recover_checkpoint_from_log().await.unwrap();
 
     assert!(recovered.is_some(), "Should recover checkpoint from log");
@@ -117,7 +121,7 @@ async fn test_checkpoint_commit_and_recovery() {
 /// or inconsistent state due to the single consolidated lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_coordinator_access() {
-    let coordinator = Arc::new(CheckpointCoordinator::new());
+    let coordinator = Arc::new(CheckpointCoordinator::new("test".to_string()));
 
     // Spawn multiple tasks that update state concurrently
     let mut handles = Vec::new();
@@ -186,7 +190,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
             .await
             .unwrap();
 
-    let try_open_result = DeltaSink::try_open(&storage, vec![]).await;
+    let try_open_result = DeltaSink::try_open(&storage, vec![], "test".to_string()).await;
     match try_open_result {
         Ok(_) => panic!("Expected error for non-existent table"),
         Err(e) => assert!(e.is_table_not_found(), "Expected table not found error"),
@@ -238,7 +242,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
     assert_eq!(inferred_schema.field(2).name(), "score");
 
     // Step 4: Create Delta table with inferred schema
-    let mut delta_sink = DeltaSink::new(&storage, &inferred_schema, vec![])
+    let mut delta_sink = DeltaSink::new(&storage, &inferred_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -255,11 +259,11 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         .unwrap();
 
     // Step 6: Verify table can be opened
-    let reopened_sink = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    let reopened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
     assert!(reopened_sink.version() >= 0);
 
     // Step 7: Verify we can recover checkpoint from the new table
-    let mut sink_for_recovery = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    let mut sink_for_recovery = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
     let recovered = sink_for_recovery
         .recover_checkpoint_from_log()
         .await
@@ -292,7 +296,7 @@ async fn test_schema_evolution_merge_mode() {
         Field::new("name", DataType::Utf8, true),
     ]);
 
-    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -327,7 +331,7 @@ async fn test_schema_evolution_merge_mode() {
     assert_eq!(delta_sink.schema().unwrap().fields().len(), 3);
 
     // Verify we can reopen the table and see the evolved schema
-    let reopened = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+    let reopened = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
     assert_eq!(reopened.schema().unwrap().fields().len(), 3);
 }
 
@@ -354,7 +358,7 @@ async fn test_schema_evolution_strict_mode_rejects() {
         Field::new("name", DataType::Utf8, true),
     ]);
 
-    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -401,7 +405,7 @@ async fn test_schema_evolution_overwrites() {
         Field::new("name", DataType::Utf8, true),
     ]);
 
-    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -455,7 +459,7 @@ async fn test_schema_evolution_rejects_required_fields() {
     // Create table with initial schema
     let initial_schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
 
-    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -499,7 +503,7 @@ async fn test_schema_evolution_allows_type_widening() {
     // Create table with Int32 field
     let initial_schema = Schema::new(vec![Field::new("value", DataType::Int32, true)]);
 
-    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![])
+    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 

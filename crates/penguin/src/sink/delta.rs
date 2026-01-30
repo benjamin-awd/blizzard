@@ -59,6 +59,8 @@ pub struct DeltaSink {
     partition_by: Vec<String>,
     /// Cached table schema for evolution checks.
     cached_schema: Option<SchemaRef>,
+    /// Table identifier for metrics labeling.
+    table_name: String,
 }
 
 impl DeltaSink {
@@ -67,6 +69,7 @@ impl DeltaSink {
         storage: &StorageProvider,
         schema: &Schema,
         partition_by: Vec<String>,
+        table_name: String,
     ) -> Result<Self, DeltaError> {
         ensure_handlers_registered();
 
@@ -87,6 +90,7 @@ impl DeltaSink {
             checkpoint_version: 0,
             partition_by,
             cached_schema,
+            table_name,
         })
     }
 
@@ -97,6 +101,7 @@ impl DeltaSink {
     pub async fn try_open(
         storage: &StorageProvider,
         partition_by: Vec<String>,
+        table_name: String,
     ) -> Result<Self, DeltaError> {
         ensure_handlers_registered();
 
@@ -117,6 +122,7 @@ impl DeltaSink {
             checkpoint_version: 0,
             partition_by,
             cached_schema,
+            table_name,
         })
     }
 
@@ -148,6 +154,7 @@ impl DeltaSink {
             add_actions,
             Some((&checkpoint_with_version, self.checkpoint_version)),
             &self.partition_by,
+            &self.table_name,
         )
         .await?;
 
@@ -577,6 +584,7 @@ async fn commit_to_delta_with_checkpoint(
     add_actions: Vec<Action>,
     checkpoint: Option<(&CheckpointState, i64)>,
     partition_by: &[String],
+    table_name: &str,
 ) -> Result<i64, DeltaError> {
     use deltalake::kernel::transaction::CommitBuilder;
 
@@ -631,6 +639,7 @@ async fn commit_to_delta_with_checkpoint(
 
     DeltaCommitCompleted {
         duration: start.elapsed(),
+        table: table_name.to_string(),
     }
     .emit();
 
@@ -788,7 +797,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = DeltaSink::try_open(&storage, vec![]).await;
+        let result = DeltaSink::try_open(&storage, vec![], "test".to_string()).await;
         match result {
             Ok(_) => panic!("Expected error for non-existent table"),
             Err(e) => assert!(
@@ -815,10 +824,10 @@ mod tests {
 
         // First create a table
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
-        let _sink = DeltaSink::new(&storage, &schema, vec![]).await.unwrap();
+        let _sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string()).await.unwrap();
 
         // Now try_open should succeed
-        let opened_sink = DeltaSink::try_open(&storage, vec![]).await.unwrap();
+        let opened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
         assert!(opened_sink.version() >= 0);
     }
 
