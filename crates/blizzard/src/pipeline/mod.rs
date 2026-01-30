@@ -328,6 +328,7 @@ impl BlizzardProcessor {
                 &source_storage,
                 pipeline_config.source.compression,
                 prefixes.as_deref(),
+                pipeline_key.as_ref(),
             )
             .await?
         } else {
@@ -412,8 +413,12 @@ impl PollingProcessor for BlizzardProcessor {
         let prefixes = self.generate_date_prefixes();
 
         // List source files
-        let all_files =
-            list_ndjson_files_with_prefixes(&self.source_storage, prefixes.as_deref()).await?;
+        let all_files = list_ndjson_files_with_prefixes(
+            &self.source_storage,
+            prefixes.as_deref(),
+            self.pipeline_key.as_ref(),
+        )
+        .await?;
 
         // Filter to pending files
         let pending_files = self.source_state.filter_pending_files(all_files);

@@ -338,7 +338,8 @@ impl PenguinProcessor {
     ) -> Result<(), PipelineError> {
         // Infer schema from incoming files
         let incoming_schema =
-            infer_schema_from_first_file(&self.sink_storage, pending_files).await?;
+            infer_schema_from_first_file(&self.sink_storage, pending_files, self.table_key.as_ref())
+                .await?;
 
         if self.delta_sink.is_none() {
             info!(table = %self.table_key, "Creating new Delta table with inferred schema");

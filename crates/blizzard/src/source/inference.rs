@@ -30,9 +30,10 @@ pub async fn infer_schema_from_source(
     storage: &StorageProviderRef,
     compression: CompressionFormat,
     prefixes: Option<&[String]>,
+    pipeline: &str,
 ) -> Result<SchemaRef, InferenceError> {
     // List available files
-    let files = list_ndjson_files_with_prefixes(storage, prefixes)
+    let files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline)
         .await
         .map_err(|e| InferenceError::ReadFile { source: e })?;
 
@@ -44,12 +45,13 @@ pub async fn infer_schema_from_source(
     let mut last_error = None;
 
     for path in files.iter().take(max_attempts) {
-        debug!("Attempting to infer schema from file: {}", path);
+        debug!(pipeline = %pipeline, "Attempting to infer schema from file: {}", path);
 
         match storage.get(path.as_str()).await {
             Ok(bytes) => match infer_schema_from_bytes(&bytes, compression) {
                 Ok(schema) => {
                     info!(
+                        pipeline = %pipeline,
                         "Inferred schema with {} fields from {}: {:?}",
                         schema.fields().len(),
                         path,
@@ -58,12 +60,12 @@ pub async fn infer_schema_from_source(
                     return Ok(schema);
                 }
                 Err(e) => {
-                    warn!("Failed to infer schema from {}: {}", path, e);
+                    warn!(pipeline = %pipeline, "Failed to infer schema from {}: {}", path, e);
                     last_error = Some(e);
                 }
             },
             Err(e) => {
-                warn!("Failed to read file {}: {}", path, e);
+                warn!(pipeline = %pipeline, "Failed to read file {}: {}", path, e);
                 last_error = Some(InferenceError::ReadFile { source: e });
             }
         }

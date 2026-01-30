@@ -55,6 +55,7 @@ pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, Schem
 pub async fn infer_schema_from_first_file(
     storage: &StorageProvider,
     files: &[FinishedFile],
+    table: &str,
 ) -> Result<SchemaRef, SchemaError> {
     if files.is_empty() {
         return Err(SchemaError::NoFilesAvailable);
@@ -64,12 +65,13 @@ pub async fn infer_schema_from_first_file(
     let mut last_error = None;
 
     for file in files.iter().take(max_attempts) {
-        debug!("Attempting to infer schema from file: {}", file.filename);
+        debug!(table = %table, "Attempting to infer schema from file: {}", file.filename);
 
         match storage.get(file.filename.as_str()).await {
             Ok(bytes) => match infer_schema_from_parquet_bytes(&bytes) {
                 Ok(schema) => {
                     debug!(
+                        table = %table,
                         "Successfully inferred schema with {} fields from {}",
                         schema.fields().len(),
                         file.filename
@@ -78,6 +80,7 @@ pub async fn infer_schema_from_first_file(
                 }
                 Err(e) => {
                     warn!(
+                        table = %table,
                         "Failed to parse parquet schema from {}: {}",
                         file.filename, e
                     );
@@ -85,7 +88,7 @@ pub async fn infer_schema_from_first_file(
                 }
             },
             Err(e) => {
-                warn!("Failed to read file {}: {}", file.filename, e);
+                warn!(table = %table, "Failed to read file {}: {}", file.filename, e);
                 last_error = Some(SchemaError::StorageRead { source: e });
             }
         }
@@ -257,7 +260,7 @@ mod tests {
             None,
         )];
 
-        let schema = infer_schema_from_first_file(&storage, &files)
+        let schema = infer_schema_from_first_file(&storage, &files, "test")
             .await
             .unwrap();
 
@@ -279,7 +282,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = infer_schema_from_first_file(&storage, &[]).await;
+        let result = infer_schema_from_first_file(&storage, &[], "test").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SchemaError::NoFilesAvailable));
     }
@@ -322,7 +325,7 @@ mod tests {
         ];
 
         // Should succeed by trying the second file
-        let schema = infer_schema_from_first_file(&storage, &files)
+        let schema = infer_schema_from_first_file(&storage, &files, "test")
             .await
             .unwrap();
 
