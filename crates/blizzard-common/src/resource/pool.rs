@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use object_store::multipart::MultipartStore;
 use object_store::ObjectStore;
+use object_store::multipart::MultipartStore;
 
 use crate::error::StorageError;
 use crate::storage::BackendConfig;
@@ -47,8 +47,7 @@ fn extract_bucket_key(url: &str) -> String {
         return format!("abfs://{}", container_account);
     }
 
-    if (url_lower.contains(".blob.core.windows.net")
-        || url_lower.contains(".dfs.core.windows.net"))
+    if (url_lower.contains(".blob.core.windows.net") || url_lower.contains(".dfs.core.windows.net"))
         && let Some(after_scheme) = url_lower.strip_prefix("https://")
         && let Some(dot_pos) = after_scheme.find('.')
     {
