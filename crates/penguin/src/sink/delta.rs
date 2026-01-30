@@ -21,8 +21,9 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use blizzard_common::FinishedFile;
-use blizzard_common::metrics::events::{CheckpointStateSize, DeltaCommitCompleted, InternalEvent};
 use blizzard_common::storage::{BackendConfig, StorageProvider};
+
+use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted, InternalEvent};
 
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;

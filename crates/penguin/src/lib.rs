@@ -8,6 +8,7 @@
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod pipeline;
 pub mod schema;
 pub mod sink;

@@ -9,9 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use blizzard_common::metrics::events::{InternalEvent, StagingFileCommitted};
 use blizzard_common::storage::StorageProvider;
 use blizzard_common::{FinishedFile, StorageError};
+
+use crate::metrics::events::{InternalEvent, StagingFileCommitted};
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::PutPayload;
