@@ -52,6 +52,9 @@ tracing-limit = { path = "lib/tracing-limit" }
 url = { version = "2", default-features = false }
 regex = { version = "1", default-features = false, features = ["std"] }
 
+# Ordered maps
+indexmap = { version = "2", features = ["serde"] }
+
 # Misc
 bytes = { version = "1", default-features = false, features = ["std"] }
 uuid = { version = "1", default-features = false, features = ["v7"] }

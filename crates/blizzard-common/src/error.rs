@@ -70,6 +70,22 @@ pub enum ConfigError {
     #[snafu(display("Table URI cannot be empty"))]
     EmptyTableUri,
 
+    /// Table URI is empty for a specific table.
+    #[snafu(display("Table '{table}' has empty table_uri"))]
+    EmptyTableUriForTable { table: String },
+
+    /// Source path is empty for a specific pipeline.
+    #[snafu(display("Pipeline '{pipeline}' has empty source path"))]
+    EmptySourcePathForPipeline { pipeline: String },
+
+    /// Table URI is empty for a specific pipeline.
+    #[snafu(display("Pipeline '{pipeline}' has empty table_uri"))]
+    EmptyTableUriForPipeline { pipeline: String },
+
+    /// Schema is empty for a specific pipeline.
+    #[snafu(display("Pipeline '{pipeline}' has empty schema"))]
+    EmptySchemaForPipeline { pipeline: String },
+
     /// Environment variable interpolation failed.
     #[snafu(display("Environment variable interpolation failed:\n{message}"))]
     EnvInterpolation { message: String },
@@ -81,6 +97,10 @@ pub enum ConfigError {
     /// Failed to read configuration file.
     #[snafu(display("Failed to read configuration file"))]
     ReadFile { source: std::io::Error },
+
+    /// Resource conflict detected (e.g., two tables using the same staging directory).
+    #[snafu(display("Resource conflict: {message}"))]
+    ResourceConflict { message: String },
 }
 
 // ============ Metrics Errors ============

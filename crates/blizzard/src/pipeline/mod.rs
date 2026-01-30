@@ -1,17 +1,23 @@
 //! Pipeline for processing NDJSON files to Parquet staging.
 //!
 //! This module implements the main processing loop using the PollingProcessor
-//! trait from blizzard-common.
+//! trait from blizzard-common. It supports running multiple pipelines
+//! concurrently with shared shutdown handling and optional global concurrency limits.
+//!
 
 mod tasks;
 
-use async_trait::async_trait;
-use snafu::ResultExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use indexmap::IndexMap;
+use snafu::ResultExt;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use blizzard_common::metrics::events::{
     BatchesProcessed, BytesWritten, DecompressionQueueDepth, FileProcessed, FileStatus,
@@ -22,7 +28,7 @@ use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefi
 use blizzard_common::types::SourceState;
 use blizzard_common::{StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
-use crate::config::Config;
+use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 use crate::sink::{ParquetWriter, ParquetWriterConfig};
@@ -31,7 +37,7 @@ use crate::staging::StagingWriter;
 
 use tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
 
-/// Statistics from a pipeline run.
+/// Statistics from a single pipeline run.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
     /// Total files processed.
@@ -44,16 +50,61 @@ pub struct PipelineStats {
     pub staging_files_written: usize,
 }
 
+/// Statistics from a multi-pipeline run.
+///
+/// Tracks per-pipeline statistics and any errors that occurred during processing.
+#[derive(Debug, Clone, Default)]
+pub struct MultiPipelineStats {
+    /// Per-pipeline statistics for pipelines that ran successfully.
+    pub pipelines: IndexMap<PipelineKey, PipelineStats>,
+    /// Errors that occurred, with the associated pipeline key and error message.
+    pub errors: Vec<(PipelineKey, String)>,
+}
+
+impl MultiPipelineStats {
+    /// Returns true if no errors occurred.
+    pub fn success(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// Returns the total number of files processed across all pipelines.
+    pub fn total_files_processed(&self) -> usize {
+        self.pipelines.values().map(|s| s.files_processed).sum()
+    }
+
+    /// Returns the total number of records processed across all pipelines.
+    pub fn total_records_processed(&self) -> usize {
+        self.pipelines.values().map(|s| s.records_processed).sum()
+    }
+
+    /// Returns the total bytes written across all pipelines.
+    pub fn total_bytes_written(&self) -> usize {
+        self.pipelines.values().map(|s| s.bytes_written).sum()
+    }
+
+    /// Returns the total staging files written across all pipelines.
+    pub fn total_staging_files_written(&self) -> usize {
+        self.pipelines
+            .values()
+            .map(|s| s.staging_files_written)
+            .sum()
+    }
+}
+
 /// Run the pipeline with the given configuration.
-pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError> {
-    // Initialize metrics if enabled
+///
+/// Spawns independent tasks for each configured pipeline, with shared shutdown
+/// handling and optional global concurrency limits.
+///
+pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, PipelineError> {
+    // 1. Initialize metrics once (shared across all pipelines)
     if config.metrics.enabled {
         let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
         blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
         info!("Metrics server started on {}", config.metrics.address);
     }
 
-    // Set up shutdown handling
+    // 2. Set up shared shutdown handling
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
@@ -61,21 +112,93 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
         shutdown_clone.cancel();
     });
 
-    // Create the pipeline processor, racing against shutdown
-    let poll_interval_secs = config.source.poll_interval_secs;
+    // 3. Create optional global semaphore for cross-pipeline concurrency limiting
+    let global_semaphore = config
+        .global
+        .total_concurrency
+        .map(|n| Arc::new(Semaphore::new(n)));
+
+    // 4. Spawn independent task per pipeline
+    let mut handles: JoinSet<(PipelineKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
+
+    for (pipeline_key, pipeline_config) in config.pipelines {
+        let shutdown = shutdown.clone();
+        let global_sem = global_semaphore.clone();
+        let poll_interval = Duration::from_secs(pipeline_config.source.poll_interval_secs);
+        let key = pipeline_key.clone();
+
+        handles.spawn(async move {
+            let result = run_single_pipeline(
+                key.clone(),
+                pipeline_config,
+                global_sem,
+                poll_interval,
+                shutdown,
+            )
+            .await;
+            (key, result)
+        });
+    }
+
+    info!("Spawned {} pipeline tasks", handles.len());
+
+    // 5. Collect results
+    let mut stats = MultiPipelineStats::default();
+    while let Some(result) = handles.join_next().await {
+        match result {
+            Ok((key, Ok(pipeline_stats))) => {
+                info!(
+                    pipeline = %key,
+                    files = pipeline_stats.files_processed,
+                    "Pipeline completed successfully"
+                );
+                stats.pipelines.insert(key, pipeline_stats);
+            }
+            Ok((key, Err(e))) => {
+                error!(pipeline = %key, error = %e, "Pipeline failed");
+                stats.errors.push((key, e.to_string()));
+            }
+            Err(e) => {
+                error!(error = %e, "Pipeline task panicked");
+                // JoinError doesn't give us the pipeline key, so we can't attribute it
+            }
+        }
+    }
+
+    info!(
+        "All pipelines complete: {} succeeded, {} failed",
+        stats.pipelines.len(),
+        stats.errors.len()
+    );
+
+    Ok(stats)
+}
+
+/// Run a single pipeline's polling loop.
+///
+/// This is spawned as an independent task for each pipeline.
+async fn run_single_pipeline(
+    pipeline_key: PipelineKey,
+    pipeline_config: PipelineConfig,
+    _global_semaphore: Option<Arc<Semaphore>>,
+    poll_interval: Duration,
+    shutdown: CancellationToken,
+) -> Result<PipelineStats, PipelineError> {
+    // Initialize processor, respecting shutdown signal
     let mut processor = tokio::select! {
         biased;
 
         _ = shutdown.cancelled() => {
-            info!("Shutdown requested during initialization");
+            info!(pipeline = %pipeline_key, "Shutdown requested during initialization");
             return Ok(PipelineStats::default());
         }
 
-        result = BlizzardProcessor::new(config, shutdown.clone()) => result?,
+        result = BlizzardProcessor::new(pipeline_key.clone(), pipeline_config, shutdown.clone()) => result?,
     };
 
+    info!(pipeline = %pipeline_key, "Pipeline processor initialized");
+
     // Run the polling loop
-    let poll_interval = Duration::from_secs(poll_interval_secs);
     run_polling_loop(&mut processor, poll_interval, shutdown).await?;
 
     Ok(processor.stats)
@@ -88,50 +211,72 @@ struct PreparedState {
 }
 
 /// The blizzard file loader pipeline processor.
+///
+/// Each pipeline runs its own `BlizzardProcessor` instance.
 struct BlizzardProcessor {
-    config: Config,
+    /// Identifier for this pipeline (used in logging and metrics).
+    pipeline_key: PipelineKey,
+    /// Configuration for this specific pipeline.
+    pipeline_config: PipelineConfig,
+    /// Storage provider for reading source files.
     source_storage: StorageProviderRef,
+    /// Writer for staging metadata and parquet files.
     staging_writer: StagingWriter,
+    /// NDJSON reader with schema validation.
     reader: Arc<NdjsonReader>,
+    /// Tracks which source files have been processed.
     source_state: SourceState,
+    /// Statistics for this pipeline's run.
     stats: PipelineStats,
+    /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
+    /// Shutdown signal for graceful termination.
     shutdown: CancellationToken,
 }
 
 impl BlizzardProcessor {
-    async fn new(config: Config, shutdown: CancellationToken) -> Result<Self, PipelineError> {
+    async fn new(
+        pipeline_key: PipelineKey,
+        pipeline_config: PipelineConfig,
+        shutdown: CancellationToken,
+    ) -> Result<Self, PipelineError> {
         // Create source storage provider
         let source_storage = Arc::new(
             StorageProvider::for_url_with_options(
-                &config.source.path,
-                config.source.storage_options.clone(),
+                &pipeline_config.source.path,
+                pipeline_config.source.storage_options.clone(),
             )
             .await
             .context(StorageSnafu)?,
         );
 
         // Create staging writer (writes directly to table directory)
-        let staging_writer =
-            StagingWriter::new(&config.sink.table_uri, config.sink.storage_options.clone()).await?;
+        let staging_writer = StagingWriter::new(
+            &pipeline_config.sink.table_uri,
+            pipeline_config.sink.storage_options.clone(),
+        )
+        .await?;
 
         // Create NDJSON reader
-        let reader_config =
-            NdjsonReaderConfig::new(config.source.batch_size, config.source.compression);
+        let reader_config = NdjsonReaderConfig::new(
+            pipeline_config.source.batch_size,
+            pipeline_config.source.compression,
+        );
         let reader = Arc::new(NdjsonReader::new(
-            config.schema.to_arrow_schema(),
+            pipeline_config.schema.to_arrow_schema(),
             reader_config,
         ));
 
         // Set up DLQ if configured
-        let dlq = DeadLetterQueue::from_config(&config.error_handling).await?;
+        let dlq = DeadLetterQueue::from_config(&pipeline_config.error_handling).await?;
 
         Ok(Self {
             failure_tracker: FailureTracker::new(
-                config.error_handling.max_failures,
+                pipeline_config.error_handling.max_failures,
                 dlq.map(Arc::new),
             ),
-            config,
+            pipeline_key,
+            pipeline_config,
             source_storage,
             staging_writer,
             reader,
@@ -143,15 +288,19 @@ impl BlizzardProcessor {
 
     /// Generate date prefixes for partition filtering.
     fn generate_date_prefixes(&self) -> Option<Vec<String>> {
-        self.config.source.partition_filter.as_ref().map(|pf| {
-            DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
-        })
+        self.pipeline_config
+            .source
+            .partition_filter
+            .as_ref()
+            .map(|pf| {
+                DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
+            })
     }
 
     /// Extract partition values from a source path.
     fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
         let mut values = HashMap::new();
-        for key in &self.config.sink.partition_by {
+        for key in &self.pipeline_config.sink.partition_by {
             // Look for key=value patterns in the path
             let pattern = format!("{}=", key);
             if let Some(idx) = path.find(&pattern) {
@@ -176,7 +325,7 @@ impl PollingProcessor for BlizzardProcessor {
         // On cold start, we could potentially recover state from staging
         // For now, we start fresh
         if cold_start {
-            info!("Cold start - beginning fresh processing");
+            info!(pipeline = %self.pipeline_key, "Cold start - beginning fresh processing");
         }
 
         // Generate date prefixes for efficient listing
@@ -206,7 +355,7 @@ impl PollingProcessor for BlizzardProcessor {
             })
             .collect();
 
-        info!("Found {} files to process", pending_files.len());
+        info!(pipeline = %self.pipeline_key, files = pending_files.len(), "Found files to process");
 
         Ok(Some(PreparedState {
             pending_files,
@@ -222,11 +371,11 @@ impl PollingProcessor for BlizzardProcessor {
 
         // Create Parquet writer
         let writer_config = ParquetWriterConfig::default()
-            .with_file_size_mb(self.config.sink.file_size_mb)
-            .with_row_group_size_bytes(self.config.sink.row_group_size_bytes)
-            .with_compression(self.config.sink.compression);
+            .with_file_size_mb(self.pipeline_config.sink.file_size_mb)
+            .with_row_group_size_bytes(self.pipeline_config.sink.row_group_size_bytes)
+            .with_compression(self.pipeline_config.sink.compression);
         let mut parquet_writer =
-            ParquetWriter::new(self.config.schema.to_arrow_schema(), writer_config)?;
+            ParquetWriter::new(self.pipeline_config.schema.to_arrow_schema(), writer_config)?;
 
         // Create downloader using shared shutdown token
         let downloader = Downloader::spawn(
@@ -234,7 +383,7 @@ impl PollingProcessor for BlizzardProcessor {
             skip_counts,
             self.source_storage.clone(),
             self.shutdown.clone(),
-            self.config.source.max_concurrent_files,
+            self.pipeline_config.source.max_concurrent_files,
         );
 
         // Process downloaded files
@@ -247,6 +396,11 @@ impl PollingProcessor for BlizzardProcessor {
 
         // Write to staging
         if !finished_files.is_empty() {
+            info!(
+                pipeline = %self.pipeline_key,
+                files = finished_files.len(),
+                "Writing files to staging"
+            );
             self.staging_writer.write_files(&finished_files).await?;
             self.stats.staging_files_written += finished_files.len();
 
@@ -276,7 +430,7 @@ impl BlizzardProcessor {
         use futures::stream::FuturesUnordered;
 
         let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
-        let max_in_flight = self.config.source.max_concurrent_files * 2;
+        let max_in_flight = self.pipeline_config.source.max_concurrent_files * 2;
 
         loop {
             emit!(DecompressionQueueDepth {
@@ -291,7 +445,7 @@ impl BlizzardProcessor {
 
                 // Handle shutdown
                 _ = shutdown.cancelled() => {
-                    info!("Shutdown requested during processing");
+                    info!(pipeline = %self.pipeline_key, "Shutdown requested during processing");
                     downloader.abort();
                     return Ok(IterationResult::Shutdown);
                 }
@@ -303,7 +457,7 @@ impl BlizzardProcessor {
                             self.handle_processed_file(processed, parquet_writer).await?;
                         }
                         Err(e) => {
-                            warn!("File processing failed: {}", e);
+                            warn!(pipeline = %self.pipeline_key, error = %e, "File processing failed");
                             self.failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Parse)
                                 .await?;
@@ -319,7 +473,7 @@ impl BlizzardProcessor {
                             processing.push(future);
                         }
                         Some(Err(e)) => {
-                            warn!("Download failed: {}", e);
+                            warn!(pipeline = %self.pipeline_key, error = %e, "Download failed");
                             self.failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Download)
                                 .await?;
@@ -376,8 +530,11 @@ impl BlizzardProcessor {
 
         let short_name = path.split('/').next_back().unwrap_or(&path);
         debug!(
-            "Processed {} ({} records, {} batches)",
-            short_name, total_records, batch_count
+            pipeline = %self.pipeline_key,
+            file = short_name,
+            records = total_records,
+            batches = batch_count,
+            "Processed file"
         );
 
         // Write any finished files to staging

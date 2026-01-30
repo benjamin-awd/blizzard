@@ -23,7 +23,7 @@ pub mod storage {
 // Re-export commonly used items
 pub use config::Config;
 pub use error::PipelineError;
-pub use pipeline::run_pipeline;
+pub use pipeline::{MultiPipelineStats, PipelineStats, run_pipeline};
 
 // Re-export from blizzard-common
 pub use blizzard_common::{

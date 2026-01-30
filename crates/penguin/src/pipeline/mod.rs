@@ -1,19 +1,26 @@
 //! Pipeline for watching staging and committing to Delta Lake.
 //!
 //! This module implements the main processing loop using the PollingProcessor
-//! trait from blizzard-common.
+//! trait from blizzard-common. It supports running multiple Delta tables
+//! concurrently with shared shutdown handling and optional global concurrency limits.
+//!
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use snafu::{OptionExt, ResultExt};
-use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info};
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
 
 use crate::checkpoint::CheckpointCoordinator;
-use crate::config::Config;
+use crate::config::{Config, TableConfig, TableKey};
 use crate::error::{
     AddressParseSnafu, DeltaSinkNotInitializedSnafu, MetricsSnafu, PipelineError, StorageSnafu,
 };
@@ -22,7 +29,7 @@ use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 use crate::staging::StagingReader;
 
-/// Statistics from a pipeline run.
+/// Statistics from a single table's pipeline run.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineStats {
     /// Total files committed.
@@ -31,16 +38,48 @@ pub struct PipelineStats {
     pub records_committed: usize,
 }
 
+/// Statistics from a multi-table pipeline run.
+///
+/// Tracks per-table statistics and any errors that occurred during processing.
+#[derive(Debug, Clone, Default)]
+pub struct MultiTableStats {
+    /// Per-table statistics for tables that ran successfully.
+    pub tables: IndexMap<TableKey, PipelineStats>,
+    /// Errors that occurred, with the associated table key and error message.
+    pub errors: Vec<(TableKey, String)>,
+}
+
+impl MultiTableStats {
+    /// Returns true if no errors occurred.
+    pub fn success(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    /// Returns the total number of files committed across all tables.
+    pub fn total_files_committed(&self) -> usize {
+        self.tables.values().map(|s| s.files_committed).sum()
+    }
+
+    /// Returns the total number of records committed across all tables.
+    pub fn total_records_committed(&self) -> usize {
+        self.tables.values().map(|s| s.records_committed).sum()
+    }
+}
+
 /// Run the pipeline with the given configuration.
-pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError> {
-    // Initialize metrics if enabled
+///
+/// Spawns independent tasks for each configured table, with shared shutdown
+/// handling and optional global concurrency limits.
+///
+pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineError> {
+    // 1. Initialize metrics once (shared across all tables)
     if config.metrics.enabled {
         let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
         blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
         info!("Metrics server started on {}", config.metrics.address);
     }
 
-    // Set up shutdown handling
+    // 2. Set up shared shutdown handling
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     tokio::spawn(async move {
@@ -48,21 +87,89 @@ pub async fn run_pipeline(config: Config) -> Result<PipelineStats, PipelineError
         shutdown_clone.cancel();
     });
 
-    // Create the pipeline processor, racing against shutdown
-    let poll_interval_secs = config.source.poll_interval_secs;
+    // 3. Create optional global semaphore for cross-table concurrency limiting
+    let global_semaphore = config
+        .global
+        .total_concurrency
+        .map(|n| Arc::new(Semaphore::new(n)));
+
+    // 4. Spawn independent task per table
+    let mut handles: JoinSet<(TableKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
+
+    for (table_key, table_config) in config.tables {
+        let shutdown = shutdown.clone();
+        let global_sem = global_semaphore.clone();
+        let poll_interval = Duration::from_secs(table_config.poll_interval_secs);
+        let key = table_key.clone();
+
+        handles.spawn(async move {
+            let result = run_single_table(
+                key.clone(),
+                table_config,
+                global_sem,
+                poll_interval,
+                shutdown,
+            )
+            .await;
+            (key, result)
+        });
+    }
+
+    info!("Spawned {} table tasks", handles.len());
+
+    // 5. Collect results
+    let mut stats = MultiTableStats::default();
+    while let Some(result) = handles.join_next().await {
+        match result {
+            Ok((key, Ok(table_stats))) => {
+                info!(table = %key, files = table_stats.files_committed, "Table completed successfully");
+                stats.tables.insert(key, table_stats);
+            }
+            Ok((key, Err(e))) => {
+                error!(table = %key, error = %e, "Table failed");
+                stats.errors.push((key, e.to_string()));
+            }
+            Err(e) => {
+                error!(error = %e, "Table task panicked");
+                // JoinError doesn't give us the table key, so we can't attribute it
+            }
+        }
+    }
+
+    info!(
+        "Pipeline complete: {} tables succeeded, {} failed",
+        stats.tables.len(),
+        stats.errors.len()
+    );
+
+    Ok(stats)
+}
+
+/// Run a single table's polling loop.
+///
+/// This is spawned as an independent task for each table.
+async fn run_single_table(
+    table_key: TableKey,
+    table_config: TableConfig,
+    global_semaphore: Option<Arc<Semaphore>>,
+    poll_interval: Duration,
+    shutdown: CancellationToken,
+) -> Result<PipelineStats, PipelineError> {
+    // Initialize processor, respecting shutdown signal
     let mut processor = tokio::select! {
         biased;
 
         _ = shutdown.cancelled() => {
-            info!("Shutdown requested during initialization");
+            info!(table = %table_key, "Shutdown requested during initialization");
             return Ok(PipelineStats::default());
         }
 
-        result = PenguinProcessor::new(config) => result?,
+        result = PenguinProcessor::new(table_key.clone(), table_config, global_semaphore) => result?,
     };
 
+    info!(table = %table_key, "Table processor initialized");
+
     // Run the polling loop
-    let poll_interval = Duration::from_secs(poll_interval_secs);
     run_polling_loop(&mut processor, poll_interval, shutdown).await?;
 
     Ok(processor.stats)
@@ -75,54 +182,76 @@ struct PreparedState {
 }
 
 /// The penguin delta checkpointer pipeline processor.
+///
+/// Each table runs its own `PenguinProcessor` instance, with optional
+/// sharing of a global semaphore for cross-table concurrency control.
 struct PenguinProcessor {
-    config: Config,
+    /// Identifier for this table (used in logging and metrics).
+    table_key: TableKey,
+    /// Configuration for this specific table.
+    table_config: TableConfig,
+    /// Reader for staging metadata files.
     staging_reader: StagingReader,
+    /// Storage provider for the Delta table.
     sink_storage: StorageProvider,
+    /// Delta Lake sink (lazily initialized on first file).
     delta_sink: Option<DeltaSink>,
+    /// Coordinator for checkpoint management.
     checkpoint_coordinator: CheckpointCoordinator,
+    /// Statistics for this table's run.
     stats: PipelineStats,
+    /// Optional global semaphore for cross-table concurrency limiting.
+    /// Currently stored for future use in concurrent upload limiting.
+    #[allow(dead_code)]
+    global_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl PenguinProcessor {
-    async fn new(config: Config) -> Result<Self, PipelineError> {
+    async fn new(
+        table_key: TableKey,
+        table_config: TableConfig,
+        global_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<Self, PipelineError> {
         // Create staging reader (reads from {table_uri}/_staging/)
         let staging_reader = StagingReader::new(
-            &config.source.table_uri,
-            config.source.storage_options.clone(),
+            &table_config.table_uri,
+            table_config.storage_options.clone(),
         )
         .await
         .context(StorageSnafu)?;
 
         // Create sink storage provider (same URI, parquet files already there)
         let sink_storage = StorageProvider::for_url_with_options(
-            &config.source.table_uri,
-            config.source.storage_options.clone(),
+            &table_config.table_uri,
+            table_config.storage_options.clone(),
         )
         .await
         .context(StorageSnafu)?;
 
         // Try to open existing Delta table without creating it
-        let delta_sink =
-            match DeltaSink::try_open(&sink_storage, config.source.partition_by.clone()).await {
-                Ok(sink) => {
-                    info!("Opened existing Delta table");
-                    Some(sink)
-                }
-                Err(e) if e.is_table_not_found() => {
-                    info!("No existing Delta table found, will create on first file");
-                    None
-                }
-                Err(e) => return Err(e.into()),
-            };
+        let delta_sink = match DeltaSink::try_open(&sink_storage, table_config.partition_by.clone())
+            .await
+        {
+            Ok(sink) => {
+                info!(table = %table_key, "Opened existing Delta table");
+                Some(sink)
+            }
+            Err(e) if e.is_table_not_found() => {
+                info!(table = %table_key, "No existing Delta table found, will create on first file");
+                None
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         Ok(Self {
-            config,
+            table_key,
+            table_config,
             staging_reader,
             sink_storage,
             delta_sink,
             checkpoint_coordinator: CheckpointCoordinator::new(),
             stats: PipelineStats::default(),
+            global_semaphore,
         })
     }
 
@@ -142,22 +271,23 @@ impl PenguinProcessor {
             infer_schema_from_first_file(&self.sink_storage, pending_files).await?;
 
         if self.delta_sink.is_none() {
-            info!("Creating new Delta table with inferred schema");
+            info!(table = %self.table_key, "Creating new Delta table with inferred schema");
             info!(
-                "Inferred schema with {} fields: {:?}",
-                incoming_schema.fields().len(),
-                incoming_schema
+                table = %self.table_key,
+                fields = incoming_schema.fields().len(),
+                field_names = ?incoming_schema
                     .fields()
                     .iter()
                     .map(|f| f.name())
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                "Inferred schema"
             );
 
             // Create the Delta sink with the inferred schema
             let sink = DeltaSink::new(
                 &self.sink_storage,
                 &incoming_schema,
-                self.config.source.partition_by.clone(),
+                self.table_config.partition_by.clone(),
             )
             .await?;
 
@@ -170,7 +300,7 @@ impl PenguinProcessor {
             .delta_sink
             .as_mut()
             .context(DeltaSinkNotInitializedSnafu)?;
-        let evolution_mode = self.config.source.schema_evolution;
+        let evolution_mode = self.table_config.schema_evolution;
 
         let action = sink.validate_schema(&incoming_schema, evolution_mode)?;
 
@@ -187,15 +317,17 @@ impl PenguinProcessor {
                     .map(|f| f.name().as_str())
                     .collect();
                 info!(
-                    "Schema evolution: adding {} new field(s): {:?}",
-                    new_field_names.len(),
-                    new_field_names
+                    table = %self.table_key,
+                    new_fields = new_field_names.len(),
+                    field_names = ?new_field_names,
+                    "Schema evolution: adding new fields"
                 );
             }
             EvolutionAction::Overwrite { new_schema } => {
                 info!(
-                    "Schema evolution: overwriting with {} fields",
-                    new_schema.fields().len()
+                    table = %self.table_key,
+                    fields = new_schema.fields().len(),
+                    "Schema evolution: overwriting schema"
                 );
             }
         }
@@ -220,7 +352,7 @@ impl PollingProcessor for PenguinProcessor {
             return Ok(None);
         }
 
-        info!("Found {} files to commit", pending_files.len());
+        info!(table = %self.table_key, files = pending_files.len(), "Found files to commit");
 
         // Ensure delta sink exists (creates table with inferred schema if needed)
         self.ensure_delta_sink(&pending_files).await?;
@@ -228,7 +360,7 @@ impl PollingProcessor for PenguinProcessor {
         // On cold start, recover checkpoint from Delta log
         // This must happen AFTER ensure_delta_sink so we have a table to read from
         if cold_start {
-            info!("Cold start - recovering checkpoint from Delta log");
+            info!(table = %self.table_key, "Cold start - recovering checkpoint from Delta log");
             let delta_sink = self
                 .delta_sink
                 .as_mut()
@@ -238,10 +370,10 @@ impl PollingProcessor for PenguinProcessor {
                 .restore_from_delta_log(delta_sink)
                 .await
             {
-                Ok(true) => info!("Recovered checkpoint from Delta log"),
-                Ok(false) => info!("No checkpoint found, starting fresh"),
+                Ok(true) => info!(table = %self.table_key, "Recovered checkpoint from Delta log"),
+                Ok(false) => info!(table = %self.table_key, "No checkpoint found, starting fresh"),
                 Err(e) => {
-                    tracing::warn!("Failed to recover checkpoint: {}, starting fresh", e);
+                    tracing::warn!(table = %self.table_key, error = %e, "Failed to recover checkpoint, starting fresh");
                 }
             }
         }
@@ -263,7 +395,7 @@ impl PollingProcessor for PenguinProcessor {
             .commit_files(
                 delta_sink,
                 &pending_files,
-                self.config.source.delta_checkpoint_interval,
+                self.table_config.delta_checkpoint_interval,
             )
             .await;
 
@@ -271,7 +403,7 @@ impl PollingProcessor for PenguinProcessor {
             // Mark files as committed by deleting .meta.json files
             for file in &pending_files {
                 if let Err(e) = self.staging_reader.mark_committed(file).await {
-                    tracing::warn!("Failed to mark file as committed: {}", e);
+                    tracing::warn!(table = %self.table_key, error = %e, "Failed to mark file as committed");
                     continue;
                 }
 
@@ -288,9 +420,10 @@ impl PollingProcessor for PenguinProcessor {
             }
 
             info!(
-                "Committed {} files to Delta Lake (version {})",
-                committed_count,
-                delta_sink.version()
+                table = %self.table_key,
+                files = committed_count,
+                version = delta_sink.version(),
+                "Committed files to Delta Lake"
             );
         }
 
