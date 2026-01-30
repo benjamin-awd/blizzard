@@ -53,8 +53,8 @@ indexmap = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-rand = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

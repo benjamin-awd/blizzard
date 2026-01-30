@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use rand::Rng;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -17,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
-use blizzard_common::{FinishedFile, StorageProvider, shutdown_signal};
+use blizzard_common::{FinishedFile, StoragePool, StorageProvider, shutdown_signal};
 
 use crate::emit;
 use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
@@ -93,21 +94,51 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
         .total_concurrency
         .map(|n| Arc::new(Semaphore::new(n)));
 
-    // 4. Spawn independent task per table
+    // 4. Create shared storage pool if connection pooling is enabled
+    let storage_pool = if config.global.connection_pooling {
+        Some(Arc::new(StoragePool::new()))
+    } else {
+        None
+    };
+
+    // 5. Get jitter settings
+    let jitter_max_secs = config.global.poll_jitter_secs;
+
+    // 6. Spawn independent task per table with jittered start
     let mut handles: JoinSet<(TableKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
 
     for (table_key, table_config) in config.tables {
         let shutdown = shutdown.clone();
         let global_sem = global_semaphore.clone();
+        let pool = storage_pool.clone();
         let poll_interval = Duration::from_secs(table_config.poll_interval_secs);
         let key = table_key.clone();
 
+        // Add jitter to stagger table starts (prevents thundering herd)
+        let start_jitter = if jitter_max_secs > 0 {
+            Duration::from_secs(rand::rng().random_range(0..jitter_max_secs))
+        } else {
+            Duration::ZERO
+        };
+
         handles.spawn(async move {
+            // Stagger start times
+            if !start_jitter.is_zero() {
+                info!(
+                    table = %key,
+                    jitter_secs = start_jitter.as_secs(),
+                    "Delaying table start for jitter"
+                );
+                tokio::time::sleep(start_jitter).await;
+            }
+
             let result = run_single_table(
                 key.clone(),
                 table_config,
                 global_sem,
+                pool,
                 poll_interval,
+                jitter_max_secs,
                 shutdown,
             )
             .await;
@@ -152,9 +183,19 @@ async fn run_single_table(
     table_key: TableKey,
     table_config: TableConfig,
     global_semaphore: Option<Arc<Semaphore>>,
+    storage_pool: Option<Arc<StoragePool>>,
     poll_interval: Duration,
+    poll_jitter_secs: u64,
     shutdown: CancellationToken,
 ) -> Result<PipelineStats, PipelineError> {
+    // Add jitter to poll interval for this table to spread polling load
+    let effective_interval = if poll_jitter_secs > 0 {
+        let jitter_ms = rand::rng().random_range(0..poll_jitter_secs * 1000);
+        poll_interval + Duration::from_millis(jitter_ms)
+    } else {
+        poll_interval
+    };
+
     // Initialize processor, respecting shutdown signal
     let mut processor = tokio::select! {
         biased;
@@ -164,13 +205,22 @@ async fn run_single_table(
             return Ok(PipelineStats::default());
         }
 
-        result = PenguinProcessor::new(table_key.clone(), table_config, global_semaphore) => result?,
+        result = PenguinProcessor::new(
+            table_key.clone(),
+            table_config,
+            global_semaphore,
+            storage_pool,
+        ) => result?,
     };
 
-    info!(table = %table_key, "Table processor initialized");
+    info!(
+        table = %table_key,
+        poll_interval_secs = effective_interval.as_secs(),
+        "Table processor initialized"
+    );
 
-    // Run the polling loop
-    run_polling_loop(&mut processor, poll_interval, shutdown).await?;
+    // Run the polling loop with jittered interval
+    run_polling_loop(&mut processor, effective_interval, shutdown).await?;
 
     Ok(processor.stats)
 }
@@ -211,6 +261,7 @@ impl PenguinProcessor {
         table_key: TableKey,
         table_config: TableConfig,
         global_semaphore: Option<Arc<Semaphore>>,
+        storage_pool: Option<Arc<StoragePool>>,
     ) -> Result<Self, PipelineError> {
         // Create staging reader (reads from {table_uri}/_staging/)
         let staging_reader = StagingReader::new(
@@ -221,13 +272,26 @@ impl PenguinProcessor {
         .await
         .context(StorageSnafu)?;
 
-        // Create sink storage provider (same URI, parquet files already there)
-        let sink_storage = StorageProvider::for_url_with_options(
-            &table_config.table_uri,
-            table_config.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu)?;
+        // Create sink storage provider - use pooled if available
+        let sink_storage = if let Some(pool) = &storage_pool {
+            // Note: get_or_create returns Arc<StorageProvider>, but we need StorageProvider
+            // We clone the inner provider since StoragePool returns Arc
+            (*pool
+                .get_or_create(
+                    &table_config.table_uri,
+                    table_config.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?)
+            .clone()
+        } else {
+            StorageProvider::for_url_with_options(
+                &table_config.table_uri,
+                table_config.storage_options.clone(),
+            )
+            .await
+            .context(StorageSnafu)?
+        };
 
         // Try to open existing Delta table without creating it
         let delta_sink = match DeltaSink::try_open(

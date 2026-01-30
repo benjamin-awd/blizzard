@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use rand::Rng;
 use snafu::ResultExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -26,7 +27,7 @@ use blizzard_common::metrics::events::{
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefixes};
 use blizzard_common::types::SourceState;
-use blizzard_common::{StorageProvider, StorageProviderRef, emit, shutdown_signal};
+use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
@@ -115,21 +116,51 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
         .total_concurrency
         .map(|n| Arc::new(Semaphore::new(n)));
 
-    // 4. Spawn independent task per pipeline
+    // 4. Create shared storage pool if connection pooling is enabled
+    let storage_pool = if config.global.connection_pooling {
+        Some(Arc::new(StoragePool::new()))
+    } else {
+        None
+    };
+
+    // 5. Get jitter settings
+    let jitter_max_secs = config.global.poll_jitter_secs;
+
+    // 6. Spawn independent task per pipeline with jittered start
     let mut handles: JoinSet<(PipelineKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
 
     for (pipeline_key, pipeline_config) in config.pipelines {
         let shutdown = shutdown.clone();
         let global_sem = global_semaphore.clone();
+        let pool = storage_pool.clone();
         let poll_interval = Duration::from_secs(pipeline_config.source.poll_interval_secs);
         let key = pipeline_key.clone();
 
+        // Add jitter to stagger pipeline starts (prevents thundering herd)
+        let start_jitter = if jitter_max_secs > 0 {
+            Duration::from_secs(rand::rng().random_range(0..jitter_max_secs))
+        } else {
+            Duration::ZERO
+        };
+
         handles.spawn(async move {
+            // Stagger start times
+            if !start_jitter.is_zero() {
+                info!(
+                    pipeline = %key,
+                    jitter_secs = start_jitter.as_secs(),
+                    "Delaying pipeline start for jitter"
+                );
+                tokio::time::sleep(start_jitter).await;
+            }
+
             let result = run_single_pipeline(
                 key.clone(),
                 pipeline_config,
                 global_sem,
+                pool,
                 poll_interval,
+                jitter_max_secs,
                 shutdown,
             )
             .await;
@@ -178,9 +209,19 @@ async fn run_single_pipeline(
     pipeline_key: PipelineKey,
     pipeline_config: PipelineConfig,
     _global_semaphore: Option<Arc<Semaphore>>,
+    storage_pool: Option<Arc<StoragePool>>,
     poll_interval: Duration,
+    poll_jitter_secs: u64,
     shutdown: CancellationToken,
 ) -> Result<PipelineStats, PipelineError> {
+    // Add jitter to poll interval for this pipeline to spread polling load
+    let effective_interval = if poll_jitter_secs > 0 {
+        let jitter_ms = rand::rng().random_range(0..poll_jitter_secs * 1000);
+        poll_interval + Duration::from_millis(jitter_ms)
+    } else {
+        poll_interval
+    };
+
     // Initialize processor, respecting shutdown signal
     let mut processor = tokio::select! {
         biased;
@@ -190,13 +231,22 @@ async fn run_single_pipeline(
             return Ok(PipelineStats::default());
         }
 
-        result = BlizzardProcessor::new(pipeline_key.clone(), pipeline_config, shutdown.clone()) => result?,
+        result = BlizzardProcessor::new(
+            pipeline_key.clone(),
+            pipeline_config,
+            storage_pool,
+            shutdown.clone(),
+        ) => result?,
     };
 
-    info!(pipeline = %pipeline_key, "Pipeline processor initialized");
+    info!(
+        pipeline = %pipeline_key,
+        poll_interval_secs = effective_interval.as_secs(),
+        "Pipeline processor initialized"
+    );
 
-    // Run the polling loop
-    run_polling_loop(&mut processor, poll_interval, shutdown).await?;
+    // Run the polling loop with jittered interval
+    run_polling_loop(&mut processor, effective_interval, shutdown).await?;
 
     Ok(processor.stats)
 }
@@ -237,17 +287,27 @@ impl BlizzardProcessor {
     async fn new(
         pipeline_key: PipelineKey,
         pipeline_config: PipelineConfig,
+        storage_pool: Option<Arc<StoragePool>>,
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
-        // Create source storage provider
-        let source_storage = Arc::new(
-            StorageProvider::for_url_with_options(
+        // Create source storage provider - use pooled if available
+        let source_storage = if let Some(pool) = &storage_pool {
+            pool.get_or_create(
                 &pipeline_config.source.path,
                 pipeline_config.source.storage_options.clone(),
             )
             .await
-            .context(StorageSnafu)?,
-        );
+            .context(StorageSnafu)?
+        } else {
+            Arc::new(
+                StorageProvider::for_url_with_options(
+                    &pipeline_config.source.path,
+                    pipeline_config.source.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?,
+            )
+        };
 
         // Create staging writer (writes directly to table directory)
         let staging_writer = StagingWriter::new(
