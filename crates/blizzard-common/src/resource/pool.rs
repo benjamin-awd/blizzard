@@ -45,26 +45,26 @@ fn extract_pool_key(url: &str) -> String {
     }
 
     // Azure HTTPS URLs: https://account.blob.core.windows.net/container/path
-    if url_lower.contains(".blob.core.windows.net")
-        || url_lower.contains(".dfs.core.windows.net")
-    {
+    if url_lower.contains(".blob.core.windows.net") || url_lower.contains(".dfs.core.windows.net") {
         // Extract account and container
-        if url_lower.starts_with("https://") {
-            let after_scheme = &url_lower[8..];
-            if let Some(dot_pos) = after_scheme.find('.') {
-                let account = &after_scheme[..dot_pos];
-                // Find container after the domain
-                if let Some(container_start) = after_scheme.find(".net/") {
-                    let after_domain = &after_scheme[container_start + 5..];
-                    let container = after_domain.split('/').next().unwrap_or("");
-                    return format!("az://{}@{}", container, account);
-                }
+        if let Some(after_scheme) = url_lower.strip_prefix("https://")
+            && let Some(dot_pos) = after_scheme.find('.')
+        {
+            let account = &after_scheme[..dot_pos];
+            // Find container after the domain
+            if let Some(container_start) = after_scheme.find(".net/") {
+                let after_domain = &after_scheme[container_start + 5..];
+                let container = after_domain.split('/').next().unwrap_or("");
+                return format!("az://{}@{}", container, account);
             }
         }
     }
 
     // Local filesystem - share one provider
-    if url_lower.starts_with("file://") || url_lower.starts_with("file:") || url_lower.starts_with('/') {
+    if url_lower.starts_with("file://")
+        || url_lower.starts_with("file:")
+        || url_lower.starts_with('/')
+    {
         return "file://".to_string();
     }
 
