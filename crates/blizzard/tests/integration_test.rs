@@ -39,7 +39,7 @@ pipelines:
         assert_eq!(pipeline.source.path, "s3://bucket/input/*.ndjson.gz");
         assert_eq!(pipeline.source.batch_size, 4096);
         assert_eq!(pipeline.sink.file_size_mb, 64);
-        assert_eq!(pipeline.schema.fields.len(), 4);
+        assert_eq!(pipeline.schema.fields().len(), 4);
 
         // Test schema conversion
         let arrow_schema = pipeline.schema.to_arrow_schema();

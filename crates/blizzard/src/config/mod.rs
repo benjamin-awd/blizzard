@@ -156,22 +156,40 @@ impl FieldType {
     }
 }
 
-/// Schema configuration.
+/// Schema configuration - either explicit fields or inference mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaConfig {
-    /// List of fields in the schema.
+    /// When true, schema is inferred from the first NDJSON file.
+    #[serde(default)]
+    pub infer: bool,
+    /// List of fields in the schema. Required unless `infer: true`.
+    #[serde(default)]
     pub fields: Vec<FieldConfig>,
 }
 
 impl SchemaConfig {
-    /// Convert to Arrow Schema.
+    /// Returns true if schema should be inferred from source data.
+    pub fn should_infer(&self) -> bool {
+        self.infer
+    }
+
+    /// Returns the explicit fields if defined.
+    pub fn fields(&self) -> &[FieldConfig] {
+        &self.fields
+    }
+
+    /// Convert to Arrow Schema. Panics if schema is set to infer mode.
     pub fn to_arrow_schema(&self) -> SchemaRef {
-        let fields: Vec<Field> = self
+        if self.infer {
+            panic!("Cannot convert infer schema config to Arrow schema")
+        }
+        let arrow_fields: Vec<Field> = self
             .fields
             .iter()
             .map(|f| Field::new(&f.name, f.field_type.to_arrow_type(), f.nullable))
             .collect();
-        Arc::new(Schema::new(fields))
+        Arc::new(Schema::new(arrow_fields))
     }
 }
 
@@ -182,7 +200,7 @@ pub struct PipelineConfig {
     pub source: SourceConfig,
     /// Sink configuration.
     pub sink: SinkConfig,
-    /// Schema configuration.
+    /// Schema configuration - either explicit fields or `infer: true`.
     pub schema: SchemaConfig,
     /// Error handling configuration.
     #[serde(default)]
@@ -320,7 +338,8 @@ impl Config {
     /// Validate the configuration.
     ///
     /// Checks:
-    /// - All pipelines have non-empty source path, table_uri, and schema
+    /// - All pipelines have non-empty source path and table_uri
+    /// - All pipelines have either explicit schema fields or `schema: { infer: true }`
     /// - No resource conflicts (e.g., two pipelines using the same source directory)
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Check for empty paths and schema
@@ -335,7 +354,16 @@ impl Config {
                     pipeline: key.id().to_string(),
                 });
             }
-            if pipeline.schema.fields.is_empty() {
+            // Validate schema configuration
+            let has_fields = !pipeline.schema.fields.is_empty();
+            let wants_infer = pipeline.schema.infer;
+
+            if wants_infer && has_fields {
+                return Err(ConfigError::SchemaConflict {
+                    pipeline: key.id().to_string(),
+                });
+            }
+            if !wants_infer && !has_fields {
                 return Err(ConfigError::EmptySchemaForPipeline {
                     pipeline: key.id().to_string(),
                 });
@@ -772,5 +800,69 @@ pipelines:
 "#;
         let result = Config::parse(yaml);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_infer_schema_valid() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+        assert!(pipeline.schema.should_infer());
+    }
+
+    #[test]
+    fn test_infer_schema_false_error() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: false
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("events"));
+        assert!(err.to_string().contains("empty schema"));
+    }
+
+    #[test]
+    fn test_schema_both_infer_and_fields_error() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+      fields:
+        - name: id
+          type: string
+"#;
+        let result = Config::parse(yaml);
+        assert!(
+            result.is_err(),
+            "Should error when both infer and fields are specified"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("cannot specify both"),
+            "Error should mention the conflict: {}",
+            err
+        );
     }
 }
