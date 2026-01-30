@@ -115,12 +115,13 @@ pub async fn run_polling_loop<P: PollingProcessor>(
         }
 
         // Wait for poll interval or shutdown
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("Shutdown requested during poll wait");
-                break;
-            }
-            _ = tokio::time::sleep(poll_interval) => {}
+        if shutdown
+            .run_until_cancelled(tokio::time::sleep(poll_interval))
+            .await
+            .is_none()
+        {
+            info!("Shutdown requested during poll wait");
+            break;
         }
     }
 

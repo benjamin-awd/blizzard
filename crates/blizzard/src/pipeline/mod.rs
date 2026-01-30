@@ -151,13 +151,13 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying pipeline start for jitter"
                 );
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => {
-                        info!(pipeline = %key, "Shutdown requested during jitter delay");
-                        return (key, Ok(PipelineStats::default()));
-                    }
-                    _ = tokio::time::sleep(start_jitter) => {}
+                if shutdown
+                    .run_until_cancelled(tokio::time::sleep(start_jitter))
+                    .await
+                    .is_none()
+                {
+                    info!(pipeline = %key, "Shutdown requested during jitter delay");
+                    return (key, Ok(PipelineStats::default()));
                 }
             }
 

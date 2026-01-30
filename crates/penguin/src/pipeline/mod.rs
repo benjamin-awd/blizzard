@@ -129,13 +129,13 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying table start for jitter"
                 );
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => {
-                        info!(table = %key, "Shutdown requested during jitter delay");
-                        return (key, Ok(PipelineStats::default()));
-                    }
-                    _ = tokio::time::sleep(start_jitter) => {}
+                if shutdown
+                    .run_until_cancelled(tokio::time::sleep(start_jitter))
+                    .await
+                    .is_none()
+                {
+                    info!(table = %key, "Shutdown requested during jitter delay");
+                    return (key, Ok(PipelineStats::default()));
                 }
             }
 
