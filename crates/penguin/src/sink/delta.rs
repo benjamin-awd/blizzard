@@ -363,13 +363,19 @@ impl DeltaSink {
             }
         }
 
-        warn!(
-            "No Blizzard checkpoint found in Delta log after scanning {} versions ({}..{}). \
-             Starting fresh - previously processed files may be re-ingested causing duplicates.",
-            current_version - start_version + 1,
-            start_version,
-            current_version
-        );
+        // Only warn if the table has commits beyond version 0, since a newly created
+        // table won't have any checkpoint and there's nothing to re-ingest
+        if current_version > 0 {
+            warn!(
+                "No Blizzard checkpoint found in Delta log after scanning {} versions ({}..{}). \
+                 Starting fresh - previously processed files may be re-ingested causing duplicates.",
+                current_version - start_version + 1,
+                start_version,
+                current_version
+            );
+        } else {
+            debug!("New Delta table (version 0), no checkpoint expected");
+        }
         Ok(None)
     }
 }
