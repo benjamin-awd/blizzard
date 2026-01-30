@@ -105,7 +105,12 @@ impl Downloader {
                 "[download] Starting {} (active: {})",
                 file_path, active_downloads
             );
-            downloads.push(Box::pin(download_file(storage, file_path, skip, pipeline_clone)));
+            downloads.push(Box::pin(download_file(
+                storage,
+                file_path,
+                skip,
+                pipeline_clone,
+            )));
         }
 
         // Process downloads and start new ones as they complete
@@ -175,15 +180,17 @@ impl Downloader {
                     "[download] Starting {} (active: {})",
                     next_file, active_downloads
                 );
-                downloads.push(Box::pin(download_file(storage, next_file, skip, pipeline_clone)));
+                downloads.push(Box::pin(download_file(
+                    storage,
+                    next_file,
+                    skip,
+                    pipeline_clone,
+                )));
             }
         }
 
         // Reset gauge to 0 on completion
-        emit!(ActiveDownloads {
-            count: 0,
-            pipeline,
-        });
+        emit!(ActiveDownloads { count: 0, pipeline });
         debug!("[download] All downloads complete");
     }
 }

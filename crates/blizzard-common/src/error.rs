@@ -101,6 +101,25 @@ pub enum ConfigError {
     /// Resource conflict detected (e.g., two tables using the same staging directory).
     #[snafu(display("Resource conflict: {message}"))]
     ResourceConflict { message: String },
+
+    /// Duplicate component keys found across config files.
+    #[snafu(display("Duplicate component keys: {}", keys.join(", ")))]
+    DuplicateComponents { keys: Vec<String> },
+
+    /// Unsupported config file format.
+    #[snafu(display("Unsupported config format for {}: only .yaml/.yml supported", path.display()))]
+    UnsupportedFormat { path: std::path::PathBuf },
+
+    /// Failed to read configuration directory.
+    #[snafu(display("Failed to read directory {}", path.display()))]
+    ReadDir {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    /// Multiple configuration errors occurred.
+    #[snafu(display("Multiple config errors:\n{}", errors.join("\n")))]
+    MultipleErrors { errors: Vec<String> },
 }
 
 // ============ Metrics Errors ============

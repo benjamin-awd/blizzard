@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::ConfigError;
 pub use blizzard_common::config::{
-    ErrorHandlingConfig, InterpolationResult, MetricsConfig, ParquetCompression, Resource,
-    interpolate,
+    ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
+    ParquetCompression, Resource, interpolate, load_from_paths,
 };
 pub use blizzard_common::{GlobalConfig, KB, MB};
 pub use pipeline_key::PipelineKey;
+
+use blizzard_common::error::ConfigError;
 
 /// Configuration for a partition filter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +241,7 @@ impl PipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Named pipeline configurations.
+    #[serde(default)]
     pub pipelines: IndexMap<PipelineKey, PipelineConfig>,
     /// Global configuration options.
     #[serde(default)]
@@ -249,7 +251,45 @@ pub struct Config {
     pub metrics: MetricsConfig,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            pipelines: IndexMap::new(),
+            global: GlobalConfig::default(),
+            metrics: MetricsConfig::default(),
+        }
+    }
+}
+
+impl Mergeable for Config {
+    type Key = PipelineKey;
+    type Component = PipelineConfig;
+
+    fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component> {
+        &mut self.pipelines
+    }
+
+    fn global_mut(&mut self) -> &mut GlobalConfig {
+        &mut self.global
+    }
+
+    fn metrics_mut(&mut self) -> &mut MetricsConfig {
+        &mut self.metrics
+    }
+
+    fn parse_yaml(contents: &str) -> Result<Self, ConfigError> {
+        serde_yaml::from_str(contents).map_err(|source| ConfigError::YamlParse { source })
+    }
+}
+
 impl Config {
+    /// Load configuration from multiple paths (files or directories).
+    pub fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
+        let config: Self = load_from_paths(paths)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Load configuration from a file.
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         let contents =

@@ -825,10 +825,14 @@ mod tests {
 
         // First create a table
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
-        let _sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string()).await.unwrap();
+        let _sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string())
+            .await
+            .unwrap();
 
         // Now try_open should succeed
-        let opened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string()).await.unwrap();
+        let opened_sink = DeltaSink::try_open(&storage, vec![], "test".to_string())
+            .await
+            .unwrap();
         assert!(opened_sink.version() >= 0);
     }
 
