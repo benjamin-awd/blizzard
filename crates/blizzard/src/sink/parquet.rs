@@ -194,6 +194,7 @@ impl ParquetWriter {
         pipeline: String,
     ) -> Result<Self, ParquetError> {
         tracing::info!(
+            pipeline = %pipeline,
             "Creating ParquetWriter with config: target_file_size={} bytes ({:.2} MB), row_group_size_bytes={} ({:.2} MB), rolling_policies={:?}",
             config.target_file_size,
             config.target_file_size as f64 / 1024.0 / 1024.0,
@@ -307,6 +308,7 @@ impl ParquetWriter {
         if in_progress_size > self.config.row_group_size_bytes {
             let buffer_len = self.buffer.len()?;
             tracing::info!(
+                pipeline = %self.pipeline,
                 "Flushing row group: in_progress_size={} bytes ({:.2} MB), threshold={} bytes ({:.2} MB), total_records={}, row_group_records={}",
                 in_progress_size,
                 in_progress_size as f64 / 1024.0 / 1024.0,
@@ -320,6 +322,7 @@ impl ParquetWriter {
             // Update bytes_written after flush
             self.stats.bytes_written = self.buffer.len()?;
             tracing::info!(
+                pipeline = %self.pipeline,
                 "After flush: buffer={} bytes ({:.2} MB), bytes_written={}",
                 buffer_len,
                 buffer_len as f64 / 1024.0 / 1024.0,
@@ -337,6 +340,7 @@ impl ParquetWriter {
 
         if should_roll {
             tracing::info!(
+                pipeline = %self.pipeline,
                 "Rolling file due to policy: current_size={} ({:.2} MB), records={}, first_write={:?} ago, last_write={:?} ago",
                 current_size,
                 current_size as f64 / 1024.0 / 1024.0,

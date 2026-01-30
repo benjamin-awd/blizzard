@@ -114,6 +114,7 @@ impl StagingWriter {
             pipeline: self.pipeline.clone(),
         });
         info!(
+            pipeline = %self.pipeline,
             "Wrote staging file: {} ({} bytes, {} records)",
             file.filename, file.size, file.record_count
         );
