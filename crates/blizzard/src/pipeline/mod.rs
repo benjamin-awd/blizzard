@@ -147,7 +147,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
             // Stagger start times, but respect shutdown signal
             if !start_jitter.is_zero() {
                 info!(
-                    pipeline = %key,
+                    target = %key,
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying pipeline start for jitter"
                 );
@@ -156,7 +156,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
                     .await
                     .is_none()
                 {
-                    info!(pipeline = %key, "Shutdown requested during jitter delay");
+                    info!(target = %key, "Shutdown requested during jitter delay");
                     return (key, Ok(PipelineStats::default()));
                 }
             }
@@ -183,14 +183,14 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
         match result {
             Ok((key, Ok(pipeline_stats))) => {
                 info!(
-                    pipeline = %key,
+                    target = %key,
                     files = pipeline_stats.files_processed,
                     "Pipeline completed successfully"
                 );
                 stats.pipelines.insert(key, pipeline_stats);
             }
             Ok((key, Err(e))) => {
-                error!(pipeline = %key, error = %e, "Pipeline failed");
+                error!(target = %key, error = %e, "Pipeline failed");
                 stats.errors.push((key, e.to_string()));
             }
             Err(e) => {
@@ -234,7 +234,7 @@ async fn run_single_pipeline(
         biased;
 
         _ = shutdown.cancelled() => {
-            info!(pipeline = %pipeline_key, "Shutdown requested during initialization");
+            info!(target = %pipeline_key, "Shutdown requested during initialization");
             return Ok(PipelineStats::default());
         }
 
@@ -247,7 +247,7 @@ async fn run_single_pipeline(
     };
 
     info!(
-        pipeline = %pipeline_key,
+        target = %pipeline_key,
         poll_interval_secs = effective_interval.as_secs(),
         "Pipeline processor initialized"
     );
@@ -419,7 +419,7 @@ impl PollingProcessor for BlizzardProcessor {
         // On cold start, we could potentially recover state from staging
         // For now, we start fresh
         if cold_start {
-            info!(pipeline = %self.pipeline_key, "Cold start - beginning fresh processing");
+            info!(target = %self.pipeline_key, "Cold start - beginning fresh processing");
         }
 
         // Generate date prefixes for efficient listing
@@ -453,7 +453,7 @@ impl PollingProcessor for BlizzardProcessor {
             })
             .collect();
 
-        info!(pipeline = %self.pipeline_key, files = pending_files.len(), "Found files to process");
+        info!(target = %self.pipeline_key, files = pending_files.len(), "Found files to process");
 
         Ok(Some(PreparedState {
             pending_files,
@@ -499,7 +499,7 @@ impl PollingProcessor for BlizzardProcessor {
         // Write to staging
         if !finished_files.is_empty() {
             info!(
-                pipeline = %self.pipeline_key,
+                target = %self.pipeline_key,
                 files = finished_files.len(),
                 "Writing files to staging"
             );
@@ -509,7 +509,7 @@ impl PollingProcessor for BlizzardProcessor {
             let bytes: usize = finished_files.iter().map(|f| f.size).sum();
             emit!(BytesWritten {
                 bytes: bytes as u64,
-                pipeline: self.pipeline_key.id().to_string(),
+                target: self.pipeline_key.id().to_string(),
             });
             self.stats.bytes_written += bytes;
         }
@@ -538,11 +538,11 @@ impl BlizzardProcessor {
         loop {
             emit!(DecompressionQueueDepth {
                 count: processing.len(),
-                pipeline: self.pipeline_key.id().to_string(),
+                target: self.pipeline_key.id().to_string(),
             });
             emit!(SourceStateFiles {
                 count: self.source_state.files.len(),
-                pipeline: self.pipeline_key.id().to_string(),
+                target: self.pipeline_key.id().to_string(),
             });
 
             tokio::select! {
@@ -550,7 +550,7 @@ impl BlizzardProcessor {
 
                 // Handle shutdown
                 _ = shutdown.cancelled() => {
-                    info!(pipeline = %self.pipeline_key, "Shutdown requested during processing");
+                    info!(target = %self.pipeline_key, "Shutdown requested during processing");
                     downloader.abort();
                     return Ok(IterationResult::Shutdown);
                 }
@@ -562,7 +562,7 @@ impl BlizzardProcessor {
                             self.handle_processed_file(processed, parquet_writer).await?;
                         }
                         Err(e) => {
-                            warn!(pipeline = %self.pipeline_key, error = %e, "File processing failed");
+                            warn!(target = %self.pipeline_key, error = %e, "File processing failed");
                             self.failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Parse)
                                 .await?;
@@ -578,7 +578,7 @@ impl BlizzardProcessor {
                             processing.push(future);
                         }
                         Some(Err(e)) => {
-                            warn!(pipeline = %self.pipeline_key, error = %e, "Download failed");
+                            warn!(target = %self.pipeline_key, error = %e, "Download failed");
                             self.failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Download)
                                 .await?;
@@ -625,20 +625,20 @@ impl BlizzardProcessor {
 
         emit!(FileProcessed {
             status: FileStatus::Success,
-            pipeline: self.pipeline_key.id().to_string(),
+            target: self.pipeline_key.id().to_string(),
         });
         emit!(RecordsProcessed {
             count: total_records as u64,
-            pipeline: self.pipeline_key.id().to_string(),
+            target: self.pipeline_key.id().to_string(),
         });
         emit!(BatchesProcessed {
             count: batch_count as u64,
-            pipeline: self.pipeline_key.id().to_string(),
+            target: self.pipeline_key.id().to_string(),
         });
 
         let short_name = path.split('/').next_back().unwrap_or(&path);
         debug!(
-            pipeline = %self.pipeline_key,
+            target = %self.pipeline_key,
             file = short_name,
             records = total_records,
             batches = batch_count,

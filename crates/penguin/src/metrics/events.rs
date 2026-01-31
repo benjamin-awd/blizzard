@@ -4,10 +4,10 @@
 //! Events implement the `InternalEvent` trait which emits the corresponding
 //! Prometheus metric.
 //!
-//! ## Table Labels
+//! ## Target Labels
 //!
-//! For multi-table deployments, metrics include a `table` label to enable
-//! per-table observability (e.g., `"events"`, `"users"`).
+//! For multi-target deployments, metrics include a `target` label to enable
+//! per-target observability (e.g., `"events"`, `"users"`).
 
 use metrics::{counter, gauge, histogram};
 use std::time::Duration;
@@ -26,64 +26,64 @@ pub trait InternalEvent {
 /// Event emitted when a Delta Lake commit completes.
 pub struct DeltaCommitCompleted {
     pub duration: Duration,
-    /// Table label for multi-table deployments.
-    pub table: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for DeltaCommitCompleted {
     fn emit(self) {
         trace!(
             duration_ms = self.duration.as_millis(),
-            table = %self.table,
+            target = %self.target,
             "Delta commit completed"
         );
-        histogram!("penguin_delta_commit_duration_seconds", "table" => self.table)
+        histogram!("penguin_delta_commit_duration_seconds", "target" => self.target)
             .record(self.duration.as_secs_f64());
     }
 }
 
 /// Event emitted when files are committed to Delta Lake.
 pub struct FilesCommitted {
-    /// Table identifier for multi-table deployments.
-    pub table: String,
+    /// Target identifier for multi-target deployments.
+    pub target: String,
     /// Number of files committed.
     pub count: u64,
 }
 
 impl InternalEvent for FilesCommitted {
     fn emit(self) {
-        trace!(table = %self.table, count = self.count, "Files committed");
-        counter!("penguin_files_committed_total", "table" => self.table).increment(self.count);
+        trace!(target = %self.target, count = self.count, "Files committed");
+        counter!("penguin_files_committed_total", "target" => self.target).increment(self.count);
     }
 }
 
 /// Event emitted when records are committed to Delta Lake.
 pub struct RecordsCommitted {
-    /// Table identifier for multi-table deployments.
-    pub table: String,
+    /// Target identifier for multi-target deployments.
+    pub target: String,
     /// Number of records committed.
     pub count: u64,
 }
 
 impl InternalEvent for RecordsCommitted {
     fn emit(self) {
-        trace!(table = %self.table, count = self.count, "Records committed");
-        counter!("penguin_records_committed_total", "table" => self.table).increment(self.count);
+        trace!(target = %self.target, count = self.count, "Records committed");
+        counter!("penguin_records_committed_total", "target" => self.target).increment(self.count);
     }
 }
 
 /// Event emitted to track the current Delta table version.
 pub struct DeltaTableVersion {
-    /// Table identifier for multi-table deployments.
-    pub table: String,
+    /// Target identifier for multi-target deployments.
+    pub target: String,
     /// Current table version.
     pub version: i64,
 }
 
 impl InternalEvent for DeltaTableVersion {
     fn emit(self) {
-        trace!(table = %self.table, version = self.version, "Delta table version");
-        gauge!("penguin_delta_table_version", "table" => self.table).set(self.version as f64);
+        trace!(target = %self.target, version = self.version, "Delta table version");
+        gauge!("penguin_delta_table_version", "target" => self.target).set(self.version as f64);
     }
 }
 
@@ -93,16 +93,16 @@ impl InternalEvent for DeltaTableVersion {
 
 /// Event emitted when schema evolution occurs.
 pub struct SchemaEvolved {
-    /// Table identifier for multi-table deployments.
-    pub table: String,
+    /// Target identifier for multi-target deployments.
+    pub target: String,
     /// The action taken: "merge", "overwrite", or "none".
     pub action: String,
 }
 
 impl InternalEvent for SchemaEvolved {
     fn emit(self) {
-        trace!(table = %self.table, action = %self.action, "Schema evolved");
-        counter!("penguin_schema_evolutions_total", "table" => self.table, "action" => self.action)
+        trace!(target = %self.target, action = %self.action, "Schema evolved");
+        counter!("penguin_schema_evolutions_total", "target" => self.target, "action" => self.action)
             .increment(1);
     }
 }
@@ -113,29 +113,29 @@ impl InternalEvent for SchemaEvolved {
 
 /// Event emitted when the number of pending files changes.
 pub struct PendingFiles {
-    /// Table identifier for multi-table deployments.
-    pub table: String,
+    /// Target identifier for multi-target deployments.
+    pub target: String,
     /// Number of files pending commit.
     pub count: usize,
 }
 
 impl InternalEvent for PendingFiles {
     fn emit(self) {
-        trace!(table = %self.table, count = self.count, "Pending files");
-        gauge!("penguin_pending_files", "table" => self.table).set(self.count as f64);
+        trace!(target = %self.target, count = self.count, "Pending files");
+        gauge!("penguin_pending_files", "target" => self.target).set(self.count as f64);
     }
 }
 
 /// Event emitted when a file is moved to committed in staging.
 pub struct StagingFileCommitted {
-    /// Table label for multi-table deployments.
-    pub table: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for StagingFileCommitted {
     fn emit(self) {
-        trace!(table = %self.table, "Staging file committed");
-        counter!("penguin_staging_files_committed_total", "table" => self.table).increment(1);
+        trace!(target = %self.target, "Staging file committed");
+        counter!("penguin_staging_files_committed_total", "target" => self.target).increment(1);
     }
 }
 

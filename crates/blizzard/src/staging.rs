@@ -111,10 +111,10 @@ impl StagingWriter {
 
         emit!(StagingFileWritten {
             bytes: file.size,
-            pipeline: self.pipeline.clone(),
+            target: self.pipeline.clone(),
         });
         info!(
-            pipeline = %self.pipeline,
+            target = %self.pipeline,
             "Wrote staging file: {} ({} bytes, {} records)",
             file.filename, file.size, file.record_count
         );

@@ -68,7 +68,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             biased;
 
             _ = shutdown_clone.cancelled() => {
-                info!(name, "Shutdown requested during initialization");
+                info!(target = name, "Shutdown requested during initialization");
                 return Ok(());
             }
 
@@ -87,7 +87,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                     biased;
 
                     _ = shutdown_clone.cancelled() => {
-                        info!(name, "Shutdown requested during processing");
+                        info!(target = name, "Shutdown requested during processing");
                         IterationResult::Shutdown
                     }
 
@@ -95,7 +95,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                 }
             }
             None => {
-                info!(name, "No items to process");
+                info!(target = name, "No items to process");
                 IterationResult::NoItems
             }
         };
@@ -105,14 +105,14 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             IterationResult::Shutdown => break,
             IterationResult::NoItems => {
                 info!(
-                    name,
+                    target = name,
                     "No new items, waiting {}s before next poll",
                     poll_interval.as_secs()
                 );
             }
             IterationResult::ProcessedItems => {
                 info!(
-                    name,
+                    target = name,
                     "Iteration complete, waiting {}s before next poll",
                     poll_interval.as_secs()
                 );
@@ -125,7 +125,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             .await
             .is_none()
         {
-            info!(name, "Shutdown requested during poll wait");
+            info!(target = name, "Shutdown requested during poll wait");
             break;
         }
     }

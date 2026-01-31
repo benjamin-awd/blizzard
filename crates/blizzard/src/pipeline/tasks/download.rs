@@ -99,7 +99,7 @@ impl Downloader {
             active_downloads += 1;
             emit!(ActiveDownloads {
                 count: active_downloads,
-                pipeline: pipeline.clone(),
+                target: pipeline.clone(),
             });
             debug!(
                 "[download] Starting {} (active: {})",
@@ -125,7 +125,7 @@ impl Downloader {
             active_downloads -= 1;
             emit!(ActiveDownloads {
                 count: active_downloads,
-                pipeline: pipeline.clone(),
+                target: pipeline.clone(),
             });
 
             // Update utilization state: waiting if no active downloads
@@ -174,7 +174,7 @@ impl Downloader {
                 active_downloads += 1;
                 emit!(ActiveDownloads {
                     count: active_downloads,
-                    pipeline: pipeline.clone(),
+                    target: pipeline.clone(),
                 });
                 debug!(
                     "[download] Starting {} (active: {})",
@@ -190,7 +190,10 @@ impl Downloader {
         }
 
         // Reset gauge to 0 on completion
-        emit!(ActiveDownloads { count: 0, pipeline });
+        emit!(ActiveDownloads {
+            count: 0,
+            target: pipeline
+        });
         debug!("[download] All downloads complete");
     }
 }
@@ -206,7 +209,7 @@ async fn download_file(
     let compressed_data = storage.get(path.as_str()).await?;
     emit!(FileDownloadCompleted {
         duration: start.elapsed(),
-        pipeline,
+        target: pipeline,
     });
     Ok(DownloadedFile {
         path,

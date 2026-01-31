@@ -81,13 +81,13 @@ pub async fn infer_schema_from_first_file(
         let uuid = extract_uuid(&file.filename);
         let staging_path = format!("_staging/pending/{}.parquet", uuid);
 
-        debug!(table = %table, "Attempting to infer schema from staging file: {}", staging_path);
+        debug!(target = %table, "Attempting to infer schema from staging file: {}", staging_path);
 
         match storage.get(staging_path.as_str()).await {
             Ok(bytes) => match infer_schema_from_parquet_bytes(&bytes) {
                 Ok(schema) => {
                     debug!(
-                        table = %table,
+                        target = %table,
                         "Successfully inferred schema with {} fields from {}",
                         schema.fields().len(),
                         staging_path
@@ -96,7 +96,7 @@ pub async fn infer_schema_from_first_file(
                 }
                 Err(e) => {
                     warn!(
-                        table = %table,
+                        target = %table,
                         "Failed to parse parquet schema from {}: {}",
                         staging_path, e
                     );
@@ -104,7 +104,7 @@ pub async fn infer_schema_from_first_file(
                 }
             },
             Err(e) => {
-                warn!(table = %table, "Failed to read file {}: {}", staging_path, e);
+                warn!(target = %table, "Failed to read file {}: {}", staging_path, e);
                 last_error = Some(SchemaError::StorageRead { source: e });
             }
         }

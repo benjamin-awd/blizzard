@@ -125,7 +125,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
             // Stagger start times, but respect shutdown signal
             if !start_jitter.is_zero() {
                 info!(
-                    table = %key,
+                    target = %key,
                     jitter_secs = start_jitter.as_secs(),
                     "Delaying table start for jitter"
                 );
@@ -134,7 +134,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
                     .await
                     .is_none()
                 {
-                    info!(table = %key, "Shutdown requested during jitter delay");
+                    info!(target = %key, "Shutdown requested during jitter delay");
                     return (key, Ok(PipelineStats::default()));
                 }
             }
@@ -160,11 +160,11 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
     while let Some(result) = handles.join_next().await {
         match result {
             Ok((key, Ok(table_stats))) => {
-                info!(table = %key, files = table_stats.files_committed, "Table completed successfully");
+                info!(target = %key, files = table_stats.files_committed, "Table completed successfully");
                 stats.tables.insert(key, table_stats);
             }
             Ok((key, Err(e))) => {
-                error!(table = %key, error = %e, "Table failed");
+                error!(target = %key, error = %e, "Table failed");
                 stats.errors.push((key, e.to_string()));
             }
             Err(e) => {
@@ -208,7 +208,7 @@ async fn run_single_table(
         biased;
 
         _ = shutdown.cancelled() => {
-            info!(table = %table_key, "Shutdown requested during initialization");
+            info!(target = %table_key, "Shutdown requested during initialization");
             return Ok(PipelineStats::default());
         }
 
@@ -221,7 +221,7 @@ async fn run_single_table(
     };
 
     info!(
-        table = %table_key,
+        target = %table_key,
         poll_interval_secs = effective_interval.as_secs(),
         "Table processor initialized"
     );
@@ -309,11 +309,11 @@ impl PenguinProcessor {
         .await
         {
             Ok(sink) => {
-                info!(table = %table_key, "Opened existing Delta table");
+                info!(target = %table_key, "Opened existing Delta table");
                 Some(sink)
             }
             Err(e) if e.is_table_not_found() => {
-                info!(table = %table_key, "No existing Delta table found, will create on first file");
+                info!(target = %table_key, "No existing Delta table found, will create on first file");
                 None
             }
             Err(e) => return Err(e.into()),
@@ -352,9 +352,9 @@ impl PenguinProcessor {
         .await?;
 
         if self.delta_sink.is_none() {
-            info!(table = %self.table_key, "Creating new Delta table with inferred schema");
+            info!(target = %self.table_key, "Creating new Delta table with inferred schema");
             info!(
-                table = %self.table_key,
+                target = %self.table_key,
                 fields = incoming_schema.fields().len(),
                 field_names = ?incoming_schema
                     .fields()
@@ -399,7 +399,7 @@ impl PenguinProcessor {
                     .map(|f| f.name().as_str())
                     .collect();
                 info!(
-                    table = %self.table_key,
+                    target = %self.table_key,
                     new_fields = new_field_names.len(),
                     field_names = ?new_field_names,
                     "Schema evolution: adding new fields"
@@ -407,7 +407,7 @@ impl PenguinProcessor {
             }
             EvolutionAction::Overwrite { new_schema } => {
                 info!(
-                    table = %self.table_key,
+                    target = %self.table_key,
                     fields = new_schema.fields().len(),
                     "Schema evolution: overwriting schema"
                 );
@@ -434,7 +434,7 @@ impl PollingProcessor for PenguinProcessor {
             return Ok(None);
         }
 
-        info!(table = %self.table_key, files = pending_files.len(), "Found files to commit");
+        info!(target = %self.table_key, files = pending_files.len(), "Found files to commit");
 
         // Ensure delta sink exists (creates table with inferred schema if needed)
         self.ensure_delta_sink(&pending_files).await?;
@@ -442,7 +442,7 @@ impl PollingProcessor for PenguinProcessor {
         // On cold start, recover checkpoint from Delta log
         // This must happen AFTER ensure_delta_sink so we have a table to read from
         if cold_start {
-            info!(table = %self.table_key, "Cold start - recovering checkpoint from Delta log");
+            info!(target = %self.table_key, "Cold start - recovering checkpoint from Delta log");
             let delta_sink = self
                 .delta_sink
                 .as_mut()
@@ -452,10 +452,10 @@ impl PollingProcessor for PenguinProcessor {
                 .restore_from_delta_log(delta_sink)
                 .await
             {
-                Ok(true) => info!(table = %self.table_key, "Recovered checkpoint from Delta log"),
-                Ok(false) => info!(table = %self.table_key, "No checkpoint found, starting fresh"),
+                Ok(true) => info!(target = %self.table_key, "Recovered checkpoint from Delta log"),
+                Ok(false) => info!(target = %self.table_key, "No checkpoint found, starting fresh"),
                 Err(e) => {
-                    tracing::warn!(table = %self.table_key, error = %e, "Failed to recover checkpoint, starting fresh");
+                    tracing::warn!(target = %self.table_key, error = %e, "Failed to recover checkpoint, starting fresh");
                 }
             }
         }
@@ -468,7 +468,7 @@ impl PollingProcessor for PenguinProcessor {
 
         // Emit pending files metric
         emit!(PendingFiles {
-            table: self.table_key.id().to_string(),
+            target: self.table_key.id().to_string(),
             count: pending_files.len(),
         });
 
@@ -483,7 +483,7 @@ impl PollingProcessor for PenguinProcessor {
         for file in &pending_files {
             if let Err(e) = self.staging_reader.move_to_table(file).await {
                 tracing::warn!(
-                    table = %self.table_key,
+                    target = %self.table_key,
                     file = %file.filename,
                     error = %e,
                     "Failed to move parquet from staging to table, skipping file"
@@ -508,7 +508,7 @@ impl PollingProcessor for PenguinProcessor {
             for file in &files_to_commit {
                 if let Err(e) = self.staging_reader.archive_meta(file).await {
                     // Non-fatal: file is committed, meta archive is just for debugging
-                    tracing::warn!(table = %self.table_key, error = %e, "Failed to archive metadata");
+                    tracing::warn!(target = %self.table_key, error = %e, "Failed to archive metadata");
                 }
 
                 // Update stats
@@ -525,20 +525,20 @@ impl PollingProcessor for PenguinProcessor {
 
             // Emit metrics for committed files
             emit!(FilesCommitted {
-                table: self.table_key.id().to_string(),
+                target: self.table_key.id().to_string(),
                 count: committed_count as u64,
             });
             emit!(RecordsCommitted {
-                table: self.table_key.id().to_string(),
+                target: self.table_key.id().to_string(),
                 count: self.stats.records_committed as u64,
             });
             emit!(DeltaTableVersion {
-                table: self.table_key.id().to_string(),
+                target: self.table_key.id().to_string(),
                 version: delta_sink.version(),
             });
 
             info!(
-                table = %self.table_key,
+                target = %self.table_key,
                 files = committed_count,
                 version = delta_sink.version(),
                 "Committed files to Delta Lake"
@@ -547,7 +547,7 @@ impl PollingProcessor for PenguinProcessor {
 
         // Reset pending files gauge after processing
         emit!(PendingFiles {
-            table: self.table_key.id().to_string(),
+            target: self.table_key.id().to_string(),
             count: 0,
         });
 

@@ -85,7 +85,7 @@ impl NdjsonReader {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
-            pipeline: self.pipeline.clone(),
+            target: self.pipeline.clone(),
         });
 
         let start = Instant::now();
@@ -153,7 +153,7 @@ impl NdjsonReader {
 
         emit!(FileDecompressionCompleted {
             duration: start.elapsed(),
-            pipeline: self.pipeline.clone(),
+            target: self.pipeline.clone(),
         });
 
         debug!(
