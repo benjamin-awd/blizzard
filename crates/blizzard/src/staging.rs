@@ -25,7 +25,7 @@ use object_store::PutPayload;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 use blizzard_common::FinishedFile;
 use blizzard_common::StorageProvider;
@@ -51,6 +51,12 @@ impl TableWriter {
         storage_options: HashMap<String, String>,
         pipeline: String,
     ) -> Result<Self, StagingError> {
+        debug!(
+            target = %pipeline,
+            table_uri = %table_uri,
+            storage_options = ?storage_options,
+            "Creating TableWriter"
+        );
         let storage = StorageProvider::for_url_with_options(table_uri, storage_options)
             .await
             .context(StagingWriteSnafu)?;
