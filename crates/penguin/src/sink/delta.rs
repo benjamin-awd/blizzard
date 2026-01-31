@@ -295,6 +295,23 @@ impl DeltaSink {
         Ok(())
     }
 
+    /// Get all committed file paths from the Delta table snapshot.
+    ///
+    /// Returns a set of paths (relative to table root) for all files
+    /// currently in the table. This is used to cross-check against
+    /// incoming files to avoid double-commits.
+    pub fn get_committed_paths(&self) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+
+        match self.table.get_file_uris() {
+            Ok(iter) => iter.collect(),
+            Err(e) => {
+                warn!(target = %self.table_name, "Failed to get committed paths: {}", e);
+                HashSet::new()
+            }
+        }
+    }
+
     /// Recover checkpoint state from the Delta transaction log.
     ///
     /// Scans the transaction log backwards from the latest version looking for
@@ -755,9 +772,10 @@ mod tests {
         source_state.update_records("file1.ndjson.gz", 100);
 
         let checkpoint = CheckpointState {
-            schema_version: 1,
+            schema_version: 2,
             source_state,
             delta_version: 5,
+            watermark: None,
         };
 
         let action = create_txn_action(&checkpoint, 42).unwrap();
@@ -779,9 +797,10 @@ mod tests {
         source_state.mark_finished("file2.ndjson.gz");
 
         let original = CheckpointState {
-            schema_version: 1,
+            schema_version: 2,
             source_state,
             delta_version: 10,
+            watermark: Some("date=2024-01-28/uuid.parquet".to_string()),
         };
 
         // Create Txn action
@@ -798,6 +817,7 @@ mod tests {
             assert_eq!(restored.schema_version, original.schema_version);
             assert_eq!(restored.delta_version, original.delta_version);
             assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
+            assert_eq!(restored.watermark, original.watermark);
         } else {
             panic!("Expected Txn action");
         }

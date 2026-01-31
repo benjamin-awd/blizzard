@@ -48,9 +48,10 @@ async fn test_checkpoint_commit_and_recovery() {
     source_state1.update_records("file1.ndjson.gz", 100);
 
     let checkpoint1 = CheckpointState {
-        schema_version: 1,
+        schema_version: 2,
         source_state: source_state1,
         delta_version: 0,
+        watermark: None,
     };
 
     delta_sink
@@ -74,9 +75,10 @@ async fn test_checkpoint_commit_and_recovery() {
     source_state2.update_records("file2.ndjson.gz", 200);
 
     let checkpoint2 = CheckpointState {
-        schema_version: 1,
+        schema_version: 2,
         source_state: source_state2,
         delta_version: delta_sink.version(),
+        watermark: None,
     };
 
     delta_sink
@@ -252,9 +254,10 @@ async fn test_lazy_schema_inference_creates_correct_table() {
 
     // Step 5: Commit the parquet file
     let checkpoint = CheckpointState {
-        schema_version: 1,
+        schema_version: 2,
         source_state: SourceState::new(),
         delta_version: 0,
+        watermark: None,
     };
 
     delta_sink

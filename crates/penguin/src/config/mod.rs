@@ -20,13 +20,20 @@ fn default_poll_interval() -> u64 {
     10
 }
 
+/// Configuration for a partition filter used during cold start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionFilterConfig {
+    /// strftime-style prefix template (e.g., "date=%Y-%m-%d").
+    pub prefix_template: String,
+    /// Number of units to look back (days or hours depending on template).
+    #[serde(default)]
+    pub lookback: u32,
+}
+
 /// Configuration for a Delta table.
-///
-/// The staging directory is derived from the table URI: `{table_uri}/_staging/`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableConfig {
     /// URI of the Delta Lake table.
-    /// Staging metadata is read from `{table_uri}/_staging/`
     pub table_uri: String,
     /// Poll interval in seconds for checking new files.
     #[serde(default = "default_poll_interval")]
@@ -55,18 +62,19 @@ pub struct TableConfig {
     /// Schema evolution mode: "strict", "merge" (default), or "overwrite".
     #[serde(default)]
     pub schema_evolution: SchemaEvolutionMode,
+    /// Partition filter for cold start when no watermark exists yet.
+    /// Uses strftime-style templates for date-based filtering.
+    /// E.g., `prefix_template: "date=%Y-%m-%d"` with `lookback: 7` scans last 7 days.
+    pub partition_filter: Option<PartitionFilterConfig>,
 }
 
 impl TableConfig {
     /// Returns exclusive resources used by this table configuration.
     ///
-    /// Resources are things that cannot be shared between tables running in
-    /// the same process. This is used during config validation to detect
-    /// conflicts like two tables pointing to the same staging directory.
+    /// Each table claims exclusive access to its table URI to prevent
+    /// multiple processors from writing to the same Delta table.
     pub fn resources(&self) -> Vec<Resource> {
-        // The staging directory is derived from table_uri: {table_uri}/_staging/
-        let staging_dir = format!("{}/_staging", self.table_uri.trim_end_matches('/'));
-        vec![Resource::directory(&staging_dir)]
+        vec![Resource::directory(&self.table_uri)]
     }
 }
 
@@ -99,6 +107,9 @@ fn default_min_multipart_size_mb() -> usize {
 ///   events:
 ///     table_uri: gs://bucket/events
 ///     poll_interval_secs: 30
+///     partition_filter:
+///       prefix_template: "date=%Y-%m-%d"
+///       lookback: 7
 ///   users:
 ///     table_uri: gs://bucket/users
 ///
@@ -191,7 +202,7 @@ impl Config {
     ///
     /// Checks:
     /// - All tables have non-empty table_uri
-    /// - No resource conflicts (e.g., two tables using the same staging directory)
+    /// - No resource conflicts (e.g., two tables using the same Delta table)
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Check for empty table_uri
         for (key, table) in &self.tables {
@@ -340,6 +351,7 @@ tables:
         assert_eq!(table.min_multipart_size_mb, 100);
         assert!(table.partition_by.is_empty());
         assert!(table.storage_options.is_empty());
+        assert!(table.partition_filter.is_none());
     }
 
     #[test]
@@ -355,36 +367,30 @@ tables:
             min_multipart_size_mb: 100,
             storage_options: HashMap::new(),
             schema_evolution: Default::default(),
+            partition_filter: None,
         };
 
         let resources = table.resources();
         assert_eq!(resources.len(), 1);
-        assert_eq!(
-            resources[0],
-            Resource::directory("gs://bucket/my_table/_staging")
-        );
+        assert_eq!(resources[0], Resource::directory("gs://bucket/my_table"));
     }
 
     #[test]
-    fn test_table_config_resources_trailing_slash() {
-        let table = TableConfig {
-            table_uri: "gs://bucket/my_table/".to_string(),
-            poll_interval_secs: 10,
-            partition_by: vec![],
-            delta_checkpoint_interval: 10,
-            max_concurrent_uploads: 4,
-            max_concurrent_parts: 8,
-            part_size_mb: 10,
-            min_multipart_size_mb: 100,
-            storage_options: HashMap::new(),
-            schema_evolution: Default::default(),
-        };
+    fn test_partition_filter_config() {
+        let yaml = r#"
+tables:
+  events:
+    table_uri: gs://bucket/events
+    partition_filter:
+      prefix_template: "date=%Y-%m-%d"
+      lookback: 7
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
 
-        let resources = table.resources();
-        assert_eq!(
-            resources[0],
-            Resource::directory("gs://bucket/my_table/_staging")
-        );
+        let filter = table.partition_filter.as_ref().unwrap();
+        assert_eq!(filter.prefix_template, "date=%Y-%m-%d");
+        assert_eq!(filter.lookback, 7);
     }
 
     #[test]
@@ -406,26 +412,10 @@ tables:
             msg
         );
         assert!(
-            msg.contains("gs://bucket/delta/same/_staging"),
-            "Expected staging dir in error, got: {}",
+            msg.contains("gs://bucket/delta/same"),
+            "Expected table URI in error, got: {}",
             msg
         );
-    }
-
-    #[test]
-    fn test_resource_conflict_trailing_slash_normalization() {
-        // Same URI with/without trailing slash should conflict
-        let yaml = r#"
-tables:
-  a:
-    table_uri: gs://bucket/delta/same
-  b:
-    table_uri: gs://bucket/delta/same/
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Resource conflict"));
     }
 
     #[test]

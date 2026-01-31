@@ -79,21 +79,13 @@ pub enum ParquetError {
     BufferInUse,
 }
 
-/// Errors that can occur during staging directory operations.
+/// Errors that can occur during table write operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum StagingError {
-    /// Failed to write staging file.
-    #[snafu(display("Failed to write staging file: {source}"))]
+    /// Failed to write file to table.
+    #[snafu(display("Failed to write file to table: {source}"))]
     StagingWrite { source: StorageError },
-
-    /// Failed to serialize metadata.
-    #[snafu(display("Failed to serialize staging metadata: {source}"))]
-    Serialize { source: serde_json::Error },
-
-    /// Failed to create staging directory.
-    #[snafu(display("Failed to create staging directory: {source}"))]
-    CreateDir { source: std::io::Error },
 }
 
 /// Top-level pipeline errors.

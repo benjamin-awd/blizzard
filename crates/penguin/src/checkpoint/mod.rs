@@ -36,6 +36,8 @@ macro_rules! emit {
 struct CheckpointStateInner {
     source_state: SourceState,
     delta_version: i64,
+    /// High-watermark for incoming mode.
+    watermark: Option<String>,
 }
 
 /// A coordinator that manages checkpoint state for atomic commits.
@@ -58,6 +60,7 @@ impl CheckpointCoordinator {
             state: Arc::new(Mutex::new(CheckpointStateInner {
                 source_state: SourceState::new(),
                 delta_version: -1,
+                watermark: None,
             })),
             last_checkpoint: Arc::new(Mutex::new(Instant::now())),
             commits_since_delta_checkpoint: Arc::new(Mutex::new(0)),
@@ -74,10 +77,14 @@ impl CheckpointCoordinator {
         let file_count = checkpoint.source_state.files.len();
         state.source_state = checkpoint.source_state;
         state.delta_version = checkpoint.delta_version;
+        state.watermark = checkpoint.watermark;
         emit!(SourceStateFiles {
             count: file_count,
             target: self.table.clone(),
         });
+        if let Some(ref wm) = state.watermark {
+            info!(target = %self.table, watermark = %wm, "Restored watermark from checkpoint");
+        }
     }
 
     /// Update the source state for a file.
@@ -118,10 +125,24 @@ impl CheckpointCoordinator {
     pub async fn capture_state(&self) -> CheckpointState {
         let state = self.state.lock().await;
         CheckpointState {
-            schema_version: 1,
+            schema_version: 2,
             source_state: state.source_state.clone(),
             delta_version: state.delta_version,
+            watermark: state.watermark.clone(),
         }
+    }
+
+    /// Get the current watermark.
+    pub async fn watermark(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        state.watermark.clone()
+    }
+
+    /// Update the watermark to the given path.
+    pub async fn update_watermark(&self, watermark: String) {
+        let mut state = self.state.lock().await;
+        debug!(target = %self.table, new_watermark = %watermark, "Updating watermark");
+        state.watermark = Some(watermark);
     }
 
     /// Restore checkpoint state from the Delta transaction log.
@@ -250,17 +271,22 @@ mod tests {
         source_state.mark_finished("file2.ndjson.gz");
 
         let state = CheckpointState {
-            schema_version: 1,
+            schema_version: 2,
             source_state,
             delta_version: 5,
+            watermark: Some("date=2024-01-28/uuid.parquet".to_string()),
         };
 
         let json = serde_json::to_string(&state).unwrap();
         let restored: CheckpointState = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(restored.schema_version, 1);
+        assert_eq!(restored.schema_version, 2);
         assert_eq!(restored.delta_version, 5);
         assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
+        assert_eq!(
+            restored.watermark,
+            Some("date=2024-01-28/uuid.parquet".to_string())
+        );
     }
 
     #[tokio::test]
@@ -279,7 +305,7 @@ mod tests {
         // Capture state
         let captured = coordinator.capture_state().await;
 
-        assert_eq!(captured.schema_version, 1);
+        assert_eq!(captured.schema_version, 2);
         assert_eq!(captured.delta_version, 5);
         assert!(captured.source_state.is_file_finished("file2.ndjson.gz"));
         assert!(!captured.source_state.is_file_finished("file1.ndjson.gz"));

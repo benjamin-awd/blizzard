@@ -1,10 +1,10 @@
-//! Blizzard: File loader for streaming NDJSON.gz files to Parquet staging.
+//! Blizzard: File loader for streaming NDJSON.gz files to Parquet.
 //!
 //! This crate handles:
 //! - Reading compressed NDJSON files from cloud storage (S3, GCS, Azure, local)
 //! - Parsing and validating records against a schema
 //! - Writing Parquet files with rolling policies
-//! - Writing finished files to a staging directory for penguin to commit
+//! - Writing finished files directly to Delta table directories
 //! - Dead letter queue for failed records
 
 pub mod config;
