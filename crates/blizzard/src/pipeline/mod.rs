@@ -34,7 +34,7 @@ use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 use crate::sink::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
-use crate::staging::StagingWriter;
+use crate::staging::TableWriter;
 
 use tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
 
@@ -47,8 +47,8 @@ pub struct PipelineStats {
     pub records_processed: usize,
     /// Total bytes written to Parquet.
     pub bytes_written: usize,
-    /// Files written to staging.
-    pub staging_files_written: usize,
+    /// Parquet files written to table.
+    pub parquet_files_written: usize,
 }
 
 /// Statistics from a multi-pipeline run.
@@ -83,11 +83,11 @@ impl MultiPipelineStats {
         self.pipelines.values().map(|s| s.bytes_written).sum()
     }
 
-    /// Returns the total staging files written across all pipelines.
-    pub fn total_staging_files_written(&self) -> usize {
+    /// Returns the total parquet files written across all pipelines.
+    pub fn total_parquet_files_written(&self) -> usize {
         self.pipelines
             .values()
-            .map(|s| s.staging_files_written)
+            .map(|s| s.parquet_files_written)
             .sum()
     }
 }
@@ -280,8 +280,8 @@ struct BlizzardProcessor {
     pipeline_config: PipelineConfig,
     /// Storage provider for reading source files.
     source_storage: StorageProviderRef,
-    /// Writer for staging metadata and parquet files.
-    staging_writer: StagingWriter,
+    /// Writer for parquet files directly to table directory.
+    table_writer: TableWriter,
     /// Arrow schema (from config or inferred).
     schema: deltalake::arrow::datatypes::SchemaRef,
     /// NDJSON reader with schema validation.
@@ -322,8 +322,8 @@ impl BlizzardProcessor {
             )
         };
 
-        // Create staging writer (writes directly to table directory)
-        let staging_writer = StagingWriter::new(
+        // Create table writer (writes parquet directly to table directory)
+        let table_writer = TableWriter::new(
             &pipeline_config.sink.table_uri,
             pipeline_config.sink.storage_options.clone(),
             pipeline_key.id().to_string(),
@@ -371,7 +371,7 @@ impl BlizzardProcessor {
             pipeline_key,
             pipeline_config,
             source_storage,
-            staging_writer,
+            table_writer,
             schema,
             reader,
             source_state: SourceState::new(),
@@ -496,15 +496,15 @@ impl PollingProcessor for BlizzardProcessor {
         // Close the writer and get finished files
         let finished_files = parquet_writer.close()?;
 
-        // Write to staging
+        // Write parquet files to table directory
         if !finished_files.is_empty() {
             info!(
                 target = %self.pipeline_key,
                 files = finished_files.len(),
-                "Writing files to staging"
+                "Writing parquet files to table"
             );
-            self.staging_writer.write_files(&finished_files).await?;
-            self.stats.staging_files_written += finished_files.len();
+            self.table_writer.write_files(&finished_files).await?;
+            self.stats.parquet_files_written += finished_files.len();
 
             let bytes: usize = finished_files.iter().map(|f| f.size).sum();
             emit!(BytesWritten {
@@ -648,8 +648,8 @@ impl BlizzardProcessor {
         // Write any finished files to staging
         let finished = parquet_writer.take_finished_files();
         if !finished.is_empty() {
-            self.staging_writer.write_files(&finished).await?;
-            self.stats.staging_files_written += finished.len();
+            self.table_writer.write_files(&finished).await?;
+            self.stats.parquet_files_written += finished.len();
         }
 
         Ok(())

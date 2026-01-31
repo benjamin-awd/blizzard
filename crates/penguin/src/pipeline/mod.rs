@@ -1,4 +1,4 @@
-//! Pipeline for watching staging and committing to Delta Lake.
+//! Pipeline for discovering parquet files and committing to Delta Lake.
 //!
 //! This module implements the main processing loop using the PollingProcessor
 //! trait from blizzard-common. It supports running multiple Delta tables
@@ -28,10 +28,10 @@ use crate::config::{Config, TableConfig, TableKey};
 use crate::error::{
     AddressParseSnafu, DeltaSinkNotInitializedSnafu, MetricsSnafu, PipelineError, StorageSnafu,
 };
+use crate::incoming::{IncomingConfig, IncomingReader};
 use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
-use crate::staging::StagingReader;
 
 /// Statistics from a single table's pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -234,8 +234,8 @@ async fn run_single_table(
 
 /// State prepared for a single processing iteration.
 struct PreparedState {
-    /// Pending files to process.
-    pending_files: Vec<FinishedFile>,
+    /// Files discovered in the table directory to commit.
+    files: Vec<FinishedFile>,
 }
 
 /// The penguin delta checkpointer pipeline processor.
@@ -247,10 +247,10 @@ struct PenguinProcessor {
     table_key: TableKey,
     /// Configuration for this specific table.
     table_config: TableConfig,
-    /// Reader for staging metadata files.
-    staging_reader: StagingReader,
+    /// Reader for discovering uncommitted parquet files.
+    file_reader: IncomingReader,
     /// Storage provider for the Delta table.
-    sink_storage: StorageProvider,
+    sink_storage: Arc<StorageProvider>,
     /// Delta Lake sink (lazily initialized on first file).
     delta_sink: Option<DeltaSink>,
     /// Coordinator for checkpoint management.
@@ -270,35 +270,33 @@ impl PenguinProcessor {
         global_semaphore: Option<Arc<Semaphore>>,
         storage_pool: Option<Arc<StoragePool>>,
     ) -> Result<Self, PipelineError> {
-        // Create staging reader (reads from {table_uri}/_staging/)
-        let staging_reader = StagingReader::new(
-            &table_config.table_uri,
-            table_config.storage_options.clone(),
-            table_key.id().to_string(),
-        )
-        .await
-        .context(StorageSnafu)?;
-
         // Create sink storage provider - use pooled if available
         let sink_storage = if let Some(pool) = &storage_pool {
-            // Note: get_or_create returns Arc<StorageProvider>, but we need StorageProvider
-            // We clone the inner provider since StoragePool returns Arc
-            (*pool
-                .get_or_create(
-                    &table_config.table_uri,
-                    table_config.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?)
-            .clone()
-        } else {
-            StorageProvider::for_url_with_options(
+            pool.get_or_create(
                 &table_config.table_uri,
                 table_config.storage_options.clone(),
             )
             .await
             .context(StorageSnafu)?
+        } else {
+            Arc::new(
+                StorageProvider::for_url_with_options(
+                    &table_config.table_uri,
+                    table_config.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?,
+            )
         };
+
+        // Create file reader for discovering uncommitted parquet files
+        let file_reader = IncomingReader::new(
+            sink_storage.clone(),
+            table_key.id().to_string(),
+            IncomingConfig {
+                partition_filter: table_config.partition_filter.clone(),
+            },
+        );
 
         // Try to open existing Delta table without creating it
         let delta_sink = match DeltaSink::try_open(
@@ -323,7 +321,7 @@ impl PenguinProcessor {
         Ok(Self {
             table_key,
             table_config,
-            staging_reader,
+            file_reader,
             sink_storage,
             delta_sink,
             checkpoint_coordinator: CheckpointCoordinator::new(table_id),
@@ -339,17 +337,15 @@ impl PenguinProcessor {
     ///
     /// If a sink exists, validates the incoming schema against the table schema
     /// and applies schema evolution if needed based on the configured mode.
-    async fn ensure_delta_sink(
-        &mut self,
-        pending_files: &[FinishedFile],
-    ) -> Result<(), PipelineError> {
-        // Infer schema from incoming files
-        let incoming_schema = infer_schema_from_first_file(
-            &self.sink_storage,
-            pending_files,
-            self.table_key.as_ref(),
-        )
-        .await?;
+    async fn ensure_delta_sink(&mut self, files: &[FinishedFile]) -> Result<(), PipelineError> {
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        // Infer schema from files
+        let incoming_schema =
+            infer_schema_from_first_file(&self.sink_storage, files, self.table_key.as_ref())
+                .await?;
 
         if self.delta_sink.is_none() {
             info!(target = %self.table_key, "Creating new Delta table with inferred schema");
@@ -427,26 +423,10 @@ impl PollingProcessor for PenguinProcessor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        // Read pending files from staging first
-        let pending_files = self.staging_reader.read_pending_files().await?;
-
-        if pending_files.is_empty() {
-            return Ok(None);
-        }
-
-        info!(target = %self.table_key, files = pending_files.len(), "Found files to commit");
-
-        // Ensure delta sink exists (creates table with inferred schema if needed)
-        self.ensure_delta_sink(&pending_files).await?;
-
-        // On cold start, recover checkpoint from Delta log
-        // This must happen AFTER ensure_delta_sink so we have a table to read from
-        if cold_start {
+        // On cold start, recover checkpoint from Delta log if table exists
+        // We do this first to get the watermark before listing files
+        if cold_start && let Some(delta_sink) = self.delta_sink.as_mut() {
             info!(target = %self.table_key, "Cold start - recovering checkpoint from Delta log");
-            let delta_sink = self
-                .delta_sink
-                .as_mut()
-                .context(DeltaSinkNotInitializedSnafu)?;
             match self
                 .checkpoint_coordinator
                 .restore_from_delta_log(delta_sink)
@@ -460,16 +440,65 @@ impl PollingProcessor for PenguinProcessor {
             }
         }
 
-        Ok(Some(PreparedState { pending_files }))
+        // Get committed paths from Delta log to avoid double-commits
+        let committed_paths = if let Some(delta_sink) = &self.delta_sink {
+            delta_sink.get_committed_paths()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        // Get current watermark
+        let watermark = self.checkpoint_coordinator.watermark().await;
+
+        // List uncommitted files
+        let uncommitted = self
+            .file_reader
+            .list_uncommitted_files(watermark.as_deref(), &committed_paths)
+            .await?;
+
+        if uncommitted.is_empty() {
+            return Ok(None);
+        }
+
+        // Read parquet metadata for each file
+        let mut files = Vec::with_capacity(uncommitted.len());
+        for incoming in &uncommitted {
+            match self.file_reader.read_parquet_metadata(incoming).await {
+                Ok(finished_file) => files.push(finished_file),
+                Err(e) => {
+                    tracing::warn!(
+                        target = %self.table_key,
+                        path = %incoming.path,
+                        error = %e,
+                        "Failed to read parquet metadata, skipping file"
+                    );
+                }
+            }
+        }
+
+        if files.is_empty() {
+            return Ok(None);
+        }
+
+        info!(
+            target = %self.table_key,
+            files = files.len(),
+            "Found files to commit"
+        );
+
+        // Ensure delta sink exists (creates table with inferred schema if needed)
+        self.ensure_delta_sink(&files).await?;
+
+        Ok(Some(PreparedState { files }))
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let PreparedState { pending_files } = state;
+        let PreparedState { files } = state;
 
         // Emit pending files metric
         emit!(PendingFiles {
             target: self.table_key.id().to_string(),
-            count: pending_files.len(),
+            count: files.len(),
         });
 
         let delta_sink = self
@@ -477,53 +506,36 @@ impl PollingProcessor for PenguinProcessor {
             .as_mut()
             .context(DeltaSinkNotInitializedSnafu)?;
 
-        // Step 1: Move parquet files from staging to table directory BEFORE Delta commit.
-        // This ensures files exist at the paths referenced in the Delta transaction log.
-        let mut files_to_commit = Vec::with_capacity(pending_files.len());
-        for file in &pending_files {
-            if let Err(e) = self.staging_reader.move_to_table(file).await {
-                tracing::warn!(
-                    target = %self.table_key,
-                    file = %file.filename,
-                    error = %e,
-                    "Failed to move parquet from staging to table, skipping file"
-                );
-                continue;
-            }
-            files_to_commit.push(file.clone());
-        }
+        // Track the highest path for watermark update
+        let highest_path = files
+            .iter()
+            .map(|f| f.filename.as_str())
+            .max()
+            .map(String::from);
 
-        // Step 2: Commit files to Delta Lake (parquet files are now in table directory)
+        // Commit files to Delta Lake
         let committed_count = self
             .checkpoint_coordinator
             .commit_files(
                 delta_sink,
-                &files_to_commit,
+                &files,
                 self.table_config.delta_checkpoint_interval,
             )
             .await;
 
         if committed_count > 0 {
-            // Step 3: Archive metadata files after successful Delta commit
-            for file in &files_to_commit {
-                if let Err(e) = self.staging_reader.archive_meta(file).await {
-                    // Non-fatal: file is committed, meta archive is just for debugging
-                    tracing::warn!(target = %self.table_key, error = %e, "Failed to archive metadata");
-                }
-
-                // Update stats
-                self.stats.files_committed += 1;
-                self.stats.records_committed += file.record_count;
-
-                // Update source state in checkpoint coordinator
-                if let Some(source_file) = &file.source_file {
-                    self.checkpoint_coordinator
-                        .update_source_state(source_file, file.record_count, true)
-                        .await;
-                }
+            // Update watermark to highest committed path
+            if let Some(path) = highest_path {
+                self.checkpoint_coordinator.update_watermark(path).await;
             }
 
-            // Emit metrics for committed files
+            // Update stats
+            for file in &files {
+                self.stats.files_committed += 1;
+                self.stats.records_committed += file.record_count;
+            }
+
+            // Emit metrics
             emit!(FilesCommitted {
                 target: self.table_key.id().to_string(),
                 count: committed_count as u64,

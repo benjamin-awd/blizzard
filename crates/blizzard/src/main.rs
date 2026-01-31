@@ -1,4 +1,4 @@
-//! Blizzard CLI: File loader for streaming NDJSON.gz files to Parquet staging.
+//! Blizzard CLI: File loader for streaming NDJSON.gz files to Parquet.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,11 +89,11 @@ async fn main() -> ExitCode {
     match run_pipeline(config).await {
         Ok(stats) => {
             info!(
-                "All pipelines completed: {} files processed, {} records, {} bytes written, {} staging files",
+                "All pipelines completed: {} files processed, {} records, {} bytes written, {} parquet files",
                 stats.total_files_processed(),
                 stats.total_records_processed(),
                 stats.total_bytes_written(),
-                stats.total_staging_files_written()
+                stats.total_parquet_files_written()
             );
 
             // Exit code logic based on failure behavior defined in plan

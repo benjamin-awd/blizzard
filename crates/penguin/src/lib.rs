@@ -1,18 +1,18 @@
-//! Penguin: Delta Lake checkpointer that watches staging and commits to Delta Lake.
+//! Penguin: Delta Lake checkpointer that discovers parquet files and commits to Delta Lake.
 //!
 //! This crate handles:
-//! - Watching the staging directory for new Parquet files
+//! - Discovering uncommitted Parquet files in table directories using watermark tracking
 //! - Committing Parquet files to Delta Lake with atomic checkpoints
-//! - Moving committed files from pending/ to committed/
+//! - Schema inference and evolution
 
 pub mod checkpoint;
 pub mod config;
 pub mod error;
+pub mod incoming;
 pub mod metrics;
 pub mod pipeline;
 pub mod schema;
 pub mod sink;
-pub mod staging;
 
 // Re-export commonly used items
 pub use config::Config;

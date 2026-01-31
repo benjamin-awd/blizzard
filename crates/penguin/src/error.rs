@@ -115,33 +115,29 @@ impl DeltaError {
     }
 }
 
-/// Errors that can occur during staging operations.
+/// Errors that can occur during incoming file operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum StagingError {
-    /// Failed to read staging file.
-    #[snafu(display("Failed to read staging file: {source}"))]
-    Read { source: StorageError },
+#[snafu(module)]
+pub enum IncomingError {
+    /// Failed to list files.
+    #[snafu(display("Failed to list incoming files: {source}"))]
+    List { source: StorageError },
 
-    /// Failed to deserialize metadata.
-    #[snafu(display("Failed to deserialize staging metadata: {source}"))]
-    Deserialize { source: serde_json::Error },
-
-    /// Failed to move/rename file.
-    #[snafu(display("Failed to move file from {from} to {to}: {source}"))]
-    Move {
-        from: String,
-        to: String,
-        source: StorageError,
+    /// Failed to read parquet metadata.
+    #[snafu(display("Failed to read parquet metadata for {path}: {source}"))]
+    ParquetMetadata {
+        path: String,
+        source: deltalake::parquet::errors::ParquetError,
     },
 
-    /// Failed to delete file.
-    #[snafu(display("Failed to delete file {path}: {source}"))]
-    Delete { path: String, source: StorageError },
+    /// Failed to read file.
+    #[snafu(display("Failed to read incoming file {path}: {source}"))]
+    Read { path: String, source: StorageError },
 
-    /// Failed to archive file.
-    #[snafu(display("Failed to archive file {path}: {source}"))]
-    Archive { path: String, source: StorageError },
+    /// Invalid watermark format.
+    #[snafu(display("Invalid watermark format: {watermark}"))]
+    InvalidWatermark { watermark: String },
 }
 
 /// Top-level pipeline errors.
@@ -160,9 +156,9 @@ pub enum PipelineError {
     #[snafu(display("Delta error: {source}"))]
     Delta { source: DeltaError },
 
-    /// Staging error.
-    #[snafu(display("Staging error: {source}"))]
-    Staging { source: StagingError },
+    /// Incoming error.
+    #[snafu(display("Incoming error: {source}"))]
+    Incoming { source: IncomingError },
 
     /// Schema inference error.
     #[snafu(display("Schema error: {source}"))]
@@ -205,14 +201,14 @@ impl From<DeltaError> for PipelineError {
     }
 }
 
-impl From<StagingError> for PipelineError {
-    fn from(source: StagingError) -> Self {
-        PipelineError::Staging { source }
-    }
-}
-
 impl From<SchemaError> for PipelineError {
     fn from(source: SchemaError) -> Self {
         PipelineError::Schema { source }
+    }
+}
+
+impl From<IncomingError> for PipelineError {
+    fn from(source: IncomingError) -> Self {
+        PipelineError::Incoming { source }
     }
 }
