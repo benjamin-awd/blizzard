@@ -736,7 +736,7 @@ pub async fn list_ndjson_files_with_prefixes(
             let mut total_listed = 0;
 
             tracing::info!(
-                pipeline = %pipeline,
+                target = %pipeline,
                 "Listing files under {} date prefixes: {:?}",
                 prefixes.len(),
                 if prefixes.len() <= 5 {

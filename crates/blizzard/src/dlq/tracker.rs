@@ -49,11 +49,11 @@ impl FailureTracker {
         self.count += 1;
         emit!(FileProcessed {
             status: FileStatus::Failed,
-            pipeline: self.pipeline.clone(),
+            target: self.pipeline.clone(),
         });
         emit!(FileFailed {
             stage,
-            pipeline: self.pipeline.clone(),
+            target: self.pipeline.clone(),
         });
 
         if let Some(dlq) = &self.dlq {

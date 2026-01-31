@@ -76,7 +76,7 @@ impl CheckpointCoordinator {
         state.delta_version = checkpoint.delta_version;
         emit!(SourceStateFiles {
             count: file_count,
-            pipeline: self.table.clone(),
+            target: self.table.clone(),
         });
     }
 
@@ -90,7 +90,7 @@ impl CheckpointCoordinator {
         }
         emit!(SourceStateFiles {
             count: state.source_state.files.len(),
-            pipeline: self.table.clone(),
+            target: self.table.clone(),
         });
     }
 
@@ -108,7 +108,7 @@ impl CheckpointCoordinator {
         let mut last = self.last_checkpoint.lock().await;
         *last = Instant::now();
         emit!(CheckpointAge { seconds: 0.0 });
-        debug!(table = %self.table, "Checkpoint committed, timer reset");
+        debug!(target = %self.table, "Checkpoint committed, timer reset");
     }
 
     /// Capture the current state for checkpointing.
@@ -136,7 +136,7 @@ impl CheckpointCoordinator {
     ) -> Result<bool, DeltaError> {
         if let Some((checkpoint, version)) = delta_sink.recover_checkpoint_from_log().await? {
             info!(
-                table = %self.table,
+                target = %self.table,
                 "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
                 version,
                 checkpoint.delta_version,
@@ -145,7 +145,7 @@ impl CheckpointCoordinator {
             self.restore_from_state(checkpoint).await;
             Ok(true)
         } else {
-            info!(table = %self.table, "No checkpoint found in Delta log, starting fresh");
+            info!(target = %self.table, "No checkpoint found in Delta log, starting fresh");
             Ok(false)
         }
     }
@@ -171,14 +171,14 @@ impl CheckpointCoordinator {
             match deltalake::checkpoints::create_checkpoint(delta_sink.table(), None).await {
                 Ok(()) => {
                     info!(
-                        table = %self.table,
+                        target = %self.table,
                         "Created Delta checkpoint at version {}",
                         delta_sink.version()
                     );
                     *counter = 0;
                 }
                 Err(e) => {
-                    warn!(table = %self.table, "Failed to create Delta checkpoint: {}", e);
+                    warn!(target = %self.table, "Failed to create Delta checkpoint: {}", e);
                     // Don't reset counter on failure - will retry on next commit
                 }
             }
@@ -217,7 +217,7 @@ impl CheckpointCoordinator {
         {
             Ok(Some(version)) => {
                 info!(
-                    table = %self.table,
+                    target = %self.table,
                     "Committed {} files with checkpoint to Delta Lake, version {}",
                     count, version
                 );
@@ -229,10 +229,10 @@ impl CheckpointCoordinator {
                     .await;
             }
             Ok(None) => {
-                debug!(table = %self.table, "No commit needed (duplicate files)");
+                debug!(target = %self.table, "No commit needed (duplicate files)");
             }
             Err(e) => {
-                tracing::error!(table = %self.table, "Failed to commit {} files to Delta: {}", count, e);
+                tracing::error!(target = %self.table, "Failed to commit {} files to Delta: {}", count, e);
             }
         }
         count

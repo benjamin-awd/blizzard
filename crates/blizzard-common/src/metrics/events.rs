@@ -4,10 +4,10 @@
 //! Events implement the `InternalEvent` trait which emits the corresponding
 //! Prometheus metric.
 //!
-//! ## Pipeline Labels
+//! ## Target Labels
 //!
-//! For multi-pipeline deployments, metrics include a `pipeline` label to enable
-//! per-pipeline observability (e.g., `"orderbooks"`, `"trades"`).
+//! For multi-target deployments, metrics include a `target` label to enable
+//! per-target observability (e.g., `"orderbooks"`, `"trades"`).
 
 use metrics::{counter, gauge, histogram};
 use std::time::Duration;
@@ -22,43 +22,42 @@ pub trait InternalEvent {
 /// Event emitted when records are processed through the pipeline.
 pub struct RecordsProcessed {
     pub count: u64,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for RecordsProcessed {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Records processed");
-        counter!("blizzard_records_processed_total", "pipeline" => self.pipeline)
-            .increment(self.count);
+        trace!(count = self.count, target = %self.target, "Records processed");
+        counter!("blizzard_records_processed_total", "target" => self.target).increment(self.count);
     }
 }
 
 /// Event emitted when compressed bytes are read from source.
 pub struct BytesRead {
     pub bytes: u64,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for BytesRead {
     fn emit(self) {
-        trace!(bytes = self.bytes, pipeline = %self.pipeline, "Bytes read");
-        counter!("blizzard_bytes_read_total", "pipeline" => self.pipeline).increment(self.bytes);
+        trace!(bytes = self.bytes, target = %self.target, "Bytes read");
+        counter!("blizzard_bytes_read_total", "target" => self.target).increment(self.bytes);
     }
 }
 
 /// Event emitted when bytes are written to Parquet files.
 pub struct BytesWritten {
     pub bytes: u64,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for BytesWritten {
     fn emit(self) {
-        trace!(bytes = self.bytes, pipeline = %self.pipeline, "Bytes written");
-        counter!("blizzard_bytes_written_total", "pipeline" => self.pipeline).increment(self.bytes);
+        trace!(bytes = self.bytes, target = %self.target, "Bytes written");
+        counter!("blizzard_bytes_written_total", "target" => self.target).increment(self.bytes);
     }
 }
 
@@ -104,14 +103,14 @@ impl FailureStage {
 /// Event emitted when a file fails processing.
 pub struct FileFailed {
     pub stage: FailureStage,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for FileFailed {
     fn emit(self) {
-        trace!(stage = self.stage.as_str(), pipeline = %self.pipeline, "File failed");
-        counter!("blizzard_files_failed_total", "stage" => self.stage.as_str(), "pipeline" => self.pipeline)
+        trace!(stage = self.stage.as_str(), target = %self.target, "File failed");
+        counter!("blizzard_files_failed_total", "stage" => self.stage.as_str(), "target" => self.target)
             .increment(1);
     }
 }
@@ -119,14 +118,14 @@ impl InternalEvent for FileFailed {
 /// Event emitted when an input file is processed.
 pub struct FileProcessed {
     pub status: FileStatus,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for FileProcessed {
     fn emit(self) {
-        trace!(status = self.status.as_str(), pipeline = %self.pipeline, "File processed");
-        counter!("blizzard_files_processed_total", "status" => self.status.as_str(), "pipeline" => self.pipeline)
+        trace!(status = self.status.as_str(), target = %self.target, "File processed");
+        counter!("blizzard_files_processed_total", "status" => self.status.as_str(), "target" => self.target)
             .increment(1);
     }
 }
@@ -134,15 +133,14 @@ impl InternalEvent for FileProcessed {
 /// Event emitted when an Arrow RecordBatch is created.
 pub struct BatchesProcessed {
     pub count: u64,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for BatchesProcessed {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Batches processed");
-        counter!("blizzard_batches_processed_total", "pipeline" => self.pipeline)
-            .increment(self.count);
+        trace!(count = self.count, target = %self.target, "Batches processed");
+        counter!("blizzard_batches_processed_total", "target" => self.target).increment(self.count);
     }
 }
 
@@ -153,18 +151,18 @@ impl InternalEvent for BatchesProcessed {
 /// Event emitted when a file download completes.
 pub struct FileDownloadCompleted {
     pub duration: Duration,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for FileDownloadCompleted {
     fn emit(self) {
         trace!(
             duration_ms = self.duration.as_millis(),
-            pipeline = %self.pipeline,
+            target = %self.target,
             "File download completed"
         );
-        histogram!("blizzard_file_download_duration_seconds", "pipeline" => self.pipeline)
+        histogram!("blizzard_file_download_duration_seconds", "target" => self.target)
             .record(self.duration.as_secs_f64());
     }
 }
@@ -172,18 +170,18 @@ impl InternalEvent for FileDownloadCompleted {
 /// Event emitted when file decompression completes.
 pub struct FileDecompressionCompleted {
     pub duration: Duration,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for FileDecompressionCompleted {
     fn emit(self) {
         trace!(
             duration_ms = self.duration.as_millis(),
-            pipeline = %self.pipeline,
+            target = %self.target,
             "File decompression completed"
         );
-        histogram!("blizzard_file_decompression_duration_seconds", "pipeline" => self.pipeline)
+        histogram!("blizzard_file_decompression_duration_seconds", "target" => self.target)
             .record(self.duration.as_secs_f64());
     }
 }
@@ -191,18 +189,18 @@ impl InternalEvent for FileDecompressionCompleted {
 /// Event emitted when a Parquet file write completes.
 pub struct ParquetWriteCompleted {
     pub duration: Duration,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for ParquetWriteCompleted {
     fn emit(self) {
         trace!(
             duration_ms = self.duration.as_millis(),
-            pipeline = %self.pipeline,
+            target = %self.target,
             "Parquet write completed"
         );
-        histogram!("blizzard_parquet_write_duration_seconds", "pipeline" => self.pipeline)
+        histogram!("blizzard_parquet_write_duration_seconds", "target" => self.target)
             .record(self.duration.as_secs_f64());
     }
 }
@@ -214,28 +212,28 @@ impl InternalEvent for ParquetWriteCompleted {
 /// Event emitted when the number of active downloads changes.
 pub struct ActiveDownloads {
     pub count: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for ActiveDownloads {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Active downloads");
-        gauge!("blizzard_active_downloads", "pipeline" => self.pipeline).set(self.count as f64);
+        trace!(count = self.count, target = %self.target, "Active downloads");
+        gauge!("blizzard_active_downloads", "target" => self.target).set(self.count as f64);
     }
 }
 
 /// Event emitted when the number of active uploads changes.
 pub struct ActiveUploads {
     pub count: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for ActiveUploads {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Active uploads");
-        gauge!("blizzard_active_uploads", "pipeline" => self.pipeline).set(self.count as f64);
+        trace!(count = self.count, target = %self.target, "Active uploads");
+        gauge!("blizzard_active_uploads", "target" => self.target).set(self.count as f64);
     }
 }
 
@@ -256,28 +254,28 @@ impl InternalEvent for ActiveMultipartParts {
 /// Event emitted when the number of pending batches changes.
 pub struct PendingBatches {
     pub count: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for PendingBatches {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Pending batches");
-        gauge!("blizzard_pending_batches", "pipeline" => self.pipeline).set(self.count as f64);
+        trace!(count = self.count, target = %self.target, "Pending batches");
+        gauge!("blizzard_pending_batches", "target" => self.target).set(self.count as f64);
     }
 }
 
 /// Event emitted when the decompression queue depth changes.
 pub struct DecompressionQueueDepth {
     pub count: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for DecompressionQueueDepth {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Decompression queue depth");
-        gauge!("blizzard_decompression_queue_depth", "pipeline" => self.pipeline)
+        trace!(count = self.count, target = %self.target, "Decompression queue depth");
+        gauge!("blizzard_decompression_queue_depth", "target" => self.target)
             .set(self.count as f64);
     }
 }
@@ -418,14 +416,14 @@ impl InternalEvent for RecoveredRecords {
 /// Event emitted when the source state file count changes.
 pub struct SourceStateFiles {
     pub count: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for SourceStateFiles {
     fn emit(self) {
-        trace!(count = self.count, pipeline = %self.pipeline, "Source state files tracked");
-        gauge!("blizzard_source_state_files", "pipeline" => self.pipeline).set(self.count as f64);
+        trace!(count = self.count, target = %self.target, "Source state files tracked");
+        gauge!("blizzard_source_state_files", "target" => self.target).set(self.count as f64);
     }
 }
 
@@ -472,16 +470,16 @@ impl InternalEvent for UploadQueueDepth {
 /// Event emitted when a file is written to the staging directory.
 pub struct StagingFileWritten {
     pub bytes: usize,
-    /// Pipeline label for multi-pipeline deployments.
-    pub pipeline: String,
+    /// Target label for multi-target deployments.
+    pub target: String,
 }
 
 impl InternalEvent for StagingFileWritten {
     fn emit(self) {
-        trace!(bytes = self.bytes, pipeline = %self.pipeline, "Staging file written");
-        counter!("blizzard_staging_files_written_total", "pipeline" => self.pipeline.clone())
+        trace!(bytes = self.bytes, target = %self.target, "Staging file written");
+        counter!("blizzard_staging_files_written_total", "target" => self.target.clone())
             .increment(1);
-        counter!("blizzard_staging_bytes_written_total", "pipeline" => self.pipeline)
+        counter!("blizzard_staging_bytes_written_total", "target" => self.target)
             .increment(self.bytes as u64);
     }
 }

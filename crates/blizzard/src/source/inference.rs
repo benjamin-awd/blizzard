@@ -45,13 +45,13 @@ pub async fn infer_schema_from_source(
     let mut last_error = None;
 
     for path in files.iter().take(max_attempts) {
-        debug!(pipeline = %pipeline, "Attempting to infer schema from file: {}", path);
+        debug!(target = %pipeline, "Attempting to infer schema from file: {}", path);
 
         match storage.get(path.as_str()).await {
             Ok(bytes) => match infer_schema_from_bytes(&bytes, compression) {
                 Ok(schema) => {
                     info!(
-                        pipeline = %pipeline,
+                        target = %pipeline,
                         "Inferred schema with {} fields from {}: {:?}",
                         schema.fields().len(),
                         path,
@@ -60,12 +60,12 @@ pub async fn infer_schema_from_source(
                     return Ok(schema);
                 }
                 Err(e) => {
-                    warn!(pipeline = %pipeline, "Failed to infer schema from {}: {}", path, e);
+                    warn!(target = %pipeline, "Failed to infer schema from {}: {}", path, e);
                     last_error = Some(e);
                 }
             },
             Err(e) => {
-                warn!(pipeline = %pipeline, "Failed to read file {}: {}", path, e);
+                warn!(target = %pipeline, "Failed to read file {}: {}", path, e);
                 last_error = Some(InferenceError::ReadFile { source: e });
             }
         }

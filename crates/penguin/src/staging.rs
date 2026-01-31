@@ -81,7 +81,7 @@ impl StagingReader {
                     }
                 }
                 Err(e) => {
-                    warn!(table = %self.table, "Error listing staging file: {}", e);
+                    warn!(target = %self.table, "Error listing staging file: {}", e);
                 }
             }
         }
@@ -137,7 +137,7 @@ impl StagingReader {
             })?;
 
         debug!(
-            table = %self.table,
+            target = %self.table,
             "Moved parquet from staging to table: {} -> {}",
             staging_parquet, table_parquet
         );
@@ -161,13 +161,13 @@ impl StagingReader {
             })?;
 
         debug!(
-            table = %self.table,
+            target = %self.table,
             "Archived staging metadata: {} -> {}",
             meta_path, archive_path
         );
 
         StagingFileCommitted {
-            table: self.table.clone(),
+            target: self.table.clone(),
         }
         .emit();
 
