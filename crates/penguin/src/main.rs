@@ -1,4 +1,4 @@
-//! Penguin CLI: Delta Lake checkpointer that watches staging and commits to Delta Lake.
+//! Penguin CLI: Delta Lake checkpointer that discovers parquet files and commits to Delta Lake.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,7 +16,7 @@ use penguin::run_pipeline;
 /// Penguin - Delta Lake checkpointer
 #[derive(Parser, Debug)]
 #[command(name = "penguin")]
-#[command(about = "Watches staging directory and commits Parquet files to Delta Lake")]
+#[command(about = "Discovers Parquet files and commits them to Delta Lake")]
 struct Args {
     /// Path to configuration file (can be specified multiple times)
     #[arg(short, long)]

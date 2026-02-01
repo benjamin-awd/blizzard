@@ -173,7 +173,7 @@ If your source changes a field type incompatibly:
 In **merge mode**, Penguin will:
 1. Detect the type change from `Int64` to `String`
 2. Reject the commit with an error
-3. The file remains in staging for manual resolution
+3. The file remains uncommitted for manual resolution
 
 ## Error Handling
 
@@ -191,7 +191,7 @@ ERROR Schema error: Cannot add required field 'user_id' - new fields must be nul
 ERROR Schema error: Incompatible schema: new required fields: ["required_field"]
 ```
 
-The staging metadata file (`.meta.json`) is not deleted, allowing you to:
+The uncommitted files remain in the table directory, allowing you to:
 1. Fix the upstream schema issue
 2. Manually handle the files
 3. Change the evolution mode if appropriate
@@ -201,5 +201,5 @@ The staging metadata file (`.meta.json`) is not deleted, allowing you to:
 1. **Start with merge mode**: It provides a good balance between flexibility and safety
 2. **Use strict mode for critical tables**: When downstream systems can't handle changes
 3. **Monitor schema evolution**: Watch for unexpected new fields that might indicate data quality issues
-4. **Test schema changes**: Before deploying source schema changes, test against a staging environment
+4. **Test schema changes**: Before deploying source schema changes, test against a non-production environment
 5. **Document your schemas**: Maintain schema documentation for data contracts

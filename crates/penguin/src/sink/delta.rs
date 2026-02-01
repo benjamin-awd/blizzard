@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn test_create_txn_action() {
         let mut source_state = SourceState::new();
-        source_state.update_records("file1.ndjson.gz", 100);
+        source_state.mark_finished("file1.ndjson.gz");
 
         let checkpoint = CheckpointState {
             schema_version: 2,
@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn test_txn_action_roundtrip() {
         let mut source_state = SourceState::new();
-        source_state.update_records("file1.ndjson.gz", 100);
+        source_state.mark_finished("file1.ndjson.gz");
         source_state.mark_finished("file2.ndjson.gz");
 
         let original = CheckpointState {

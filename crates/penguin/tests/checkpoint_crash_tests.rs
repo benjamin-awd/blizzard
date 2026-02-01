@@ -43,9 +43,8 @@ async fn test_checkpoint_commit_and_recovery() {
         .await
         .unwrap();
 
-    // Commit first batch - file partially processed
-    let mut source_state1 = SourceState::new();
-    source_state1.update_records("file1.ndjson.gz", 100);
+    // Commit first batch
+    let source_state1 = SourceState::new();
 
     let checkpoint1 = CheckpointState {
         schema_version: 2,
@@ -68,11 +67,9 @@ async fn test_checkpoint_commit_and_recovery() {
         .await
         .unwrap();
 
-    // Commit second batch - first file finished, second file in progress
+    // Commit second batch - first file finished
     let mut source_state2 = SourceState::new();
-    source_state2.update_records("file1.ndjson.gz", 100);
     source_state2.mark_finished("file1.ndjson.gz");
-    source_state2.update_records("file2.ndjson.gz", 200);
 
     let checkpoint2 = CheckpointState {
         schema_version: 2,
@@ -110,11 +107,6 @@ async fn test_checkpoint_commit_and_recovery() {
         state.source_state.is_file_finished("file1.ndjson.gz"),
         "file1 should be marked finished"
     );
-    assert!(
-        state.source_state.files.contains_key("file2.ndjson.gz"),
-        "file2 should be tracked"
-    );
-    assert_eq!(state.source_state.records_to_skip("file2.ndjson.gz"), 200);
 }
 
 /// Test: CheckpointCoordinator handles concurrent updates safely.
@@ -134,7 +126,7 @@ async fn test_concurrent_coordinator_access() {
             for i in 0..100 {
                 let file_id = task_id * 100 + i;
                 coordinator
-                    .update_source_state(&format!("file{}.ndjson.gz", file_id), 100, false)
+                    .mark_file_finished(&format!("file{}.ndjson.gz", file_id))
                     .await;
                 coordinator.update_delta_version(file_id as i64).await;
             }
@@ -198,10 +190,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         Err(e) => assert!(e.is_table_not_found(), "Expected table not found error"),
     }
 
-    // Step 2: Create a parquet file with a specific schema in staging directory
-    let staging_dir = table_path.join("_staging/pending");
-    std::fs::create_dir_all(&staging_dir).unwrap();
-
+    // Step 2: Create a parquet file with a specific schema in the table directory
     let schema = Arc::new(Schema::new(vec![
         Field::new("user_id", DataType::Int64, false),
         Field::new("username", DataType::Utf8, true),
@@ -218,8 +207,8 @@ async fn test_lazy_schema_inference_creates_correct_table() {
     )
     .unwrap();
 
-    // Write to staging directory (as blizzard does)
-    let parquet_path = staging_dir.join("data.parquet");
+    // Write parquet file directly to table directory
+    let parquet_path = table_path.join("data.parquet");
     let mut buffer = Vec::new();
     {
         let mut writer = ArrowWriter::try_new(&mut buffer, schema.clone(), None).unwrap();
@@ -228,9 +217,9 @@ async fn test_lazy_schema_inference_creates_correct_table() {
     }
     std::fs::write(&parquet_path, &buffer).unwrap();
 
-    // Step 3: Infer schema from the parquet file (reads from staging)
+    // Step 3: Infer schema from the parquet file
     let files = vec![FinishedFile::without_bytes(
-        "data.parquet".to_string(), // Target path (UUID extracted for staging lookup)
+        "data.parquet".to_string(),
         buffer.len(),
         3,
         HashMap::new(),

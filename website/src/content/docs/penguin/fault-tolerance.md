@@ -3,7 +3,7 @@ title: Fault Tolerance
 description: How Blizzard and Penguin provide crash recovery and exactly-once semantics
 ---
 
-The Blizzard/Penguin pipeline provides fault tolerance through a staging-based coordination protocol. This two-stage architecture ensures data is never lost or duplicated, even when either component crashes.
+The Blizzard/Penguin pipeline provides fault tolerance through a watermark-based coordination protocol. This two-stage architecture ensures data is never lost or duplicated, even when either component crashes.
 
 ## Architecture Overview
 
@@ -13,70 +13,70 @@ The Blizzard/Penguin pipeline provides fault tolerance through a staging-based c
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐     ┌──────────────────┐     ┌─────────────┐  │
-│  │   Blizzard   │────▶│     Staging      │────▶│   Penguin   │  │
-│  │  (Parquet)   │     │   (Metadata)     │     │  (Commits)  │  │
+│  │   Blizzard   │────▶│  Table Directory │────▶│   Penguin   │  │
+│  │  (Parquet)   │     │   (Parquet)      │     │  (Commits)  │  │
 │  └──────────────┘     └──────────────────┘     └─────────────┘  │
 │                              │                        │          │
 │                              ▼                        ▼          │
-│                       _staging/pending/        _delta_log/       │
-│                       *.meta.json              *.json            │
+│                    {partition}/*.parquet       _delta_log/       │
+│                                                *.json            │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Coordination Protocol
 
-### 1. Blizzard Writes to Staging
+### 1. Blizzard Writes Files
 
 When Blizzard finishes processing a source file:
 
-1. Writes Parquet file to `{table_uri}/{partition}/{uuid}.parquet`
-2. Writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
+1. Writes Parquet file to `{table_uri}/{partition}/{uuidv7}.parquet`
 
-The metadata file is written **last**, serving as an atomic signal that the Parquet file is complete.
+File names use UUIDv7 which provides lexicographic ordering by time, enabling efficient watermark-based discovery.
 
 ### 2. Penguin Commits to Delta Lake
 
-Penguin polls the staging directory and for each `.meta.json` file:
+Penguin scans the table directory and for each uncommitted file:
 
-1. Reads the metadata to get file information
-2. Commits the Parquet file to Delta Lake
-3. Deletes the `.meta.json` file
+1. Scans for files above the current watermark
+2. Reads parquet metadata (schema, record count)
+3. Commits the Parquet file to Delta Lake
+4. Updates watermark to highest committed path
 
-The deletion of the metadata file signals successful commit.
+The watermark is stored in the Delta log via Txn actions for crash recovery.
 
 ## Failure Scenarios
 
-### Blizzard Crashes Before Metadata Write
+### Blizzard Crashes During Write
 
 ```
-State: Parquet file written, no metadata
-Result: File is orphaned (not committed)
-Recovery: Re-run Blizzard to reprocess the source file
+State: Partial parquet file written
+Result: File may be corrupted/incomplete
+Recovery: Penguin skips unreadable files, Blizzard reprocesses source
 ```
 
-The orphaned Parquet file can be cleaned up manually or will be ignored by Penguin.
+Penguin validates parquet files during schema inference and skips corrupted files.
 
-### Blizzard Crashes After Metadata Write
+### Blizzard Crashes After Write
 
 ```
-State: Parquet file + metadata written
-Result: Penguin will commit the file
-Recovery: Automatic - Penguin picks up pending files
+State: Complete parquet file in table directory
+Result: Penguin will discover and commit the file
+Recovery: Automatic - Penguin finds files above watermark
 ```
 
 ### Penguin Crashes Before Commit
 
 ```
-State: Metadata exists in _staging/pending/
-Result: File not yet committed
-Recovery: Automatic - Penguin picks up pending files on restart
+State: Files exist but not in Delta log
+Result: Files not yet committed
+Recovery: Automatic - Penguin rescans from watermark on restart
 ```
 
-### Penguin Crashes After Commit, Before Metadata Deletion
+### Penguin Crashes After Commit, Before Watermark Update
 
 ```
-State: File committed, metadata still exists
+State: File committed, watermark not updated
 Result: Penguin may attempt to re-commit
 Recovery: Delta Lake's optimistic concurrency handles duplicates
 ```
@@ -87,12 +87,12 @@ Delta Lake's transactional guarantees ensure that duplicate commits are rejected
 
 | Guarantee | How It's Achieved |
 |-----------|-------------------|
-| **No data loss** | Files remain in staging until committed |
+| **No data loss** | Files persist in table directory until committed |
 | **No duplicates** | Delta Lake rejects duplicate file additions |
 | **Crash resilience** | Both components can restart and resume |
 | **Independent scaling** | Blizzard and Penguin operate independently |
 
-## Staging Directory Structure
+## Directory Structure
 
 ```
 table_uri/
@@ -100,15 +100,11 @@ table_uri/
 │   ├── 00000000000000000000.json
 │   ├── 00000000000000000001.json
 │   └── ...
-├── _staging/
-│   └── pending/                   # Pending commits
-│       ├── uuid1.meta.json
-│       └── uuid2.meta.json
-├── date=2024-01-01/               # Committed data files
-│   ├── uuid3.parquet
-│   └── uuid4.parquet
+├── date=2024-01-01/               # Partitioned parquet files
+│   ├── 019234ab-cdef-7890.parquet
+│   └── 019234ab-cdef-7891.parquet
 └── date=2024-01-02/
-    └── uuid5.parquet
+    └── 019234ab-cdef-7892.parquet
 ```
 
 ## Comparison to Single-Process Architecture
@@ -120,20 +116,15 @@ The two-stage architecture has several advantages over a single process that doe
 | **Failure isolation** | Crash loses in-flight data | Components fail independently |
 | **Backpressure** | Commit latency affects ingestion | Ingestion continues while commits catch up |
 | **Scaling** | Single bottleneck | Scale writers and committers independently |
-| **Recovery** | Must checkpoint all state atomically | Staging metadata is the checkpoint |
+| **Recovery** | Must checkpoint all state atomically | Watermark in Delta log is the checkpoint |
 
 ## Operational Considerations
 
-### Monitoring Staging Backlog
+### Monitoring Uncommitted Files
 
-Monitor the number of pending files in `_staging/pending/`:
+Monitor the number of uncommitted files using the `penguin_pending_files` metric.
 
-```bash
-# Count pending files
-aws s3 ls s3://bucket/table/_staging/pending/ | wc -l
-```
-
-A growing backlog indicates Penguin is falling behind.
+A growing count indicates Penguin is falling behind.
 
 ### Cleaning Orphaned Files
 

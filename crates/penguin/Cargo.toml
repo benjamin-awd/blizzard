@@ -1,7 +1,7 @@
 [package]
 name = "penguin"
 version = "0.1.0"
-description = "Delta Lake checkpointer - watches staging directory and commits to Delta Lake"
+description = "Delta Lake checkpointer - discovers parquet files and commits to Delta Lake"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

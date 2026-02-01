@@ -6,6 +6,9 @@
 //!
 //! Inferred schemas are automatically coerced to be Delta Lake compatible
 //! (e.g., timestamp precision is converted to microseconds).
+//!
+//! Files are read directly from their discovered paths (e.g., partition
+//! directories like `date=2024-01-28/{uuid}.parquet`).
 
 use bytes::Bytes;
 use deltalake::arrow::datatypes::SchemaRef;
@@ -48,22 +51,13 @@ pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, Schem
     Ok(coerce_schema(&schema))
 }
 
-/// Extract UUID from a filename like "date=2024-01-01/uuid.parquet" -> "uuid"
-fn extract_uuid(filename: &str) -> &str {
-    filename
-        .split('/')
-        .next_back()
-        .unwrap_or(filename)
-        .trim_end_matches(".parquet")
-}
-
 /// Infer schema from the first available parquet file.
 ///
 /// Tries up to 3 files in case some are corrupted or inaccessible.
 /// Returns the schema from the first file that can be successfully read.
 ///
-/// Note: Files are read from `_staging/pending/{uuid}.parquet` (where blizzard
-/// writes them) rather than the target path in `file.filename`.
+/// Files are read directly from their discovered paths (e.g.,
+/// `date=2024-01-28/{uuid}.parquet`).
 pub async fn infer_schema_from_first_file(
     storage: &StorageProvider,
     files: &[FinishedFile],
@@ -77,20 +71,18 @@ pub async fn infer_schema_from_first_file(
     let mut last_error = None;
 
     for file in files.iter().take(max_attempts) {
-        // Files are in staging directory, not at the target path yet
-        let uuid = extract_uuid(&file.filename);
-        let staging_path = format!("_staging/pending/{}.parquet", uuid);
+        let file_path = &file.filename;
 
-        debug!(target = %table, "Attempting to infer schema from staging file: {}", staging_path);
+        debug!(target = %table, "Attempting to infer schema from file: {}", file_path);
 
-        match storage.get(staging_path.as_str()).await {
+        match storage.get(file_path.as_str()).await {
             Ok(bytes) => match infer_schema_from_parquet_bytes(&bytes) {
                 Ok(schema) => {
                     debug!(
                         target = %table,
                         "Successfully inferred schema with {} fields from {}",
                         schema.fields().len(),
-                        staging_path
+                        file_path
                     );
                     return Ok(schema);
                 }
@@ -98,13 +90,13 @@ pub async fn infer_schema_from_first_file(
                     warn!(
                         target = %table,
                         "Failed to parse parquet schema from {}: {}",
-                        staging_path, e
+                        file_path, e
                     );
                     last_error = Some(e);
                 }
             },
             Err(e) => {
-                warn!(target = %table, "Failed to read file {}: {}", staging_path, e);
+                warn!(target = %table, "Failed to read file {}: {}", file_path, e);
                 last_error = Some(SchemaError::StorageRead { source: e });
             }
         }
@@ -256,12 +248,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path();
 
-        // Create staging directory and write parquet file there (as blizzard does)
-        let staging_dir = table_path.join("_staging/pending");
-        std::fs::create_dir_all(&staging_dir).unwrap();
+        // Create partition directory and write parquet file there
+        let partition_dir = table_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition_dir).unwrap();
 
         let parquet_bytes = create_test_parquet_bytes();
-        let parquet_path = staging_dir.join("test-uuid.parquet");
+        let parquet_path = partition_dir.join("test-uuid.parquet");
         std::fs::write(&parquet_path, &parquet_bytes).unwrap();
 
         // Create storage provider
@@ -270,7 +262,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Create a FinishedFile with target path (schema inference reads from staging)
+        // Create a FinishedFile with the actual file path
         let files = vec![FinishedFile::without_bytes(
             "date=2024-01-01/test-uuid.parquet".to_string(),
             parquet_bytes.len(),
@@ -314,13 +306,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_path = temp_dir.path();
 
-        // Create staging directory
-        let staging_dir = table_path.join("_staging/pending");
-        std::fs::create_dir_all(&staging_dir).unwrap();
+        // Create partition directory
+        let partition_dir = table_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition_dir).unwrap();
 
-        // Write a valid parquet file as the second file (in staging)
+        // Write a valid parquet file as the second file
         let parquet_bytes = create_test_parquet_bytes();
-        let parquet_path = staging_dir.join("valid-uuid.parquet");
+        let parquet_path = partition_dir.join("valid-uuid.parquet");
         std::fs::write(&parquet_path, &parquet_bytes).unwrap();
 
         // Create storage provider
@@ -329,7 +321,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        // First file doesn't exist in staging, second file is valid
+        // First file doesn't exist, second file is valid
         let files = vec![
             FinishedFile::without_bytes(
                 "date=2024-01-01/nonexistent-uuid.parquet".to_string(),

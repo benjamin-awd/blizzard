@@ -30,6 +30,24 @@ pub struct PartitionFilterConfig {
     pub lookback: u32,
 }
 
+/// Configuration for partitioning output files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionByConfig {
+    /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
+    pub prefix_template: String,
+}
+
+impl PartitionByConfig {
+    /// Extract partition column names from the template.
+    /// e.g., "date=%Y-%m-%d/hour=%H" -> ["date", "hour"]
+    pub fn partition_columns(&self) -> Vec<String> {
+        self.prefix_template
+            .split('/')
+            .filter_map(|segment| segment.find('=').map(|idx| segment[..idx].to_string()))
+            .collect()
+    }
+}
+
 /// Configuration for a Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableConfig {
@@ -38,9 +56,8 @@ pub struct TableConfig {
     /// Poll interval in seconds for checking new files.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Columns to partition output by.
-    #[serde(default)]
-    pub partition_by: Vec<String>,
+    /// Partition configuration with strftime-style prefix template.
+    pub partition_by: Option<PartitionByConfig>,
     /// Delta checkpoint interval (number of commits between checkpoints).
     #[serde(default = "default_delta_checkpoint_interval")]
     pub delta_checkpoint_interval: usize,
@@ -349,7 +366,7 @@ tables:
         assert_eq!(table.max_concurrent_parts, 8);
         assert_eq!(table.part_size_mb, 10);
         assert_eq!(table.min_multipart_size_mb, 100);
-        assert!(table.partition_by.is_empty());
+        assert!(table.partition_by.is_none());
         assert!(table.storage_options.is_empty());
         assert!(table.partition_filter.is_none());
     }
@@ -359,7 +376,7 @@ tables:
         let table = TableConfig {
             table_uri: "gs://bucket/my_table".to_string(),
             poll_interval_secs: 10,
-            partition_by: vec![],
+            partition_by: None,
             delta_checkpoint_interval: 10,
             max_concurrent_uploads: 4,
             max_concurrent_parts: 8,
@@ -429,5 +446,31 @@ tables:
 "#;
         let result = Config::parse(yaml);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_partition_by_config_partition_columns() {
+        let config = PartitionByConfig {
+            prefix_template: "date=%Y-%m-%d/hour=%H".to_string(),
+        };
+        let columns = config.partition_columns();
+        assert_eq!(columns, vec!["date", "hour"]);
+    }
+
+    #[test]
+    fn test_partition_by_config_yaml_parsing() {
+        let yaml = r#"
+tables:
+  events:
+    table_uri: gs://bucket/events
+    partition_by:
+      prefix_template: "date=%Y-%m-%d"
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        let partition_by = table.partition_by.as_ref().unwrap();
+        assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
+        assert_eq!(partition_by.partition_columns(), vec!["date"]);
     }
 }

@@ -397,18 +397,6 @@ impl InternalEvent for CheckpointAge {
     }
 }
 
-/// Event emitted when records are skipped during recovery.
-pub struct RecoveredRecords {
-    pub count: u64,
-}
-
-impl InternalEvent for RecoveredRecords {
-    fn emit(self) {
-        trace!(count = self.count, "Recovered records");
-        counter!("blizzard_recovered_records_total").increment(self.count);
-    }
-}
-
 // ============================================================================
 // Memory tracking events
 // ============================================================================
@@ -467,19 +455,19 @@ impl InternalEvent for UploadQueueDepth {
 // Staging directory events
 // ============================================================================
 
-/// Event emitted when a file is written to the staging directory.
-pub struct StagingFileWritten {
+/// Event emitted when a parquet file is written to the table directory.
+pub struct ParquetFileWritten {
     pub bytes: usize,
     /// Target label for multi-target deployments.
     pub target: String,
 }
 
-impl InternalEvent for StagingFileWritten {
+impl InternalEvent for ParquetFileWritten {
     fn emit(self) {
-        trace!(bytes = self.bytes, target = %self.target, "Staging file written");
-        counter!("blizzard_staging_files_written_total", "target" => self.target.clone())
+        trace!(bytes = self.bytes, target = %self.target, "Parquet file written");
+        counter!("blizzard_parquet_files_written_total", "target" => self.target.clone())
             .increment(1);
-        counter!("blizzard_staging_bytes_written_total", "target" => self.target)
+        counter!("blizzard_parquet_bytes_written_total", "target" => self.target)
             .increment(self.bytes as u64);
     }
 }

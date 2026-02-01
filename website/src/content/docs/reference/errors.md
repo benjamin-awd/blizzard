@@ -138,7 +138,7 @@ Behavior:
 When max failures is reached:
 1. DLQ is finalized (flushed to storage)
 2. Pipeline returns `MaxFailuresExceeded` error
-3. In-progress files may not be written to staging (safe for retry)
+3. In-progress files may not be written to table (safe for retry)
 
 ## Error Handling Flow
 

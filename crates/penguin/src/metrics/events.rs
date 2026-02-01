@@ -108,7 +108,7 @@ impl InternalEvent for SchemaEvolved {
 }
 
 // ============================================================================
-// Staging events
+// File discovery events
 // ============================================================================
 
 /// Event emitted when the number of pending files changes.
@@ -123,19 +123,6 @@ impl InternalEvent for PendingFiles {
     fn emit(self) {
         trace!(target = %self.target, count = self.count, "Pending files");
         gauge!("penguin_pending_files", "target" => self.target).set(self.count as f64);
-    }
-}
-
-/// Event emitted when a file is moved to committed in staging.
-pub struct StagingFileCommitted {
-    /// Target label for multi-target deployments.
-    pub target: String,
-}
-
-impl InternalEvent for StagingFileCommitted {
-    fn emit(self) {
-        trace!(target = %self.target, "Staging file committed");
-        counter!("penguin_staging_files_committed_total", "target" => self.target).increment(1);
     }
 }
 

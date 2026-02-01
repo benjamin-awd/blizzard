@@ -27,6 +27,24 @@ pub struct PartitionFilterConfig {
     pub lookback: u32,
 }
 
+/// Configuration for partitioning output files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionByConfig {
+    /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
+    pub prefix_template: String,
+}
+
+impl PartitionByConfig {
+    /// Extract partition column names from the template.
+    /// e.g., "date=%Y-%m-%d/hour=%H" -> ["date", "hour"]
+    pub fn partition_columns(&self) -> Vec<String> {
+        self.prefix_template
+            .split('/')
+            .filter_map(|segment| segment.find('=').map(|idx| segment[..idx].to_string()))
+            .collect()
+    }
+}
+
 /// Configuration for the input source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceConfig {
@@ -78,7 +96,6 @@ pub enum CompressionFormat {
 pub struct SinkConfig {
     /// URI of the Delta table (supports S3, GCS, Azure, local).
     /// Parquet files are written directly to {table_uri}/{partition}/
-    /// Coordination metadata is written to {table_uri}/_staging/pending/
     pub table_uri: String,
     /// Target Parquet file size in MB.
     #[serde(default = "default_file_size_mb")]
@@ -89,9 +106,8 @@ pub struct SinkConfig {
     /// Parquet compression codec.
     #[serde(default)]
     pub compression: ParquetCompression,
-    /// Columns to partition output by.
-    #[serde(default)]
-    pub partition_by: Vec<String>,
+    /// Partition configuration with strftime-style prefix template.
+    pub partition_by: Option<PartitionByConfig>,
     /// Storage options for table storage (credentials, region, etc.).
     #[serde(default)]
     pub storage_options: HashMap<String, String>,
@@ -212,13 +228,14 @@ impl PipelineConfig {
     ///
     /// Resources are things that cannot be shared between pipelines running in
     /// the same process. This is used during config validation to detect
-    /// conflicts like two pipelines reading from the same source directory.
+    /// conflicts like two pipelines reading from the same source directory
+    /// or writing to the same table.
     pub fn resources(&self) -> Vec<Resource> {
         let source_dir = self.source.path.trim_end_matches('/');
-        let staging_dir = format!("{}/_staging", self.sink.table_uri.trim_end_matches('/'));
+        let table_dir = self.sink.table_uri.trim_end_matches('/');
         vec![
             Resource::directory(source_dir),
-            Resource::directory(&staging_dir),
+            Resource::directory(table_dir),
         ]
     }
 }
@@ -613,7 +630,7 @@ pipelines:
 
         assert_eq!(pipeline.sink.file_size_mb, 128);
         assert_eq!(pipeline.sink.row_group_size_bytes, 128 * MB);
-        assert!(pipeline.sink.partition_by.is_empty());
+        assert!(pipeline.sink.partition_by.is_none());
     }
 
     #[test]
@@ -638,7 +655,7 @@ pipelines:
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
             resources[1],
-            Resource::directory("gs://bucket/delta/events/_staging")
+            Resource::directory("gs://bucket/delta/events")
         );
     }
 
@@ -663,7 +680,7 @@ pipelines:
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
             resources[1],
-            Resource::directory("gs://bucket/delta/events/_staging")
+            Resource::directory("gs://bucket/delta/events")
         );
     }
 
@@ -739,8 +756,8 @@ pipelines:
             msg
         );
         assert!(
-            msg.contains("gs://bucket/delta/same/_staging"),
-            "Expected staging dir in error, got: {}",
+            msg.contains("gs://bucket/delta/same"),
+            "Expected table dir in error, got: {}",
             msg
         );
     }
@@ -864,5 +881,56 @@ pipelines:
             "Error should mention the conflict: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_partition_by_config_partition_columns() {
+        let config = PartitionByConfig {
+            prefix_template: "date=%Y-%m-%d/hour=%H".to_string(),
+        };
+        let columns = config.partition_columns();
+        assert_eq!(columns, vec!["date", "hour"]);
+    }
+
+    #[test]
+    fn test_partition_by_config_single_column() {
+        let config = PartitionByConfig {
+            prefix_template: "date=%Y-%m-%d".to_string(),
+        };
+        let columns = config.partition_columns();
+        assert_eq!(columns, vec!["date"]);
+    }
+
+    #[test]
+    fn test_partition_by_config_empty_template() {
+        let config = PartitionByConfig {
+            prefix_template: "".to_string(),
+        };
+        let columns = config.partition_columns();
+        assert!(columns.is_empty());
+    }
+
+    #[test]
+    fn test_partition_by_config_yaml_parsing() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+      partition_by:
+        prefix_template: "date=%Y-%m-%d"
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
+        assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
+        assert_eq!(partition_by.partition_columns(), vec!["date"]);
     }
 }

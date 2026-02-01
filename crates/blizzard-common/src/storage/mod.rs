@@ -902,13 +902,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_path = temp_dir.path();
 
-        // Create source directory and file
-        let staging_dir = base_path.join("_staging/pending");
-        let target_dir = base_path.join("date=2024-01-01");
-        std::fs::create_dir_all(&staging_dir).unwrap();
+        // Create source and target directories
+        let source_dir = base_path.join("date=2024-01-01");
+        let target_dir = base_path.join("date=2024-01-02");
+        std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::create_dir_all(&target_dir).unwrap();
 
-        let source_file = staging_dir.join("test.parquet");
+        let source_file = source_dir.join("test.parquet");
         std::fs::write(&source_file, b"parquet data").unwrap();
 
         // Create storage provider
@@ -917,9 +917,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        // Rename file from staging to table directory
-        let from = Path::from("_staging/pending/test.parquet");
-        let to = Path::from("date=2024-01-01/test.parquet");
+        // Rename file between partition directories
+        let from = Path::from("date=2024-01-01/test.parquet");
+        let to = Path::from("date=2024-01-02/test.parquet");
         storage.rename(&from, &to).await.unwrap();
 
         // Verify source no longer exists

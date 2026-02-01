@@ -1,6 +1,6 @@
 ---
 title: Pipeline Architecture
-description: How Blizzard's processing pipeline connects source, sink, and staging components
+description: How Blizzard's processing pipeline connects source and sink components
 ---
 
 Blizzard's pipeline connects sources and sinks into a streaming data flow with backpressure and graceful shutdown. It uses a producer-consumer pattern to maximize parallelism by separating I/O-bound work from CPU-bound processing.
@@ -34,15 +34,15 @@ On each iteration:
 │  │         │                       │                       │           │    │
 │  │         │ download              │ decompress            │ upload    │    │
 │  │         │ files                 │ parse NDJSON          │ parquet   │    │
-│  │         │                       │ write parquet         │ + metadata│    │
+│  │         │                       │ write parquet         │           │    │
 │  │         │                       │                       │           │    │
 │  └─────────┼───────────────────────┼───────────────────────┼───────────┘    │
 │            │                       │                       │                │
 │            │                       │                       ▼                │
 │            │                       │              ┌──────────────────┐      │
-│            │                       │              │     Staging      │      │
-│            │                       └─────────────>│   Directory      │      │
-│            │                         parquet      │                  │      │
+│            │                       │              │  Table Directory │      │
+│            │                       └─────────────>│  {partition}/    │      │
+│            │                         parquet      │  *.parquet       │      │
 │            │                         schema       └────────┬─────────┘      │
 │            │                                               │                │
 │            │                                               │                │
@@ -69,7 +69,7 @@ The pipeline consists of three concurrent stages connected by bounded channels:
 |-------|-------------|-----------|-------------|
 | **Downloader** | Tokio async | I/O bound | Concurrent file downloads from cloud storage |
 | **Processor** | Tokio blocking | CPU bound | Decompress and parse NDJSON to Arrow batches |
-| **Uploader** | Tokio async | I/O bound | Concurrent multipart uploads to staging |
+| **Uploader** | Tokio async | I/O bound | Concurrent multipart uploads to table directory |
 
 ### Stage 1: Downloader
 
@@ -127,9 +127,9 @@ Finished Parquet Files
 
 The uploader handles concurrent file uploads:
 
-- Uploads finished Parquet files to staging directory
+- Uploads finished Parquet files to table directory
 - Uses parallel multipart uploads for large files
-- Writes metadata files for Penguin to pick up
+- Penguin discovers these files for Delta Lake commits
 
 ## Backpressure
 
@@ -177,7 +177,7 @@ Shutdown sequence within a processing iteration:
 │  2. Downloader: Stop accepting new files                        │
 │  3. Processor: Finish in-flight batches                         │
 │  4. Writer: Close and flush final Parquet file                  │
-│  5. Uploader: Upload remaining files to staging                 │
+│  5. Uploader: Upload remaining files to table                   │
 │  6. Exit with stats                                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -192,7 +192,7 @@ The pipeline tracks comprehensive statistics:
 | `records_processed` | Total records written |
 | `bytes_written` | Total Parquet bytes written |
 | `parquet_files_written` | Number of Parquet files created |
-| `staging_files_written` | Number of files written to staging |
+| `parquet_files_written` | Number of Parquet files written to table |
 
 ## Error Handling
 

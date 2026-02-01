@@ -3,17 +3,17 @@ title: Penguin Overview
 description: Penguin is the Delta Lake commit service for the Blizzard pipeline
 ---
 
-Penguin is the second stage of the Blizzard data pipeline. It watches a staging directory for completed Parquet files and commits them to Delta Lake with full ACID guarantees.
+Penguin is the second stage of the Blizzard data pipeline. It discovers Parquet files in the table directory and commits them to Delta Lake with full ACID guarantees.
 
 ## How It Works
 
-While Blizzard handles the ingestion of source data and writes Parquet files to a staging area, Penguin's job is to:
+While Blizzard handles the ingestion of source data and writes Parquet files directly to the table, Penguin's job is to:
 
-1. Poll the staging directory for new files
-2. Commit files to the Delta Lake table atomically
-3. Clean up staging metadata after successful commits
+1. Scan the table directory for uncommitted Parquet files
+2. Track a high watermark to efficiently find new files
+3. Commit files to the Delta Lake table atomically
 
-This two-stage architecture provides better fault tolerance—if Penguin crashes, Blizzard can continue writing to staging, and Penguin will pick up where it left off on restart.
+This two-stage architecture provides better fault tolerance—if Penguin crashes, Blizzard can continue writing files, and Penguin will pick up where it left off on restart using watermark-based scanning.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ This two-stage architecture provides better fault tolerance—if Penguin crashes
                                            └─────────────┘
 ```
 
-Blizzard writes Parquet files directly to the table directory (e.g., `{table_uri}/{partition}/`) and metadata to `{table_uri}/_staging/pending/`. Penguin monitors the staging directory for metadata files and commits the corresponding Parquet files to the Delta Lake table.
+Blizzard writes Parquet files directly to the table directory (e.g., `{table_uri}/{partition}/{uuid}.parquet`). Penguin scans the table directory, discovers uncommitted files using watermark-based tracking, and commits them to the Delta Lake table.
 
 ## CLI Usage
 

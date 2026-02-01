@@ -104,7 +104,7 @@ storage_options:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | **required** | Path to output table (staging directory for Penguin) |
+| `path` | string | **required** | Path to output Delta Lake table directory |
 | `file_size_mb` | integer | `128` | Target Parquet file size in MB |
 | `row_group_size_bytes` | integer | `134217728` | Row group size (128 MB) |
 | `inactivity_timeout_secs` | integer | none | Roll file after inactivity |

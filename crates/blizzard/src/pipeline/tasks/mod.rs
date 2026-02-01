@@ -35,12 +35,11 @@ pub(super) fn spawn_read_task(
     let DownloadedFile {
         path,
         compressed_data,
-        skip_records,
     } = downloaded;
     Box::pin(async move {
         // Move path into spawn_blocking and return it with the result to avoid cloning
         let (path, result) = tokio::task::spawn_blocking(move || {
-            let result = reader.read(compressed_data, skip_records, &path);
+            let result = reader.read(compressed_data, &path);
             (path, result)
         })
         .await

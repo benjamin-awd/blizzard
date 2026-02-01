@@ -267,7 +267,6 @@ async fn run_single_pipeline(
 /// State prepared for a single processing iteration.
 struct PreparedState {
     pending_files: Vec<String>,
-    skip_counts: HashMap<String, usize>,
 }
 
 /// The blizzard file loader pipeline processor.
@@ -394,7 +393,15 @@ impl BlizzardProcessor {
     /// Extract partition values from a source path.
     fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
         let mut values = HashMap::new();
-        for key in &self.pipeline_config.sink.partition_by {
+        let keys = self
+            .pipeline_config
+            .sink
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
+
+        for key in keys {
             // Look for key=value patterns in the path
             let pattern = format!("{}=", key);
             if let Some(idx) = path.find(&pattern) {
@@ -403,7 +410,7 @@ impl BlizzardProcessor {
                     .find('/')
                     .map(|i| start + i)
                     .unwrap_or(path.len());
-                values.insert(key.clone(), path[start..end].to_string());
+                values.insert(key, path[start..end].to_string());
             }
         }
         values
@@ -440,32 +447,13 @@ impl PollingProcessor for BlizzardProcessor {
             return Ok(None);
         }
 
-        // Get skip counts for partially processed files
-        let skip_counts: HashMap<String, usize> = pending_files
-            .iter()
-            .filter_map(|f| {
-                let skip = self.source_state.records_to_skip(f);
-                if skip > 0 {
-                    Some((f.clone(), skip))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         info!(target = %self.pipeline_key, files = pending_files.len(), "Found files to process");
 
-        Ok(Some(PreparedState {
-            pending_files,
-            skip_counts,
-        }))
+        Ok(Some(PreparedState { pending_files }))
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let PreparedState {
-            pending_files,
-            skip_counts,
-        } = state;
+        let PreparedState { pending_files } = state;
 
         // Create Parquet writer
         let writer_config = ParquetWriterConfig::default()
@@ -481,7 +469,6 @@ impl PollingProcessor for BlizzardProcessor {
         // Create downloader using shared shutdown token
         let downloader = Downloader::spawn(
             pending_files,
-            skip_counts,
             self.source_storage.clone(),
             self.shutdown.clone(),
             self.pipeline_config.source.max_concurrent_files,

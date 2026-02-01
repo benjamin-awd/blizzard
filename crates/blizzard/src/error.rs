@@ -82,10 +82,10 @@ pub enum ParquetError {
 /// Errors that can occur during table write operations.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum StagingError {
+pub enum TableWriteError {
     /// Failed to write file to table.
     #[snafu(display("Failed to write file to table: {source}"))]
-    StagingWrite { source: StorageError },
+    Write { source: StorageError },
 }
 
 /// Top-level pipeline errors.
@@ -116,9 +116,9 @@ pub enum PipelineError {
     #[snafu(display("DLQ error: {source}"))]
     Dlq { source: DlqError },
 
-    /// Staging error.
-    #[snafu(display("Staging error: {source}"))]
-    Staging { source: StagingError },
+    /// Table write error.
+    #[snafu(display("Table write error: {source}"))]
+    TableWrite { source: TableWriteError },
 
     /// Task join error.
     #[snafu(display("Task join error: {source}"))]
@@ -171,9 +171,9 @@ impl From<ParquetError> for PipelineError {
     }
 }
 
-impl From<StagingError> for PipelineError {
-    fn from(source: StagingError) -> Self {
-        PipelineError::Staging { source }
+impl From<TableWriteError> for PipelineError {
+    fn from(source: TableWriteError) -> Self {
+        PipelineError::TableWrite { source }
     }
 }
 

@@ -30,9 +30,9 @@ use tracing::{debug, info};
 use blizzard_common::FinishedFile;
 use blizzard_common::StorageProvider;
 use blizzard_common::emit;
-use blizzard_common::metrics::events::StagingFileWritten;
+use blizzard_common::metrics::events::ParquetFileWritten;
 
-use crate::error::{StagingError, StagingWriteSnafu};
+use crate::error::{TableWriteError, WriteSnafu};
 
 /// Writer for direct table output.
 ///
@@ -50,7 +50,7 @@ impl TableWriter {
         table_uri: &str,
         storage_options: HashMap<String, String>,
         pipeline: String,
-    ) -> Result<Self, StagingError> {
+    ) -> Result<Self, TableWriteError> {
         debug!(
             target = %pipeline,
             table_uri = %table_uri,
@@ -59,7 +59,7 @@ impl TableWriter {
         );
         let storage = StorageProvider::for_url_with_options(table_uri, storage_options)
             .await
-            .context(StagingWriteSnafu)?;
+            .context(WriteSnafu)?;
 
         Ok(Self {
             storage: Arc::new(storage),
@@ -71,7 +71,7 @@ impl TableWriter {
     ///
     /// The file is written to its final partition path (e.g., `date=2024-01-28/{uuid}.parquet`).
     /// Penguin will discover this file during its next scan and commit it to Delta Lake.
-    pub async fn write_file(&self, file: &FinishedFile) -> Result<(), StagingError> {
+    pub async fn write_file(&self, file: &FinishedFile) -> Result<(), TableWriteError> {
         // Write the Parquet file directly to the table directory
         if let Some(bytes) = &file.bytes {
             self.storage
@@ -80,10 +80,10 @@ impl TableWriter {
                     PutPayload::from(bytes.clone()),
                 )
                 .await
-                .context(StagingWriteSnafu)?;
+                .context(WriteSnafu)?;
         }
 
-        emit!(StagingFileWritten {
+        emit!(ParquetFileWritten {
             bytes: file.size,
             target: self.pipeline.clone(),
         });
@@ -99,7 +99,7 @@ impl TableWriter {
     }
 
     /// Write multiple finished files to the table directory.
-    pub async fn write_files(&self, files: &[FinishedFile]) -> Result<(), StagingError> {
+    pub async fn write_files(&self, files: &[FinishedFile]) -> Result<(), TableWriteError> {
         for file in files {
             self.write_file(file).await?;
         }

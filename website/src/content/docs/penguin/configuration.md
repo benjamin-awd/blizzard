@@ -11,7 +11,7 @@ This page provides the complete configuration reference for Penguin. For an over
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `table_uri` | string | **required** | URI of the Delta Lake table. Staging metadata is read from `{table_uri}/_staging/` |
+| `table_uri` | string | **required** | URI of the Delta Lake table. Penguin scans for uncommitted parquet files in this directory. |
 | `poll_interval_secs` | integer | `10` | Interval in seconds between polling for new files |
 | `partition_by` | array | `[]` | Columns to partition the Delta table by |
 | `delta_checkpoint_interval` | integer | `10` | Number of commits between Delta checkpoints |

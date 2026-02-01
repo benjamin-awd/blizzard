@@ -3,46 +3,30 @@ title: Delta Lake Commits
 description: How Penguin commits staged Parquet files to Delta Lake
 ---
 
-Penguin watches a staging directory for completed Parquet files and commits them to Delta Lake with full ACID guarantees. This separation from [Blizzard's Parquet writer](/blizzard/architecture/sink/) provides fault tolerance—if Penguin crashes, Blizzard continues writing to staging, and Penguin picks up where it left off on restart.
+Penguin discovers Parquet files in the table directory and commits them to Delta Lake with full ACID guarantees. This separation from [Blizzard's Parquet writer](/blizzard/architecture/sink/) provides fault tolerance—if Penguin crashes, Blizzard continues writing files, and Penguin picks up where it left off on restart using watermark-based scanning.
 
-## Staging Protocol
+## High Watermark Protocol
 
-Blizzard writes files to a staging area where Penguin picks them up for Delta Lake commits.
+Blizzard writes files directly to the table directory. Penguin discovers and commits them using a high watermark to track progress.
 
 ### Directory Structure
 
 ```
 table_uri/
 ├── _delta_log/              # Delta transaction log (managed by Penguin)
-├── _staging/pending/        # Coordination metadata (.meta.json files)
 ├── date=2024-01-01/         # Partitioned parquet files
-│   └── uuid.parquet
+│   └── {uuidv7}.parquet
 └── ...
 ```
 
 ### Write Protocol
 
-1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuid}.parquet`
-2. Blizzard writes metadata to `{table_uri}/_staging/pending/{uuid}.meta.json`
-3. Penguin reads `.meta.json`, commits to Delta log, deletes `.meta.json`
+1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuidv7}.parquet`
+2. Penguin scans for files above the current watermark
+3. Penguin commits discovered files to Delta log
+4. Penguin updates watermark to highest committed file path
 
-The metadata file is written **last**, so Penguin can use its presence as an atomic signal that the Parquet file is complete and ready for commit.
-
-### Metadata Format
-
-The `.meta.json` file contains:
-
-```json
-{
-  "filename": "date=2024-01-01/019234ab-cdef-7890.parquet",
-  "size": 134217728,
-  "record_count": 1000000,
-  "partition_values": {
-    "date": "2024-01-01"
-  },
-  "source_file": "s3://bucket/input/events.ndjson.gz"
-}
-```
+File names use UUIDv7 which provides lexicographic ordering by time, enabling efficient watermark-based scanning.
 
 ## Commit Process
 
@@ -54,12 +38,12 @@ Penguin performs the following steps to commit files to Delta Lake:
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────────┐                                                        │
-│  │   Poll Staging   │  Check _staging/pending/ for .meta.json files          │
+│  │  Scan Directory  │  List files above watermark in partition directories   │
 │  └──────────────────┘                                                        │
 │           │                                                                  │
 │           ▼                                                                  │
 │  ┌──────────────────┐                                                        │
-│  │  Read Metadata   │  Parse file info, partition values, record count       │
+│  │  Read Metadata   │  Parse parquet metadata for record count, schema       │
 │  └──────────────────┘                                                        │
 │           │                                                                  │
 │           ▼                                                                  │
@@ -69,7 +53,7 @@ Penguin performs the following steps to commit files to Delta Lake:
 │           │                                                                  │
 │           ▼                                                                  │
 │  ┌──────────────────┐                                                        │
-│  │  Cleanup Meta    │  Delete .meta.json after successful commit             │
+│  │ Update Watermark │  Store highest committed path for next scan            │
 │  └──────────────────┘                                                        │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -77,7 +61,7 @@ Penguin performs the following steps to commit files to Delta Lake:
 
 ### Polling
 
-Penguin periodically polls the staging directory for new metadata files:
+Penguin periodically scans the table directory for uncommitted files:
 
 ```yaml
 source:

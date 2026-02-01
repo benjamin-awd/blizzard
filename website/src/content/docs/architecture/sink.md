@@ -140,7 +140,7 @@ sink:
 |--------|------|-------------|
 | `blizzard_bytes_written_total` | Counter | Total Parquet bytes written |
 | `blizzard_parquet_write_duration_seconds` | Histogram | Parquet file write latency |
-| `blizzard_staging_file_written_total` | Counter | Files written to staging |
+| `blizzard_parquet_files_written_total` | Counter | Parquet files written to table |
 | `blizzard_active_uploads` | Gauge | Currently uploading files |
 | `blizzard_active_multipart_parts` | Gauge | Currently uploading parts |
 | `blizzard_multipart_uploads_total` | Counter | Completed multipart uploads |

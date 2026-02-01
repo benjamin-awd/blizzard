@@ -87,14 +87,10 @@ impl CheckpointCoordinator {
         }
     }
 
-    /// Update the source state for a file.
-    pub async fn update_source_state(&self, path: &str, records_read: usize, finished: bool) {
+    /// Mark a source file as finished.
+    pub async fn mark_file_finished(&self, path: &str) {
         let mut state = self.state.lock().await;
-        if finished {
-            state.source_state.mark_finished(path);
-        } else {
-            state.source_state.update_records(path, records_read);
-        }
+        state.source_state.mark_finished(path);
         emit!(SourceStateFiles {
             count: state.source_state.files.len(),
             target: self.table.clone(),
@@ -267,7 +263,7 @@ mod tests {
     #[test]
     fn test_checkpoint_state_serialization() {
         let mut source_state = SourceState::new();
-        source_state.update_records("file1.ndjson.gz", 100);
+        source_state.mark_finished("file1.ndjson.gz");
         source_state.mark_finished("file2.ndjson.gz");
 
         let state = CheckpointState {
@@ -282,6 +278,7 @@ mod tests {
 
         assert_eq!(restored.schema_version, 2);
         assert_eq!(restored.delta_version, 5);
+        assert!(restored.source_state.is_file_finished("file1.ndjson.gz"));
         assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
         assert_eq!(
             restored.watermark,
@@ -294,12 +291,8 @@ mod tests {
         let coordinator = CheckpointCoordinator::new("test".to_string());
 
         // Update some state
-        coordinator
-            .update_source_state("file1.ndjson.gz", 100, false)
-            .await;
-        coordinator
-            .update_source_state("file2.ndjson.gz", 200, true)
-            .await;
+        coordinator.mark_file_finished("file1.ndjson.gz").await;
+        coordinator.mark_file_finished("file2.ndjson.gz").await;
         coordinator.update_delta_version(5).await;
 
         // Capture state
@@ -307,7 +300,7 @@ mod tests {
 
         assert_eq!(captured.schema_version, 2);
         assert_eq!(captured.delta_version, 5);
+        assert!(captured.source_state.is_file_finished("file1.ndjson.gz"));
         assert!(captured.source_state.is_file_finished("file2.ndjson.gz"));
-        assert!(!captured.source_state.is_file_finished("file1.ndjson.gz"));
     }
 }

@@ -10,13 +10,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use std::collections::HashMap;
-
 use blizzard_common::StorageProviderRef;
 use blizzard_common::emit;
 use blizzard_common::error::StorageError;
 use blizzard_common::metrics::UtilizationTimer;
-use blizzard_common::metrics::events::{ActiveDownloads, FileDownloadCompleted, RecoveredRecords};
+use blizzard_common::metrics::events::{ActiveDownloads, FileDownloadCompleted};
 
 /// Future type for download operations.
 type DownloadFuture = Pin<Box<dyn Future<Output = Result<DownloadedFile, StorageError>> + Send>>;
@@ -25,7 +23,6 @@ type DownloadFuture = Pin<Box<dyn Future<Output = Result<DownloadedFile, Storage
 pub(in crate::pipeline) struct DownloadedFile {
     pub path: String,
     pub compressed_data: Bytes,
-    pub skip_records: usize,
 }
 
 /// Handle to the background downloader task.
@@ -36,12 +33,8 @@ pub(in crate::pipeline) struct Downloader {
 
 impl Downloader {
     /// Spawn the downloader task.
-    ///
-    /// `skip_counts` contains the number of records to skip for partially
-    /// processed files (from crash recovery). Most files won't have an entry.
     pub fn spawn(
         pending_files: Vec<String>,
-        skip_counts: HashMap<String, usize>,
         storage: StorageProviderRef,
         shutdown: CancellationToken,
         max_concurrent: usize,
@@ -51,7 +44,6 @@ impl Downloader {
 
         let handle = tokio::spawn(Self::run(
             pending_files,
-            skip_counts,
             storage,
             tx,
             shutdown,
@@ -71,7 +63,6 @@ impl Downloader {
     /// Run the downloader task that manages concurrent file downloads.
     async fn run(
         pending_files: Vec<String>,
-        skip_counts: HashMap<String, usize>,
         storage: StorageProviderRef,
         download_tx: mpsc::Sender<Result<DownloadedFile, StorageError>>,
         shutdown: CancellationToken,
@@ -86,10 +77,6 @@ impl Downloader {
 
         // Start initial downloads
         for file_path in pending_iter.by_ref().take(max_concurrent) {
-            let skip = skip_counts.get(&file_path).copied().unwrap_or(0);
-            if skip > 0 {
-                emit!(RecoveredRecords { count: skip as u64 });
-            }
             let storage = storage.clone();
             let pipeline_clone = pipeline.clone();
             // First download starts working state
@@ -105,12 +92,7 @@ impl Downloader {
                 "[download] Starting {} (active: {})",
                 file_path, active_downloads
             );
-            downloads.push(Box::pin(download_file(
-                storage,
-                file_path,
-                skip,
-                pipeline_clone,
-            )));
+            downloads.push(Box::pin(download_file(storage, file_path, pipeline_clone)));
         }
 
         // Process downloads and start new ones as they complete
@@ -161,10 +143,6 @@ impl Downloader {
 
             // Start next download if available
             if let Some(next_file) = pending_iter.next() {
-                let skip = skip_counts.get(&next_file).copied().unwrap_or(0);
-                if skip > 0 {
-                    emit!(RecoveredRecords { count: skip as u64 });
-                }
                 let storage = storage.clone();
                 let pipeline_clone = pipeline.clone();
                 // Transition to working state when we have downloads
@@ -180,12 +158,7 @@ impl Downloader {
                     "[download] Starting {} (active: {})",
                     next_file, active_downloads
                 );
-                downloads.push(Box::pin(download_file(
-                    storage,
-                    next_file,
-                    skip,
-                    pipeline_clone,
-                )));
+                downloads.push(Box::pin(download_file(storage, next_file, pipeline_clone)));
             }
         }
 
@@ -202,7 +175,6 @@ impl Downloader {
 async fn download_file(
     storage: StorageProviderRef,
     path: String,
-    skip_records: usize,
     pipeline: String,
 ) -> Result<DownloadedFile, StorageError> {
     let start = Instant::now();
@@ -214,6 +186,5 @@ async fn download_file(
     Ok(DownloadedFile {
         path,
         compressed_data,
-        skip_records,
     })
 }

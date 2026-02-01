@@ -70,18 +70,11 @@ impl NdjsonReader {
     /// decompressed file into memory:
     /// 1. Creates a streaming decompressor based on the configured compression format
     /// 2. Parses NDJSON content into Arrow RecordBatches as data is decompressed
-    /// 3. Optionally skips a number of records (for checkpoint recovery)
     ///
     /// # Arguments
     /// * `compressed` - The compressed file data
-    /// * `skip_records` - Number of records to skip from the beginning (for resuming)
     /// * `path` - File path (used for error messages and logging)
-    pub fn read(
-        &self,
-        compressed: Bytes,
-        skip_records: usize,
-        path: &str,
-    ) -> Result<ReadResult, ReaderError> {
+    pub fn read(&self, compressed: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
@@ -119,7 +112,6 @@ impl NdjsonReader {
 
         let mut batches = Vec::new();
         let mut total_records = 0;
-        let mut records_to_skip = skip_records;
 
         // Stream through batches as they're produced
         for batch_result in json_reader {
@@ -131,24 +123,8 @@ impl NdjsonReader {
                 .build()
             })?;
 
-            // Apply skip logic for checkpoint recovery
-            if records_to_skip > 0 {
-                let batch_rows = batch.num_rows();
-                if records_to_skip >= batch_rows {
-                    records_to_skip -= batch_rows;
-                    continue;
-                } else {
-                    // Partial skip
-                    let skip = records_to_skip;
-                    records_to_skip = 0;
-                    let sliced = batch.slice(skip, batch_rows - skip);
-                    total_records += sliced.num_rows();
-                    batches.push(sliced);
-                }
-            } else {
-                total_records += batch.num_rows();
-                batches.push(batch);
-            }
+            total_records += batch.num_rows();
+            batches.push(batch);
         }
 
         emit!(FileDecompressionCompleted {

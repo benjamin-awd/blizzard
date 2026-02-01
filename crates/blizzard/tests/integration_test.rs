@@ -189,26 +189,18 @@ mod checkpoint_tests {
     fn test_source_state_tracking() {
         let mut state = SourceState::new();
 
-        // Track file progress
-        state.update_records("file1.ndjson.gz", 100);
-        assert_eq!(state.records_to_skip("file1.ndjson.gz"), 100);
+        // Initially file is not finished
         assert!(!state.is_file_finished("file1.ndjson.gz"));
-
-        // Update progress
-        state.update_records("file1.ndjson.gz", 250);
-        assert_eq!(state.records_to_skip("file1.ndjson.gz"), 250);
 
         // Mark as finished
         state.mark_finished("file1.ndjson.gz");
         assert!(state.is_file_finished("file1.ndjson.gz"));
-        assert_eq!(state.records_to_skip("file1.ndjson.gz"), 0); // Finished files skip 0
     }
 
     #[test]
     fn test_pending_files_filtering() {
         let mut state = SourceState::new();
         state.mark_finished("file1.ndjson.gz");
-        state.update_records("file2.ndjson.gz", 50);
 
         let all_files = vec![
             "file1.ndjson.gz".to_string(),

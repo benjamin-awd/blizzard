@@ -299,9 +299,14 @@ impl PenguinProcessor {
         );
 
         // Try to open existing Delta table without creating it
+        let partition_columns = table_config
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
         let delta_sink = match DeltaSink::try_open(
             &sink_storage,
-            table_config.partition_by.clone(),
+            partition_columns.clone(),
             table_key.id().to_string(),
         )
         .await
@@ -361,10 +366,16 @@ impl PenguinProcessor {
             );
 
             // Create the Delta sink with the inferred schema
+            let partition_columns = self
+                .table_config
+                .partition_by
+                .as_ref()
+                .map(|p| p.partition_columns())
+                .unwrap_or_default();
             let sink = DeltaSink::new(
                 &self.sink_storage,
                 &incoming_schema,
-                self.table_config.partition_by.clone(),
+                partition_columns,
                 self.table_key.id().to_string(),
             )
             .await?;

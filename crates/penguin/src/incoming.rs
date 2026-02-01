@@ -1,7 +1,7 @@
-//! Incoming file reader for high-watermark mode.
+//! Incoming file reader for discovering parquet files.
 //!
 //! This module handles scanning table directories for parquet files placed
-//! directly by external writers (not through the `_staging` directory protocol).
+//! directly by external writers in partition directories.
 //!
 //! # How It Works
 //!
@@ -104,7 +104,7 @@ impl IncomingReader {
         &self,
         watermark: &str,
     ) -> Result<Vec<IncomingFile>, IncomingError> {
-        let (watermark_partition, watermark_filename) = Self::parse_watermark(watermark)?;
+        let (watermark_partition, watermark_filename) = Self::parse_watermark(watermark);
 
         debug!(
             target = %self.table,
@@ -115,33 +115,44 @@ impl IncomingReader {
 
         let mut files = Vec::new();
 
-        // List all partitions and filter to >= watermark partition
-        let partitions = self.list_partitions().await?;
-        let relevant_partitions: Vec<_> = partitions
-            .into_iter()
-            .filter(|p| p.as_str() >= watermark_partition.as_str())
-            .collect();
+        // Handle root-level files (no partition)
+        if watermark_partition.is_empty() {
+            // List all files and filter to > watermark
+            let all_files = self.list_all_parquet_files().await?;
+            for file in all_files {
+                if file.path.as_str() > watermark {
+                    files.push(file);
+                }
+            }
+        } else {
+            // List partitions and filter to >= watermark partition
+            let partitions = self.list_partitions().await?;
+            let relevant_partitions: Vec<_> = partitions
+                .into_iter()
+                .filter(|p| p.as_str() >= watermark_partition.as_str())
+                .collect();
 
-        debug!(
-            target = %self.table,
-            partition_count = relevant_partitions.len(),
-            "Scanning partitions >= watermark"
-        );
+            debug!(
+                target = %self.table,
+                partition_count = relevant_partitions.len(),
+                "Scanning partitions >= watermark"
+            );
 
-        for partition in relevant_partitions {
-            let partition_files = self.list_parquet_in_partition(&partition).await?;
+            for partition in relevant_partitions {
+                let partition_files = self.list_parquet_in_partition(&partition).await?;
 
-            for file in partition_files {
-                // For watermark's partition, filter to files > watermark filename
-                // For partitions after watermark, include all files
-                let filename = file.path.split('/').next_back().unwrap_or(&file.path);
+                for file in partition_files {
+                    // For watermark's partition, filter to files > watermark filename
+                    // For partitions after watermark, include all files
+                    let filename = file.path.split('/').next_back().unwrap_or(&file.path);
 
-                if partition == watermark_partition {
-                    if filename > watermark_filename.as_str() {
+                    if partition == watermark_partition {
+                        if filename > watermark_filename.as_str() {
+                            files.push(file);
+                        }
+                    } else {
                         files.push(file);
                     }
-                } else {
-                    files.push(file);
                 }
             }
         }
@@ -154,7 +165,7 @@ impl IncomingReader {
 
     /// List files during cold start (no watermark).
     ///
-    /// Uses partition filter if configured, otherwise scans all partitions.
+    /// Uses partition filter if configured, otherwise scans all files.
     async fn list_files_cold_start(&self) -> Result<Vec<IncomingFile>, IncomingError> {
         let prefixes = self.generate_cold_start_prefixes();
 
@@ -175,18 +186,56 @@ impl IncomingReader {
             _ => {
                 info!(
                     target = %self.table,
-                    "Cold start: scanning all partitions (no filter configured)"
+                    "Cold start: scanning all files (no filter configured)"
                 );
-                let partitions = self.list_partitions().await?;
-                for partition in partitions {
-                    let partition_files = self.list_parquet_in_partition(&partition).await?;
-                    files.extend(partition_files);
-                }
+                // List all parquet files, including root-level (non-partitioned) files
+                files = self.list_all_parquet_files().await?;
             }
         }
 
         // Sort by path for deterministic ordering
         files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        Ok(files)
+    }
+
+    /// List all parquet files in the table, including root-level files.
+    async fn list_all_parquet_files(&self) -> Result<Vec<IncomingFile>, IncomingError> {
+        let mut files = Vec::new();
+
+        let mut stream = self
+            .storage
+            .list(true)
+            .await
+            .context(incoming_error::ListSnafu)?;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(path) => {
+                    let path_str = path.to_string();
+                    // Skip internal directories (those starting with _)
+                    if path_str.starts_with('_') {
+                        continue;
+                    }
+                    // Include all parquet files
+                    if path_str.ends_with(".parquet") {
+                        files.push(IncomingFile {
+                            path: path_str,
+                            size: 0,
+                        });
+                    }
+                }
+                Err(e) => {
+                    warn!(target = %self.table, "Error listing file: {}", e);
+                }
+            }
+        }
+
+        debug!(
+            target = %self.table,
+            count = files.len(),
+            "Found parquet files"
+        );
 
         Ok(files)
     }
@@ -203,23 +252,24 @@ impl IncomingReader {
     ///
     /// Example: "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet"
     ///       -> ("date=2024-01-28", "01926abc-def0-7123-4567-89abcdef0123.parquet")
-    fn parse_watermark(watermark: &str) -> Result<(String, String), IncomingError> {
+    ///
+    /// For root-level files (no partition):
+    /// "01926abc-def0-7123-4567-89abcdef0123.parquet" -> ("", "01926abc-...")
+    fn parse_watermark(watermark: &str) -> (String, String) {
         // Find the last '/' to split partition from filename
         if let Some(last_slash) = watermark.rfind('/') {
             let partition = watermark[..last_slash].to_string();
             let filename = watermark[last_slash + 1..].to_string();
-            Ok((partition, filename))
+            (partition, filename)
         } else {
-            // No partition prefix, just a filename
-            Err(IncomingError::InvalidWatermark {
-                watermark: watermark.to_string(),
-            })
+            // No partition prefix, just a filename (root-level file)
+            (String::new(), watermark.to_string())
         }
     }
 
     /// List all partition directories in the table.
     ///
-    /// Excludes `_staging/` and `_delta_log/` directories.
+    /// Excludes internal directories (those starting with `_`).
     async fn list_partitions(&self) -> Result<Vec<String>, IncomingError> {
         let mut partitions = HashSet::new();
 
@@ -233,11 +283,8 @@ impl IncomingReader {
             match result {
                 Ok(path) => {
                     let path_str = path.to_string();
-                    // Skip internal directories
-                    if path_str.starts_with("_staging/")
-                        || path_str.starts_with("_delta_log/")
-                        || path_str.starts_with("_symlink_format_manifest/")
-                    {
+                    // Skip internal directories (those starting with _)
+                    if path_str.starts_with('_') {
                         continue;
                     }
                     // Extract partition prefix (everything except the filename)
@@ -395,8 +442,7 @@ mod tests {
     fn test_parse_watermark() {
         let (partition, filename) = IncomingReader::parse_watermark(
             "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet",
-        )
-        .unwrap();
+        );
         assert_eq!(partition, "date=2024-01-28");
         assert_eq!(filename, "01926abc-def0-7123-4567-89abcdef0123.parquet");
     }
@@ -405,16 +451,16 @@ mod tests {
     fn test_parse_watermark_nested_partitions() {
         let (partition, filename) = IncomingReader::parse_watermark(
             "date=2024-01-28/hour=14/01926abc-def0-7123-4567-89abcdef0123.parquet",
-        )
-        .unwrap();
+        );
         assert_eq!(partition, "date=2024-01-28/hour=14");
         assert_eq!(filename, "01926abc-def0-7123-4567-89abcdef0123.parquet");
     }
 
     #[test]
     fn test_parse_watermark_no_partition() {
-        let result = IncomingReader::parse_watermark("file.parquet");
-        assert!(result.is_err());
+        let (partition, filename) = IncomingReader::parse_watermark("file.parquet");
+        assert_eq!(partition, "");
+        assert_eq!(filename, "file.parquet");
     }
 
     #[test]
@@ -461,12 +507,12 @@ mod tests {
         std::fs::write(partition2.join("file2.parquet"), b"").unwrap();
         std::fs::write(old_partition.join("old-file.parquet"), b"").unwrap();
 
-        // Create internal directories that should be excluded
-        let staging = table_path.join("_staging/pending");
+        // Create internal directories that should be excluded (those starting with _)
+        let internal = table_path.join("_internal");
         let delta_log = table_path.join("_delta_log");
-        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&internal).unwrap();
         std::fs::create_dir_all(&delta_log).unwrap();
-        std::fs::write(staging.join("test.meta.json"), b"{}").unwrap();
+        std::fs::write(internal.join("test.meta.json"), b"{}").unwrap();
         std::fs::write(delta_log.join("00000.json"), b"{}").unwrap();
 
         let storage = Arc::new(
@@ -486,12 +532,11 @@ mod tests {
         // List partitions
         let partitions = reader.list_partitions().await.unwrap();
 
-        // Should find our data partitions but not _staging or _delta_log
+        // Should find our data partitions but not internal directories (those starting with _)
         assert!(partitions.contains(&"date=2026-01-27".to_string()));
         assert!(partitions.contains(&"date=2026-01-28".to_string()));
         assert!(partitions.contains(&"date=2026-01-20".to_string()));
-        assert!(!partitions.iter().any(|p| p.contains("_staging")));
-        assert!(!partitions.iter().any(|p| p.contains("_delta_log")));
+        assert!(!partitions.iter().any(|p| p.starts_with('_')));
 
         // List all files (cold start without filter)
         let files = reader.list_files_cold_start().await.unwrap();

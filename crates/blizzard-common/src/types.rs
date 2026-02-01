@@ -65,20 +65,14 @@ impl FinishedFile {
     }
 }
 
-/// File read state for checkpoint tracking.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum FileReadState {
-    /// File has been completely processed.
-    Finished,
-    /// File is partially processed with this many records read.
-    RecordsRead(usize),
-}
-
 /// Aggregate state for all source files.
+///
+/// Tracks which files have been completely processed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceState {
-    /// Map of file path to read state.
-    pub files: HashMap<String, FileReadState>,
+    /// Set of file paths that have been finished.
+    /// Uses a HashMap for backwards compatibility with existing checkpoints.
+    pub files: HashMap<String, ()>,
 }
 
 impl SourceState {
@@ -91,26 +85,12 @@ impl SourceState {
 
     /// Mark a file as finished.
     pub fn mark_finished(&mut self, path: &str) {
-        self.files.insert(path.to_string(), FileReadState::Finished);
-    }
-
-    /// Update the record count for a file.
-    pub fn update_records(&mut self, path: &str, records_read: usize) {
-        self.files
-            .insert(path.to_string(), FileReadState::RecordsRead(records_read));
+        self.files.insert(path.to_string(), ());
     }
 
     /// Check if a file has been completely processed.
     pub fn is_file_finished(&self, path: &str) -> bool {
-        matches!(self.files.get(path), Some(FileReadState::Finished))
-    }
-
-    /// Get the number of records to skip for a file.
-    pub fn records_to_skip(&self, path: &str) -> usize {
-        match self.files.get(path) {
-            Some(FileReadState::RecordsRead(n)) => *n,
-            _ => 0,
-        }
+        self.files.contains_key(path)
     }
 
     /// Filter and return owned files that need processing.
@@ -128,9 +108,6 @@ impl SourceState {
     /// This reduces memory usage by pruning files that will never appear in
     /// future listings (because they're outside the partition filter window).
     ///
-    /// - In-progress files are always retained (they need to be resumed)
-    /// - Finished files are only retained if they match at least one prefix
-    ///
     /// Returns the number of files removed.
     ///
     /// # Warning
@@ -143,15 +120,8 @@ impl SourceState {
     pub fn compact(&mut self, prefixes: &[String]) -> usize {
         let before = self.files.len();
 
-        self.files.retain(|path, state| {
-            // Always keep in-progress files
-            if matches!(state, FileReadState::RecordsRead(_)) {
-                return true;
-            }
-
-            // Keep finished files that match any prefix
-            prefixes.iter().any(|prefix| path.starts_with(prefix))
-        });
+        self.files
+            .retain(|path, _| prefixes.iter().any(|prefix| path.starts_with(prefix)));
 
         before - self.files.len()
     }
@@ -165,13 +135,12 @@ mod tests {
     fn test_source_state() {
         let mut state = SourceState::new();
 
-        state.update_records("file1.ndjson.gz", 100);
+        state.mark_finished("file1.ndjson.gz");
         state.mark_finished("file2.ndjson.gz");
 
-        assert!(!state.is_file_finished("file1.ndjson.gz"));
+        assert!(state.is_file_finished("file1.ndjson.gz"));
         assert!(state.is_file_finished("file2.ndjson.gz"));
-        assert_eq!(state.records_to_skip("file1.ndjson.gz"), 100);
-        assert_eq!(state.records_to_skip("file2.ndjson.gz"), 0);
+        assert!(!state.is_file_finished("file3.ndjson.gz"));
     }
 
     #[test]
@@ -179,7 +148,6 @@ mod tests {
         let mut state = SourceState::new();
 
         state.mark_finished("file1.ndjson.gz");
-        state.update_records("file2.ndjson.gz", 50);
 
         let all_files = vec![
             "file1.ndjson.gz".to_string(),
@@ -205,10 +173,7 @@ mod tests {
         state.mark_finished("date=2026-01-28/hour=08/file3.ndjson.gz");
         state.mark_finished("date=2026-01-28/hour=09/file4.ndjson.gz");
 
-        // In-progress file outside window (should still be kept)
-        state.update_records("date=2026-01-20/hour=00/file5.ndjson.gz", 100);
-
-        assert_eq!(state.files.len(), 5);
+        assert_eq!(state.files.len(), 4);
 
         let prefixes = vec![
             "date=2026-01-28/hour=08".to_string(),
@@ -218,17 +183,10 @@ mod tests {
         let removed = state.compact(&prefixes);
 
         assert_eq!(removed, 2); // Two old finished files removed
-        assert_eq!(state.files.len(), 3);
+        assert_eq!(state.files.len(), 2);
 
         // Recent finished files kept
         assert!(state.is_file_finished("date=2026-01-28/hour=08/file3.ndjson.gz"));
         assert!(state.is_file_finished("date=2026-01-28/hour=09/file4.ndjson.gz"));
-
-        // In-progress file kept even though outside window
-        assert!(!state.is_file_finished("date=2026-01-20/hour=00/file5.ndjson.gz"));
-        assert_eq!(
-            state.records_to_skip("date=2026-01-20/hour=00/file5.ndjson.gz"),
-            100
-        );
     }
 }
