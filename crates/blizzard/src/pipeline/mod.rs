@@ -34,6 +34,13 @@ fn random_jitter(max_secs: u64) -> Duration {
         Duration::ZERO
     }
 }
+
+/// Generate date prefixes for partition filtering based on pipeline config.
+fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
+    config.source.partition_filter.as_ref().map(|pf| {
+        DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
+    })
+}
 use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefixes};
 use blizzard_common::types::SourceState;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
@@ -354,10 +361,7 @@ impl BlizzardProcessor {
 
         // Get schema - either from explicit config or by inference
         let schema = if pipeline_config.schema.should_infer() {
-            // Generate date prefixes for partition filtering (if configured)
-            let prefixes = pipeline_config.source.partition_filter.as_ref().map(|pf| {
-                DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
-            });
+            let prefixes = generate_date_prefixes(&pipeline_config);
 
             infer_schema_from_source(
                 &source_storage,
@@ -403,17 +407,6 @@ impl BlizzardProcessor {
         })
     }
 
-    /// Generate date prefixes for partition filtering.
-    fn generate_date_prefixes(&self) -> Option<Vec<String>> {
-        self.pipeline_config
-            .source
-            .partition_filter
-            .as_ref()
-            .map(|pf| {
-                DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
-            })
-    }
-
     /// Extract partition values from a source path.
     fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
         let mut values = HashMap::new();
@@ -448,7 +441,7 @@ impl PollingProcessor for BlizzardProcessor {
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
         // Generate date prefixes for efficient listing
-        let prefixes = self.generate_date_prefixes();
+        let prefixes = generate_date_prefixes(&self.pipeline_config);
 
         // On cold start, load checkpoint if watermark mode is enabled
         if cold_start {
