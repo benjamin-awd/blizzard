@@ -22,6 +22,7 @@ fn default_poll_interval() -> u64 {
 
 /// Configuration for a partition filter used during cold start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionFilterConfig {
     /// strftime-style prefix template (e.g., "date=%Y-%m-%d").
     pub prefix_template: String,
@@ -32,6 +33,7 @@ pub struct PartitionFilterConfig {
 
 /// Configuration for partitioning output files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionByConfig {
     /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
     pub prefix_template: String,
@@ -50,6 +52,7 @@ impl PartitionByConfig {
 
 /// Configuration for a Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TableConfig {
     /// URI of the Delta Lake table.
     pub table_uri: String,
@@ -137,6 +140,7 @@ fn default_min_multipart_size_mb() -> usize {
 ///   enabled: true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Named table configurations.
     #[serde(default)]
@@ -220,13 +224,16 @@ impl Config {
     /// Checks:
     /// - All tables have non-empty table_uri
     /// - No resource conflicts (e.g., two tables using the same Delta table)
+    ///
+    /// Collects all validation errors and returns them together, rather than
+    /// stopping at the first error.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut errors = Vec::new();
+
         // Check for empty table_uri
         for (key, table) in &self.tables {
             if table.table_uri.is_empty() {
-                return Err(ConfigError::EmptyTableUriForTable {
-                    table: key.id().to_string(),
-                });
+                errors.push(format!("Table '{}': table_uri is empty", key.id()));
             }
         }
 
@@ -237,19 +244,19 @@ impl Config {
                 .map(|(key, config)| (key.id().to_string(), config.resources())),
         );
 
-        if !conflicts.is_empty() {
-            let message = conflicts
-                .iter()
-                .map(|(resource, keys)| {
-                    let keys_list: Vec<_> = keys.iter().collect();
-                    format!("{} claimed by: {:?}", resource, keys_list)
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(ConfigError::ResourceConflict { message });
+        for (resource, keys) in conflicts {
+            let keys_list: Vec<_> = keys.iter().collect();
+            errors.push(format!(
+                "Resource conflict: {} claimed by {:?}",
+                resource, keys_list
+            ));
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::MultipleErrors { errors })
+        }
     }
 
     /// Iterate over all tables with their keys.
@@ -325,7 +332,7 @@ tables:
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("users"));
-        assert!(err.to_string().contains("empty table_uri"));
+        assert!(err.to_string().contains("table_uri is empty"));
     }
 
     #[test]
@@ -472,5 +479,76 @@ tables:
         let partition_by = table.partition_by.as_ref().unwrap();
         assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_table() {
+        let yaml = r#"
+tables:
+  events:
+    table_uri: gs://bucket/events
+    pollinterval: 30
+"#;
+        let result = Config::parse(yaml);
+        assert!(
+            result.is_err(),
+            "Should reject unknown field 'pollinterval'"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_at_top_level() {
+        let yaml = r#"
+tables:
+  events:
+    table_uri: gs://bucket/events
+unknown_key: value
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should reject unknown field 'unknown_key'");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_multiple_errors_collected() {
+        let yaml = r#"
+tables:
+  a:
+    table_uri: ""
+  b:
+    table_uri: ""
+  c:
+    table_uri: gs://bucket/valid
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should have validation errors");
+        let err = result.unwrap_err().to_string();
+        // Should contain errors for both 'a' and 'b' tables
+        assert!(
+            err.contains("Table 'a'"),
+            "Should mention table 'a': {}",
+            err
+        );
+        assert!(
+            err.contains("Table 'b'"),
+            "Should mention table 'b': {}",
+            err
+        );
+        assert!(
+            err.contains("table_uri is empty"),
+            "Should mention empty table_uri: {}",
+            err
+        );
     }
 }

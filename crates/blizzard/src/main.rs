@@ -63,9 +63,13 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    run_pipelines(&paths).await
+}
+
+async fn run_pipelines(paths: &[ConfigPath]) -> ExitCode {
     info!("Loading config from {} source(s)", paths.len());
 
-    let config = match Config::from_paths(&paths) {
+    let config = match Config::from_paths(paths) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to load config: {}", e);

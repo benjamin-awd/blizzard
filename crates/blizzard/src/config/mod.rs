@@ -19,6 +19,7 @@ use blizzard_common::error::ConfigError;
 
 /// Configuration for a partition filter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionFilterConfig {
     /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
     pub prefix_template: String,
@@ -29,6 +30,7 @@ pub struct PartitionFilterConfig {
 
 /// Configuration for partitioning output files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartitionByConfig {
     /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
     pub prefix_template: String,
@@ -47,6 +49,7 @@ impl PartitionByConfig {
 
 /// Configuration for the input source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     /// Path to the input directory (supports S3, GCS, Azure, local).
     pub path: String,
@@ -93,6 +96,7 @@ pub enum CompressionFormat {
 
 /// Configuration for the sink Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SinkConfig {
     /// URI of the Delta table (supports S3, GCS, Azure, local).
     /// Parquet files are written directly to {table_uri}/{partition}/
@@ -123,6 +127,7 @@ fn default_row_group_size() -> usize {
 
 /// Schema field configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldConfig {
     /// Field name.
     pub name: String,
@@ -211,6 +216,7 @@ impl SchemaConfig {
 
 /// Configuration for a single pipeline (source → sink with schema).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Source configuration.
     pub source: SourceConfig,
@@ -274,6 +280,7 @@ impl PipelineConfig {
 ///   enabled: true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Named pipeline configurations.
     #[serde(default)]
@@ -358,32 +365,36 @@ impl Config {
     /// - All pipelines have non-empty source path and table_uri
     /// - All pipelines have either explicit schema fields or `schema: { infer: true }`
     /// - No resource conflicts (e.g., two pipelines using the same source directory)
+    ///
+    /// Collects all validation errors and returns them together, rather than
+    /// stopping at the first error.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut errors = Vec::new();
+
         // Check for empty paths and schema
         for (key, pipeline) in &self.pipelines {
             if pipeline.source.path.is_empty() {
-                return Err(ConfigError::EmptySourcePathForPipeline {
-                    pipeline: key.id().to_string(),
-                });
+                errors.push(format!("Pipeline '{}': source.path is empty", key.id()));
             }
             if pipeline.sink.table_uri.is_empty() {
-                return Err(ConfigError::EmptyTableUriForPipeline {
-                    pipeline: key.id().to_string(),
-                });
+                errors.push(format!("Pipeline '{}': sink.table_uri is empty", key.id()));
             }
+
             // Validate schema configuration
             let has_fields = !pipeline.schema.fields.is_empty();
             let wants_infer = pipeline.schema.infer;
 
             if wants_infer && has_fields {
-                return Err(ConfigError::SchemaConflict {
-                    pipeline: key.id().to_string(),
-                });
+                errors.push(format!(
+                    "Pipeline '{}': cannot specify both 'infer: true' and 'fields'",
+                    key.id()
+                ));
             }
             if !wants_infer && !has_fields {
-                return Err(ConfigError::EmptySchemaForPipeline {
-                    pipeline: key.id().to_string(),
-                });
+                errors.push(format!(
+                    "Pipeline '{}': empty schema (specify either 'infer: true' or 'fields')",
+                    key.id()
+                ));
             }
         }
 
@@ -394,19 +405,22 @@ impl Config {
                 .map(|(key, config)| (key.id().to_string(), config.resources())),
         );
 
-        if !conflicts.is_empty() {
-            let message = conflicts
-                .iter()
-                .map(|(resource, keys)| {
-                    let keys_list: Vec<_> = keys.iter().collect();
-                    format!("{} claimed by: {:?}", resource, keys_list)
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(ConfigError::ResourceConflict { message });
+        for (resource, keys) in conflicts {
+            let keys_list: Vec<_> = keys.iter().collect();
+            errors.push(format!(
+                "Resource conflict: {} claimed by {:?}",
+                resource, keys_list
+            ));
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else if errors.len() == 1 {
+            // For a single error, return a more specific error type if possible
+            Err(ConfigError::MultipleErrors { errors })
+        } else {
+            Err(ConfigError::MultipleErrors { errors })
+        }
     }
 
     /// Iterate over all pipelines with their keys.
@@ -509,7 +523,7 @@ pipelines:
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("empty source path"));
+        assert!(err.to_string().contains("source.path is empty"));
     }
 
     #[test]
@@ -530,7 +544,7 @@ pipelines:
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("empty table_uri"));
+        assert!(err.to_string().contains("sink.table_uri is empty"));
     }
 
     #[test]
@@ -932,5 +946,180 @@ pipelines:
         let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
         assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_source() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+      batchsize: 100
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should reject unknown field 'batchsize'");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_sink() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+      filesize: 128
+    schema:
+      infer: true
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should reject unknown field 'filesize'");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_in_pipeline() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+    unknown_key: value
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should reject unknown field 'unknown_key'");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_field_rejected_at_top_level() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+unknown_top_level: value
+"#;
+        let result = Config::parse(yaml);
+        assert!(
+            result.is_err(),
+            "Should reject unknown field 'unknown_top_level'"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "Error should mention unknown field: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_multiple_errors_collected() {
+        let yaml = r#"
+pipelines:
+  a:
+    source:
+      path: ""
+    sink:
+      table_uri: ""
+    schema:
+      infer: true
+  b:
+    source:
+      path: ""
+    sink:
+      table_uri: gs://bucket/b
+    schema:
+      infer: true
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should have validation errors");
+        let err = result.unwrap_err().to_string();
+        // Should contain errors for pipeline 'a' (empty path and empty table_uri)
+        // and pipeline 'b' (empty path)
+        assert!(
+            err.contains("Pipeline 'a'"),
+            "Should mention pipeline 'a': {}",
+            err
+        );
+        assert!(
+            err.contains("Pipeline 'b'"),
+            "Should mention pipeline 'b': {}",
+            err
+        );
+        assert!(
+            err.contains("source.path is empty"),
+            "Should mention empty source path: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_multiple_schema_errors_collected() {
+        let yaml = r#"
+pipelines:
+  a:
+    source:
+      path: gs://bucket/a
+    sink:
+      table_uri: gs://bucket/delta/a
+    schema:
+      infer: true
+      fields:
+        - name: id
+          type: string
+  b:
+    source:
+      path: gs://bucket/b
+    sink:
+      table_uri: gs://bucket/delta/b
+    schema:
+      infer: false
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err(), "Should have validation errors");
+        let err = result.unwrap_err().to_string();
+        // Pipeline 'a' has both infer and fields
+        // Pipeline 'b' has empty schema
+        assert!(
+            err.contains("Pipeline 'a'") && err.contains("cannot specify both"),
+            "Should mention pipeline 'a' schema conflict: {}",
+            err
+        );
+        assert!(
+            err.contains("Pipeline 'b'") && err.contains("empty schema"),
+            "Should mention pipeline 'b' empty schema: {}",
+            err
+        );
     }
 }

@@ -99,11 +99,11 @@ pub enum ConfigError {
     EnvInterpolation { message: String },
 
     /// Failed to parse YAML configuration.
-    #[snafu(display("Failed to parse YAML configuration"))]
+    #[snafu(display("Failed to parse YAML: {source}"))]
     YamlParse { source: serde_yaml::Error },
 
     /// Failed to read configuration file.
-    #[snafu(display("Failed to read configuration file"))]
+    #[snafu(display("Failed to read configuration file: {source}"))]
     ReadFile { source: std::io::Error },
 
     /// Resource conflict detected (e.g., two tables using the same staging directory).

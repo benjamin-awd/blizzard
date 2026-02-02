@@ -39,6 +39,7 @@ fn default_poll_jitter_secs() -> u64 {
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
     /// Total concurrent operations across all components.
     ///

@@ -23,6 +23,7 @@ pub const MB: usize = 1024 * KB;
 
 /// Metrics configuration for Prometheus endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Address to bind the metrics HTTP server (default: "0.0.0.0:9090").
     #[serde(default = "default_metrics_address")]
@@ -52,6 +53,7 @@ fn default_metrics_address() -> String {
 
 /// Error handling configuration for resilient pipeline execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ErrorHandlingConfig {
     /// Maximum failures before stopping pipeline (0 = unlimited, default: 0).
     #[serde(default)]
