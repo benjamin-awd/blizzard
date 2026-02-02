@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Monitoring dashboard for Blizzard NDJSON.gz to Delta Lake streaming pipeline",
+  "description": "Monitoring dashboard for Blizzard NDJSON.gz ingestion pipeline",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -61,7 +61,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
+        "w": 4,
         "x": 0,
         "y": 1
       },
@@ -122,8 +122,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 5,
+        "w": 4,
+        "x": 4,
         "y": 1
       },
       "id": 2,
@@ -183,8 +183,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 10,
+        "w": 4,
+        "x": 8,
         "y": 1
       },
       "id": 3,
@@ -222,7 +222,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rate of bytes written to Delta Lake",
+      "description": "Rate of bytes written to Parquet files",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -244,8 +244,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 15,
+        "w": 4,
+        "x": 12,
         "y": 1
       },
       "id": 4,
@@ -314,7 +314,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 20,
+        "x": 16,
         "y": 1
       },
       "id": 5,
@@ -345,6 +345,77 @@
         }
       ],
       "title": "Checkpoint Age",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Percentage of files that failed processing",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(blizzard_files_failed_total{job=~\"$job\"}[5m])) / (sum(rate(blizzard_files_processed_total{job=~\"$job\"}[5m])) + sum(rate(blizzard_files_failed_total{job=~\"$job\"}[5m]))) * 100",
+          "legendFormat": "Error Rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate",
       "type": "stat"
     },
     {
@@ -434,7 +505,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "error"
+              "options": "failed"
             },
             "properties": [
               {
@@ -595,7 +666,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(blizzard_batches_written_total{job=~\"$job\"}[5m]))",
+          "expr": "sum(rate(blizzard_batches_processed_total{job=~\"$job\"}[5m]))",
           "legendFormat": "Batches/s",
           "refId": "B"
         }
@@ -608,7 +679,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Throughput comparing bytes read from source vs bytes written to Delta Lake",
+      "description": "Throughput comparing bytes read from source vs bytes written to Parquet",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -788,7 +859,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 6,
+        "w": 8,
         "x": 0,
         "y": 15
       },
@@ -877,8 +948,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 6,
-        "x": 6,
+        "w": 8,
+        "x": 8,
         "y": 15
       },
       "id": 21,
@@ -966,8 +1037,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 6,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 15
       },
       "id": 22,
@@ -1015,95 +1086,6 @@
         }
       ],
       "title": "Parquet Write Duration",
-      "type": "heatmap"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Distribution of Delta Lake commit durations",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "scheme",
-            "scheme": "Oranges"
-          },
-          "custom": {
-            "fillOpacity": 80,
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "scaleDistribution": {
-              "type": "linear"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 15
-      },
-      "id": 23,
-      "options": {
-        "calculate": false,
-        "cellGap": 1,
-        "color": {
-          "mode": "scheme",
-          "scheme": "Oranges"
-        },
-        "exemplars": {
-          "color": "rgba(255,0,255,0.7)"
-        },
-        "filterValues": {
-          "le": 1e-9
-        },
-        "legend": {
-          "show": true
-        },
-        "rowsFrame": {
-          "layout": "auto"
-        },
-        "tooltip": {
-          "mode": "single",
-          "showColorScale": false,
-          "yHistogram": true
-        },
-        "yAxis": {
-          "axisPlacement": "left",
-          "reverse": false,
-          "unit": "s"
-        }
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (le) (increase(blizzard_delta_commit_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
-          "format": "heatmap",
-          "legendFormat": "{{le}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Delta Commit Duration",
       "type": "heatmap"
     },
     {
@@ -1217,9 +1199,18 @@
           "expr": "blizzard_active_uploads{job=~\"$job\"}",
           "legendFormat": "Active Uploads",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "blizzard_active_multipart_parts{job=~\"$job\"}",
+          "legendFormat": "Active Multipart Parts",
+          "refId": "C"
         }
       ],
-      "title": "Active Downloads/Uploads",
+      "title": "Active Operations",
       "type": "timeseries"
     },
     {
@@ -1317,9 +1308,18 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_rayon_queue_depth{job=~\"$job\"}",
-          "legendFormat": "Rayon Queue Depth",
+          "expr": "blizzard_decompression_queue_depth{job=~\"$job\"}",
+          "legendFormat": "Decompression Queue Depth",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "blizzard_upload_queue_depth{job=~\"$job\"}",
+          "legendFormat": "Upload Queue Depth",
+          "refId": "C"
         }
       ],
       "title": "Queue Depths",
@@ -1696,7 +1696,7 @@
       },
       "id": 105,
       "panels": [],
-      "title": "Errors & Recovery",
+      "title": "Errors",
       "type": "row"
     },
     {
@@ -1758,7 +1758,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 12,
         "x": 0,
         "y": 42
       },
@@ -1798,117 +1798,79 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Total number of records recovered from checkpoints",
+      "description": "Total multipart uploads completed",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 42
-      },
-      "id": 51,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum(blizzard_recovered_records_total{job=~\"$job\"})",
-          "legendFormat": "Recovered Records",
-          "refId": "A"
-        }
-      ],
-      "title": "Recovered Records",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Percentage of files that failed processing",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "max": 100,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
               }
             ]
           },
-          "unit": "percent"
+          "unit": "ops"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 42
       },
-      "id": 52,
+      "id": 51,
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
+        "legend": {
           "calcs": [
-            "lastNotNull"
+            "mean",
+            "max"
           ],
-          "fields": "",
-          "values": false
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "textMode": "auto"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -1917,13 +1879,22 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(blizzard_files_failed_total{job=~\"$job\"}[5m])) / (sum(rate(blizzard_files_processed_total{job=~\"$job\"}[5m])) + sum(rate(blizzard_files_failed_total{job=~\"$job\"}[5m]))) * 100",
-          "legendFormat": "Error Rate",
+          "expr": "sum(rate(blizzard_multipart_uploads_total{job=~\"$job\"}[5m]))",
+          "legendFormat": "Multipart Uploads/s",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(blizzard_parquet_files_written_total{job=~\"$job\"}[5m]))",
+          "legendFormat": "Parquet Files/s",
+          "refId": "B"
         }
       ],
-      "title": "Error Rate",
-      "type": "stat"
+      "title": "Upload Operations",
+      "type": "timeseries"
     },
     {
       "collapsed": false,
@@ -1943,7 +1914,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Number of files tracked in the SourceState HashMap. This grows unbounded as files are processed and is a key indicator of memory growth.",
+      "description": "Number of files tracked in the SourceState HashMap",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2012,7 +1983,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Serialized size of checkpoint state in bytes. Grows proportionally with source state files (~150 bytes per file).",
+      "description": "Bytes of Parquet files waiting to be uploaded",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2028,11 +1999,11 @@
               },
               {
                 "color": "yellow",
-                "value": 10485760
+                "value": 536870912
               },
               {
                 "color": "red",
-                "value": 52428800
+                "value": 1073741824
               }
             ]
           },
@@ -2068,75 +2039,6 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_checkpoint_state_bytes{job=~\"$job\"}",
-          "legendFormat": "Checkpoint Size",
-          "refId": "A"
-        }
-      ],
-      "title": "Checkpoint State Size",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "Bytes of Parquet files waiting to be uploaded. Each file is ~128 MB. High values indicate upload bottleneck.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 536870912
-              },
-              {
-                "color": "red",
-                "value": 1073741824
-              }
-            ]
-          },
-          "unit": "bytes"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 51
-      },
-      "id": 62,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
           "expr": "blizzard_upload_queue_bytes{job=~\"$job\"}",
           "legendFormat": "Upload Queue",
           "refId": "A"
@@ -2150,7 +2052,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Files uploaded but not yet committed to Delta Lake. Accumulates up to batch size (10) before commit.",
+      "description": "Files awaiting commit to Delta Lake",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2181,10 +2083,10 @@
       "gridPos": {
         "h": 4,
         "w": 6,
-        "x": 18,
+        "x": 12,
         "y": 51
       },
-      "id": 63,
+      "id": 62,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -2219,7 +2121,68 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Source state files tracked over time. A continuously growing line indicates unbounded memory growth.",
+      "description": "Total parquet bytes written",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 51
+      },
+      "id": 63,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(blizzard_parquet_bytes_written_total{job=~\"$job\"}[5m]))",
+          "legendFormat": "Parquet Bytes/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Parquet Write Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Source state files tracked over time",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2302,17 +2265,8 @@
             "uid": "${datasource}"
           },
           "expr": "blizzard_source_state_files{job=~\"$job\"}",
-          "legendFormat": "Source State Files",
+          "legendFormat": "{{target}}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "blizzard_checkpoint_state_bytes{job=~\"$job\"} / 150",
-          "legendFormat": "Est. Files (from checkpoint size)",
-          "refId": "B"
         }
       ],
       "title": "Source State Growth",
@@ -2323,7 +2277,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Memory held in upload buffers. High values indicate upload is slower than processing.",
+      "description": "Memory held in upload buffers",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2433,15 +2387,6 @@
           "expr": "blizzard_upload_queue_depth{job=~\"$job\"}",
           "legendFormat": "Upload Queue Depth",
           "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "blizzard_pending_commit_files{job=~\"$job\"}",
-          "legendFormat": "Pending Commit Files",
-          "refId": "C"
         }
       ],
       "title": "Upload Buffer Memory",
@@ -2452,7 +2397,7 @@
   "schemaVersion": 38,
   "tags": [
     "blizzard",
-    "delta-lake",
+    "ingestion",
     "streaming"
   ],
   "templating": {
@@ -2523,8 +2468,8 @@
     ]
   },
   "timezone": "browser",
-  "title": "Blizzard Pipeline Metrics",
-  "uid": "blizzard-pipeline",
+  "title": "Blizzard Ingestion Pipeline",
+  "uid": "blizzard-ingestion",
   "version": 1,
   "weekStart": ""
 }
