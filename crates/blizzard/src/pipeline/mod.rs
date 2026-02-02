@@ -45,6 +45,148 @@ use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefi
 use blizzard_common::types::SourceState;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
+/// Trait for tracking which source files have been processed.
+///
+/// Two implementations exist:
+/// - `WatermarkTracker`: Persists a high-watermark to storage, filters by path comparison
+/// - `HashMapTracker`: Keeps processed files in memory, filters by set membership
+#[async_trait]
+trait StateTracker: Send {
+    /// Initialize on cold start - load state from storage if available.
+    /// Returns a message describing the initialization result for logging.
+    async fn init(&mut self) -> Result<Option<String>, PipelineError>;
+
+    /// List pending files from storage, filtering out already-processed ones.
+    async fn list_pending(
+        &self,
+        storage: &StorageProviderRef,
+        prefixes: Option<&[String]>,
+        pipeline_key: &str,
+    ) -> Result<Vec<String>, PipelineError>;
+
+    /// Mark a file as processed.
+    fn mark_processed(&mut self, path: &str);
+
+    /// Save state to storage (no-op for in-memory trackers).
+    async fn save(&self) -> Result<(), PipelineError>;
+
+    /// Get number of tracked files (for metrics).
+    fn tracked_count(&self) -> usize;
+
+    /// Describe the mode (for logging).
+    fn mode_name(&self) -> &'static str;
+}
+
+/// Watermark-based state tracker that persists to storage.
+struct WatermarkTracker {
+    checkpoint_manager: CheckpointManager,
+}
+
+impl WatermarkTracker {
+    fn new(checkpoint_manager: CheckpointManager) -> Self {
+        Self { checkpoint_manager }
+    }
+}
+
+#[async_trait]
+impl StateTracker for WatermarkTracker {
+    async fn init(&mut self) -> Result<Option<String>, PipelineError> {
+        match self.checkpoint_manager.load().await {
+            Ok(true) => Ok(Some(format!(
+                "Restored checkpoint from storage (watermark: {:?})",
+                self.checkpoint_manager.watermark()
+            ))),
+            Ok(false) => Ok(None),
+            Err(e) => {
+                warn!(error = %e, "Failed to load checkpoint, starting fresh");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn list_pending(
+        &self,
+        storage: &StorageProviderRef,
+        prefixes: Option<&[String]>,
+        pipeline_key: &str,
+    ) -> Result<Vec<String>, PipelineError> {
+        list_ndjson_files_above_watermark(
+            storage,
+            self.checkpoint_manager.watermark(),
+            prefixes,
+            pipeline_key,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    fn mark_processed(&mut self, path: &str) {
+        self.checkpoint_manager.update_watermark(path);
+    }
+
+    async fn save(&self) -> Result<(), PipelineError> {
+        self.checkpoint_manager.save().await.map_err(|e| {
+            warn!(error = %e, "Failed to save checkpoint");
+            e.into()
+        })
+    }
+
+    fn tracked_count(&self) -> usize {
+        0 // Watermark mode doesn't track individual files
+    }
+
+    fn mode_name(&self) -> &'static str {
+        "watermark"
+    }
+}
+
+/// In-memory hash map state tracker.
+struct HashMapTracker {
+    source_state: SourceState,
+}
+
+impl HashMapTracker {
+    fn new() -> Self {
+        Self {
+            source_state: SourceState::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl StateTracker for HashMapTracker {
+    async fn init(&mut self) -> Result<Option<String>, PipelineError> {
+        Ok(None) // No persistent state to load
+    }
+
+    async fn list_pending(
+        &self,
+        storage: &StorageProviderRef,
+        prefixes: Option<&[String]>,
+        pipeline_key: &str,
+    ) -> Result<Vec<String>, PipelineError> {
+        let all_files =
+            list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key).await?;
+        Ok(self.source_state.filter_pending_files(all_files))
+    }
+
+    fn mark_processed(&mut self, path: &str) {
+        self.source_state.mark_finished(path);
+    }
+
+    async fn save(&self) -> Result<(), PipelineError> {
+        Ok(()) // No-op for in-memory tracker
+    }
+
+    fn tracked_count(&self) -> usize {
+        self.source_state.files.len()
+    }
+
+    fn mode_name(&self) -> &'static str {
+        "hashmap"
+    }
+}
+
 use crate::checkpoint::CheckpointManager;
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
@@ -295,10 +437,8 @@ struct BlizzardProcessor {
     schema: deltalake::arrow::datatypes::SchemaRef,
     /// NDJSON reader with schema validation.
     reader: Arc<NdjsonReader>,
-    /// Tracks which source files have been processed (used when watermark mode is disabled).
-    source_state: SourceState,
-    /// Checkpoint manager for watermark-based tracking (used when watermark mode is enabled).
-    checkpoint_manager: Option<CheckpointManager>,
+    /// Tracks which source files have been processed.
+    state_tracker: Box<dyn StateTracker>,
     /// Statistics for this pipeline's run.
     stats: PipelineStats,
     /// Tracks failures and manages DLQ.
@@ -341,8 +481,8 @@ impl BlizzardProcessor {
         )
         .await?;
 
-        // Create checkpoint manager if watermark mode is enabled
-        let checkpoint_manager = if pipeline_config.source.use_watermark {
+        // Create state tracker based on configuration
+        let state_tracker: Box<dyn StateTracker> = if pipeline_config.source.use_watermark {
             let table_storage = Arc::new(
                 StorageProvider::for_url_with_options(
                     &pipeline_config.sink.table_uri,
@@ -351,12 +491,13 @@ impl BlizzardProcessor {
                 .await
                 .context(StorageSnafu)?,
             );
-            Some(CheckpointManager::new(
+            let checkpoint_manager = CheckpointManager::new(
                 table_storage,
                 pipeline_key.id().to_string(),
-            ))
+            );
+            Box::new(WatermarkTracker::new(checkpoint_manager))
         } else {
-            None
+            Box::new(HashMapTracker::new())
         };
 
         // Get schema - either from explicit config or by inference
@@ -400,8 +541,7 @@ impl BlizzardProcessor {
             table_writer,
             schema,
             reader,
-            source_state: SourceState::new(),
-            checkpoint_manager,
+            state_tracker,
             stats: PipelineStats::default(),
             shutdown,
         })
@@ -443,53 +583,27 @@ impl PollingProcessor for BlizzardProcessor {
         // Generate date prefixes for efficient listing
         let prefixes = generate_date_prefixes(&self.pipeline_config);
 
-        // On cold start, load checkpoint if watermark mode is enabled
+        // On cold start, initialize state tracker
         if cold_start {
-            if let Some(ref mut checkpoint_mgr) = self.checkpoint_manager {
-                match checkpoint_mgr.load().await {
-                    Ok(true) => {
-                        info!(
-                            target = %self.pipeline_key,
-                            watermark = ?checkpoint_mgr.watermark(),
-                            "Restored checkpoint from storage"
-                        );
-                    }
-                    Ok(false) => {
-                        info!(target = %self.pipeline_key, "Cold start - no checkpoint found, beginning fresh processing");
-                    }
-                    Err(e) => {
-                        warn!(
-                            target = %self.pipeline_key,
-                            error = %e,
-                            "Failed to load checkpoint, starting fresh"
-                        );
-                    }
-                }
-            } else {
-                info!(target = %self.pipeline_key, "Cold start - beginning fresh processing (HashMap mode)");
+            match self.state_tracker.init().await? {
+                Some(msg) => info!(target = %self.pipeline_key, "{}", msg),
+                None => info!(
+                    target = %self.pipeline_key,
+                    mode = self.state_tracker.mode_name(),
+                    "Cold start - beginning fresh processing"
+                ),
             }
         }
 
-        // List pending source files using the appropriate strategy
-        let pending_files = if let Some(ref checkpoint_mgr) = self.checkpoint_manager {
-            // Watermark mode: list files above the watermark
-            list_ndjson_files_above_watermark(
-                &self.source_storage,
-                checkpoint_mgr.watermark(),
-                prefixes.as_deref(),
-                self.pipeline_key.as_ref(),
-            )
-            .await?
-        } else {
-            // HashMap mode: list all files and filter against in-memory state
-            let all_files = list_ndjson_files_with_prefixes(
+        // List pending source files
+        let pending_files = self
+            .state_tracker
+            .list_pending(
                 &self.source_storage,
                 prefixes.as_deref(),
                 self.pipeline_key.as_ref(),
             )
             .await?;
-            self.source_state.filter_pending_files(all_files)
-        };
 
         if pending_files.is_empty() {
             return Ok(None);
@@ -552,21 +666,19 @@ impl PollingProcessor for BlizzardProcessor {
         // Finalize DLQ
         self.failure_tracker.finalize_dlq().await;
 
-        // Save checkpoint if watermark mode is enabled
-        if let Some(ref checkpoint_mgr) = self.checkpoint_manager {
-            if let Err(e) = checkpoint_mgr.save().await {
-                warn!(
-                    target = %self.pipeline_key,
-                    error = %e,
-                    "Failed to save checkpoint"
-                );
-            } else {
-                debug!(
-                    target = %self.pipeline_key,
-                    watermark = ?checkpoint_mgr.watermark(),
-                    "Saved checkpoint"
-                );
-            }
+        // Save state tracker
+        if let Err(e) = self.state_tracker.save().await {
+            warn!(
+                target = %self.pipeline_key,
+                error = %e,
+                "Failed to save state"
+            );
+        } else {
+            debug!(
+                target = %self.pipeline_key,
+                mode = self.state_tracker.mode_name(),
+                "Saved state"
+            );
         }
 
         result
@@ -593,7 +705,7 @@ impl BlizzardProcessor {
                 target: self.pipeline_key.id().to_string(),
             });
             emit!(SourceStateFiles {
-                count: self.source_state.files.len(),
+                count: self.state_tracker.tracked_count(),
                 target: self.pipeline_key.id().to_string(),
             });
 
@@ -671,13 +783,7 @@ impl BlizzardProcessor {
         }
 
         // Update state tracking
-        if let Some(ref mut checkpoint_mgr) = self.checkpoint_manager {
-            // Watermark mode: update high-watermark
-            checkpoint_mgr.update_watermark(&path);
-        } else {
-            // HashMap mode: mark file as finished in memory
-            self.source_state.mark_finished(&path);
-        }
+        self.state_tracker.mark_processed(&path);
         self.stats.files_processed += 1;
         self.stats.records_processed += total_records;
 
