@@ -499,44 +499,8 @@ impl PollingProcessor for BlizzardProcessor {
             .process_downloads(downloader, &mut parquet_writer, self.shutdown.clone())
             .await;
 
-        // Close the writer and get finished files
-        let finished_files = parquet_writer.close()?;
-
-        // Write parquet files to table directory
-        if !finished_files.is_empty() {
-            info!(
-                target = %self.pipeline_key,
-                files = finished_files.len(),
-                "Writing parquet files to table"
-            );
-            self.table_writer.write_files(&finished_files).await?;
-            self.stats.parquet_files_written += finished_files.len();
-
-            let bytes: usize = finished_files.iter().map(|f| f.size).sum();
-            emit!(BytesWritten {
-                bytes: bytes as u64,
-                target: self.pipeline_key.id().to_string(),
-            });
-            self.stats.bytes_written += bytes;
-        }
-
-        // Finalize DLQ
-        self.failure_tracker.finalize_dlq().await;
-
-        // Save state tracker
-        if let Err(e) = self.state_tracker.save().await {
-            warn!(
-                target = %self.pipeline_key,
-                error = %e,
-                "Failed to save state"
-            );
-        } else {
-            debug!(
-                target = %self.pipeline_key,
-                mode = self.state_tracker.mode_name(),
-                "Saved state"
-            );
-        }
+        // Finalize: write remaining files, save state, finalize DLQ
+        self.finalize_iteration(parquet_writer).await?;
 
         result
     }
@@ -616,6 +580,54 @@ impl BlizzardProcessor {
         }
 
         Ok(IterationResult::ProcessedItems)
+    }
+
+    /// Finalize an iteration: close the parquet writer, write remaining files,
+    /// finalize DLQ, and save state.
+    async fn finalize_iteration(
+        &mut self,
+        parquet_writer: ParquetWriter,
+    ) -> Result<(), PipelineError> {
+        // Close the writer and get finished files
+        let finished_files = parquet_writer.close()?;
+
+        // Write parquet files to table directory
+        if !finished_files.is_empty() {
+            info!(
+                target = %self.pipeline_key,
+                files = finished_files.len(),
+                "Writing parquet files to table"
+            );
+            self.table_writer.write_files(&finished_files).await?;
+            self.stats.parquet_files_written += finished_files.len();
+
+            let bytes: usize = finished_files.iter().map(|f| f.size).sum();
+            emit!(BytesWritten {
+                bytes: bytes as u64,
+                target: self.pipeline_key.id().to_string(),
+            });
+            self.stats.bytes_written += bytes;
+        }
+
+        // Finalize DLQ
+        self.failure_tracker.finalize_dlq().await;
+
+        // Save state tracker
+        if let Err(e) = self.state_tracker.save().await {
+            warn!(
+                target = %self.pipeline_key,
+                error = %e,
+                "Failed to save state"
+            );
+        } else {
+            debug!(
+                target = %self.pipeline_key,
+                mode = self.state_tracker.mode_name(),
+                "Saved state"
+            );
+        }
+
+        Ok(())
     }
 
     async fn handle_processed_file(
