@@ -10,6 +10,7 @@ export default defineConfig({
 		starlight({
 			title: '❄️ Blizzard',
 			social: [
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/benjamin-awd/blizzard' },
 			],
 			sidebar: [
 				{
@@ -43,6 +44,7 @@ export default defineConfig({
 				},
 			],
 			editLink: {
+				baseUrl: 'https://github.com/benjamin-awd/blizzard/edit/main/website/',
 			},
 			head: [
 				{
