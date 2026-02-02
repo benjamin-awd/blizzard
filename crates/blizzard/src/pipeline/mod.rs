@@ -42,6 +42,17 @@ fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
         DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
     })
 }
+
+/// Extract a partition value from a path for a given key.
+///
+/// Looks for `key=value` pattern and extracts the value (up to the next `/` or end of string).
+fn extract_partition_value(path: &str, key: &str) -> Option<String> {
+    let pattern = format!("{}=", key);
+    let start = path.find(&pattern)? + pattern.len();
+    let rest = &path[start..];
+    let end = rest.find('/').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
 use blizzard_common::storage::DatePrefixGenerator;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
@@ -405,29 +416,20 @@ impl BlizzardProcessor {
     }
 
     /// Extract partition values from a source path.
+    ///
+    /// Looks for `key=value` patterns in the path for each configured partition column.
     fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
-        let mut values = HashMap::new();
-        let keys = self
-            .pipeline_config
+        self.pipeline_config
             .sink
             .partition_by
             .as_ref()
             .map(|p| p.partition_columns())
-            .unwrap_or_default();
-
-        for key in keys {
-            // Look for key=value patterns in the path
-            let pattern = format!("{}=", key);
-            if let Some(idx) = path.find(&pattern) {
-                let start = idx + pattern.len();
-                let end = path[start..]
-                    .find('/')
-                    .map(|i| start + i)
-                    .unwrap_or(path.len());
-                values.insert(key, path[start..end].to_string());
-            }
-        }
-        values
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|key| {
+                extract_partition_value(path, &key).map(|value| (key, value))
+            })
+            .collect()
     }
 }
 
