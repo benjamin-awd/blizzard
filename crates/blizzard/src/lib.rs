@@ -7,6 +7,7 @@
 //! - Writing finished files directly to Delta table directories
 //! - Dead letter queue for failed records
 
+pub mod checkpoint;
 pub mod config;
 pub mod dlq;
 pub mod error;

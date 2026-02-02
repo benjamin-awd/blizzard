@@ -22,6 +22,7 @@ pub mod signal;
 pub mod storage;
 pub mod topology;
 pub mod types;
+pub mod watermark;
 
 // Re-export commonly used items
 pub use config::{
@@ -39,3 +40,7 @@ pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};
 pub use types::FinishedFile;
+pub use watermark::{
+    FileListingConfig, generate_prefixes, list_files_above_watermark, list_files_cold_start,
+    parse_partition_values, parse_watermark,
+};

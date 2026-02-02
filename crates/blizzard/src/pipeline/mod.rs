@@ -29,11 +29,14 @@ use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefi
 use blizzard_common::types::SourceState;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
+use crate::checkpoint::CheckpointManager;
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 use crate::sink::{ParquetWriter, ParquetWriterConfig};
-use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
+use crate::source::{
+    NdjsonReader, NdjsonReaderConfig, infer_schema_from_source, list_ndjson_files_above_watermark,
+};
 use crate::staging::TableWriter;
 
 use tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
@@ -285,8 +288,10 @@ struct BlizzardProcessor {
     schema: deltalake::arrow::datatypes::SchemaRef,
     /// NDJSON reader with schema validation.
     reader: Arc<NdjsonReader>,
-    /// Tracks which source files have been processed.
+    /// Tracks which source files have been processed (used when watermark mode is disabled).
     source_state: SourceState,
+    /// Checkpoint manager for watermark-based tracking (used when watermark mode is enabled).
+    checkpoint_manager: Option<CheckpointManager>,
     /// Statistics for this pipeline's run.
     stats: PipelineStats,
     /// Tracks failures and manages DLQ.
@@ -328,6 +333,24 @@ impl BlizzardProcessor {
             pipeline_key.id().to_string(),
         )
         .await?;
+
+        // Create checkpoint manager if watermark mode is enabled
+        let checkpoint_manager = if pipeline_config.source.use_watermark {
+            let table_storage = Arc::new(
+                StorageProvider::for_url_with_options(
+                    &pipeline_config.sink.table_uri,
+                    pipeline_config.sink.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?,
+            );
+            Some(CheckpointManager::new(
+                table_storage,
+                pipeline_key.id().to_string(),
+            ))
+        } else {
+            None
+        };
 
         // Get schema - either from explicit config or by inference
         let schema = if pipeline_config.schema.should_infer() {
@@ -374,6 +397,7 @@ impl BlizzardProcessor {
             schema,
             reader,
             source_state: SourceState::new(),
+            checkpoint_manager,
             stats: PipelineStats::default(),
             shutdown,
         })
@@ -423,25 +447,56 @@ impl PollingProcessor for BlizzardProcessor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        // On cold start, we could potentially recover state from staging
-        // For now, we start fresh
-        if cold_start {
-            info!(target = %self.pipeline_key, "Cold start - beginning fresh processing");
-        }
-
         // Generate date prefixes for efficient listing
         let prefixes = self.generate_date_prefixes();
 
-        // List source files
-        let all_files = list_ndjson_files_with_prefixes(
-            &self.source_storage,
-            prefixes.as_deref(),
-            self.pipeline_key.as_ref(),
-        )
-        .await?;
+        // On cold start, load checkpoint if watermark mode is enabled
+        if cold_start {
+            if let Some(ref mut checkpoint_mgr) = self.checkpoint_manager {
+                match checkpoint_mgr.load().await {
+                    Ok(true) => {
+                        info!(
+                            target = %self.pipeline_key,
+                            watermark = ?checkpoint_mgr.watermark(),
+                            "Restored checkpoint from storage"
+                        );
+                    }
+                    Ok(false) => {
+                        info!(target = %self.pipeline_key, "Cold start - no checkpoint found, beginning fresh processing");
+                    }
+                    Err(e) => {
+                        warn!(
+                            target = %self.pipeline_key,
+                            error = %e,
+                            "Failed to load checkpoint, starting fresh"
+                        );
+                    }
+                }
+            } else {
+                info!(target = %self.pipeline_key, "Cold start - beginning fresh processing (HashMap mode)");
+            }
+        }
 
-        // Filter to pending files
-        let pending_files = self.source_state.filter_pending_files(all_files);
+        // List pending source files using the appropriate strategy
+        let pending_files = if let Some(ref checkpoint_mgr) = self.checkpoint_manager {
+            // Watermark mode: list files above the watermark
+            list_ndjson_files_above_watermark(
+                &self.source_storage,
+                checkpoint_mgr.watermark(),
+                prefixes.as_deref(),
+                self.pipeline_key.as_ref(),
+            )
+            .await?
+        } else {
+            // HashMap mode: list all files and filter against in-memory state
+            let all_files = list_ndjson_files_with_prefixes(
+                &self.source_storage,
+                prefixes.as_deref(),
+                self.pipeline_key.as_ref(),
+            )
+            .await?;
+            self.source_state.filter_pending_files(all_files)
+        };
 
         if pending_files.is_empty() {
             return Ok(None);
@@ -503,6 +558,23 @@ impl PollingProcessor for BlizzardProcessor {
 
         // Finalize DLQ
         self.failure_tracker.finalize_dlq().await;
+
+        // Save checkpoint if watermark mode is enabled
+        if let Some(ref checkpoint_mgr) = self.checkpoint_manager {
+            if let Err(e) = checkpoint_mgr.save().await {
+                warn!(
+                    target = %self.pipeline_key,
+                    error = %e,
+                    "Failed to save checkpoint"
+                );
+            } else {
+                debug!(
+                    target = %self.pipeline_key,
+                    watermark = ?checkpoint_mgr.watermark(),
+                    "Saved checkpoint"
+                );
+            }
+        }
 
         result
     }
@@ -605,8 +677,14 @@ impl BlizzardProcessor {
             parquet_writer.write_batch(&batch)?;
         }
 
-        // Update state
-        self.source_state.mark_finished(&path);
+        // Update state tracking
+        if let Some(ref mut checkpoint_mgr) = self.checkpoint_manager {
+            // Watermark mode: update high-watermark
+            checkpoint_mgr.update_watermark(&path);
+        } else {
+            // HashMap mode: mark file as finished in memory
+            self.source_state.mark_finished(&path);
+        }
         self.stats.files_processed += 1;
         self.stats.records_processed += total_records;
 

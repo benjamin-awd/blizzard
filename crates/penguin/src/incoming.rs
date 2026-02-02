@@ -20,18 +20,23 @@
 //! 5. Commit new files to Delta
 //! 6. Update watermark to highest committed path
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use snafu::ResultExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use blizzard_common::FinishedFile;
-use blizzard_common::storage::{DatePrefixGenerator, StorageProvider};
+use blizzard_common::storage::StorageProvider;
+use blizzard_common::watermark::{
+    self, FileListingConfig, generate_prefixes, parse_partition_values,
+};
 
 use crate::config::PartitionFilterConfig;
 use crate::error::{IncomingError, incoming_error};
+
+/// File extension for parquet files.
+const PARQUET_EXTENSION: &str = ".parquet";
 
 /// Configuration for the incoming reader.
 #[derive(Debug, Clone)]
@@ -104,63 +109,19 @@ impl IncomingReader {
         &self,
         watermark: &str,
     ) -> Result<Vec<IncomingFile>, IncomingError> {
-        let (watermark_partition, watermark_filename) = Self::parse_watermark(watermark);
+        let config = FileListingConfig {
+            extension: PARQUET_EXTENSION,
+            target: &self.table,
+        };
 
-        debug!(
-            target = %self.table,
-            watermark_partition = %watermark_partition,
-            watermark_filename = %watermark_filename,
-            "Listing files above watermark"
-        );
+        let paths = watermark::list_files_above_watermark(&self.storage, watermark, &config)
+            .await
+            .context(incoming_error::ListSnafu)?;
 
-        let mut files = Vec::new();
-
-        // Handle root-level files (no partition)
-        if watermark_partition.is_empty() {
-            // List all files and filter to > watermark
-            let all_files = self.list_all_parquet_files().await?;
-            for file in all_files {
-                if file.path.as_str() > watermark {
-                    files.push(file);
-                }
-            }
-        } else {
-            // List partitions and filter to >= watermark partition
-            let partitions = self.list_partitions().await?;
-            let relevant_partitions: Vec<_> = partitions
-                .into_iter()
-                .filter(|p| p.as_str() >= watermark_partition.as_str())
-                .collect();
-
-            debug!(
-                target = %self.table,
-                partition_count = relevant_partitions.len(),
-                "Scanning partitions >= watermark"
-            );
-
-            for partition in relevant_partitions {
-                let partition_files = self.list_parquet_in_partition(&partition).await?;
-
-                for file in partition_files {
-                    // For watermark's partition, filter to files > watermark filename
-                    // For partitions after watermark, include all files
-                    let filename = file.path.split('/').next_back().unwrap_or(&file.path);
-
-                    if partition == watermark_partition {
-                        if filename > watermark_filename.as_str() {
-                            files.push(file);
-                        }
-                    } else {
-                        files.push(file);
-                    }
-                }
-            }
-        }
-
-        // Sort by path for deterministic ordering
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-
-        Ok(files)
+        Ok(paths
+            .into_iter()
+            .map(|path| IncomingFile { path, size: 0 })
+            .collect())
     }
 
     /// List files during cold start (no watermark).
@@ -169,190 +130,40 @@ impl IncomingReader {
     async fn list_files_cold_start(&self) -> Result<Vec<IncomingFile>, IncomingError> {
         let prefixes = self.generate_cold_start_prefixes();
 
-        let mut files = Vec::new();
+        let config = FileListingConfig {
+            extension: PARQUET_EXTENSION,
+            target: &self.table,
+        };
 
-        match prefixes {
-            Some(prefixes) if !prefixes.is_empty() => {
-                info!(
-                    target = %self.table,
-                    prefix_count = prefixes.len(),
-                    "Cold start: scanning partitions with filter"
-                );
-                for prefix in prefixes {
-                    let partition_files = self.list_parquet_in_partition(&prefix).await?;
-                    files.extend(partition_files);
-                }
-            }
-            _ => {
-                info!(
-                    target = %self.table,
-                    "Cold start: scanning all files (no filter configured)"
-                );
-                // List all parquet files, including root-level (non-partitioned) files
-                files = self.list_all_parquet_files().await?;
-            }
+        if prefixes.as_ref().is_some_and(|p| !p.is_empty()) {
+            info!(
+                target = %self.table,
+                prefix_count = prefixes.as_ref().unwrap().len(),
+                "Cold start: scanning partitions with filter"
+            );
+        } else {
+            info!(
+                target = %self.table,
+                "Cold start: scanning all files (no filter configured)"
+            );
         }
 
-        // Sort by path for deterministic ordering
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-
-        Ok(files)
-    }
-
-    /// List all parquet files in the table, including root-level files.
-    async fn list_all_parquet_files(&self) -> Result<Vec<IncomingFile>, IncomingError> {
-        let mut files = Vec::new();
-
-        let mut stream = self
-            .storage
-            .list(true)
+        let paths = watermark::list_files_cold_start(&self.storage, prefixes.as_deref(), &config)
             .await
             .context(incoming_error::ListSnafu)?;
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(path) => {
-                    let path_str = path.to_string();
-                    // Skip internal directories (those starting with _)
-                    if path_str.starts_with('_') {
-                        continue;
-                    }
-                    // Include all parquet files
-                    if path_str.ends_with(".parquet") {
-                        files.push(IncomingFile {
-                            path: path_str,
-                            size: 0,
-                        });
-                    }
-                }
-                Err(e) => {
-                    warn!(target = %self.table, "Error listing file: {}", e);
-                }
-            }
-        }
-
-        debug!(
-            target = %self.table,
-            count = files.len(),
-            "Found parquet files"
-        );
-
-        Ok(files)
+        Ok(paths
+            .into_iter()
+            .map(|path| IncomingFile { path, size: 0 })
+            .collect())
     }
 
     /// Generate prefixes for cold start based on partition filter config.
     fn generate_cold_start_prefixes(&self) -> Option<Vec<String>> {
-        self.config.partition_filter.as_ref().map(|filter| {
-            let generator = DatePrefixGenerator::new(&filter.prefix_template, filter.lookback);
-            generator.generate_prefixes()
-        })
-    }
-
-    /// Parse watermark into partition prefix and filename.
-    ///
-    /// Example: "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet"
-    ///       -> ("date=2024-01-28", "01926abc-def0-7123-4567-89abcdef0123.parquet")
-    ///
-    /// For root-level files (no partition):
-    /// "01926abc-def0-7123-4567-89abcdef0123.parquet" -> ("", "01926abc-...")
-    fn parse_watermark(watermark: &str) -> (String, String) {
-        // Find the last '/' to split partition from filename
-        if let Some(last_slash) = watermark.rfind('/') {
-            let partition = watermark[..last_slash].to_string();
-            let filename = watermark[last_slash + 1..].to_string();
-            (partition, filename)
-        } else {
-            // No partition prefix, just a filename (root-level file)
-            (String::new(), watermark.to_string())
-        }
-    }
-
-    /// List all partition directories in the table.
-    ///
-    /// Excludes internal directories (those starting with `_`).
-    async fn list_partitions(&self) -> Result<Vec<String>, IncomingError> {
-        let mut partitions = HashSet::new();
-
-        let mut stream = self
-            .storage
-            .list(true)
-            .await
-            .context(incoming_error::ListSnafu)?;
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(path) => {
-                    let path_str = path.to_string();
-                    // Skip internal directories (those starting with _)
-                    if path_str.starts_with('_') {
-                        continue;
-                    }
-                    // Extract partition prefix (everything except the filename)
-                    if let Some(last_slash) = path_str.rfind('/') {
-                        let partition = &path_str[..last_slash];
-                        if !partition.is_empty() {
-                            partitions.insert(partition.to_string());
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(target = %self.table, "Error listing file: {}", e);
-                }
-            }
-        }
-
-        let mut partitions: Vec<_> = partitions.into_iter().collect();
-        partitions.sort();
-
-        debug!(
-            target = %self.table,
-            count = partitions.len(),
-            "Found partitions"
-        );
-
-        Ok(partitions)
-    }
-
-    /// List parquet files in a specific partition.
-    async fn list_parquet_in_partition(
-        &self,
-        partition: &str,
-    ) -> Result<Vec<IncomingFile>, IncomingError> {
-        let mut files = Vec::new();
-
-        // Add trailing slash for prefix listing
-        let prefix = if partition.ends_with('/') {
-            partition.to_string()
-        } else {
-            format!("{}/", partition)
-        };
-
-        let mut stream = self
-            .storage
-            .list_with_prefix(&prefix)
-            .await
-            .context(incoming_error::ListSnafu)?;
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(path) => {
-                    let path_str = path.to_string();
-                    if path_str.ends_with(".parquet") {
-                        // Get file size from a HEAD request would be ideal,
-                        // but for now we'll use 0 and get actual size from parquet metadata
-                        files.push(IncomingFile {
-                            path: path_str,
-                            size: 0, // Will be populated from parquet metadata
-                        });
-                    }
-                }
-                Err(e) => {
-                    warn!(target = %self.table, "Error listing file in partition {}: {}", partition, e);
-                }
-            }
-        }
-
-        Ok(files)
+        self.config
+            .partition_filter
+            .as_ref()
+            .map(|filter| generate_prefixes(&filter.prefix_template, filter.lookback))
     }
 
     /// Read metadata from a parquet file and create a FinishedFile.
@@ -393,7 +204,7 @@ impl IncomingReader {
             .sum();
 
         // Parse partition values from path
-        let partition_values = Self::parse_partition_values(&incoming.path);
+        let partition_values = parse_partition_values(&incoming.path);
 
         debug!(
             target = %self.table,
@@ -411,27 +222,6 @@ impl IncomingReader {
             None, // No source file for external writes
         ))
     }
-
-    /// Parse partition values from a file path.
-    ///
-    /// Example: "date=2024-01-28/hour=14/file.parquet"
-    ///       -> {"date": "2024-01-28", "hour": "14"}
-    fn parse_partition_values(path: &str) -> HashMap<String, String> {
-        let mut values = HashMap::new();
-
-        for segment in path.split('/') {
-            if let Some(eq_pos) = segment.find('=') {
-                let key = &segment[..eq_pos];
-                let value = &segment[eq_pos + 1..];
-                // Skip if this looks like a filename (ends with .parquet)
-                if !value.ends_with(".parquet") {
-                    values.insert(key.to_string(), value.to_string());
-                }
-            }
-        }
-
-        values
-    }
 }
 
 #[cfg(test)]
@@ -440,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_parse_watermark() {
-        let (partition, filename) = IncomingReader::parse_watermark(
+        let (partition, filename) = blizzard_common::watermark::parse_watermark(
             "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet",
         );
         assert_eq!(partition, "date=2024-01-28");
@@ -449,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_parse_watermark_nested_partitions() {
-        let (partition, filename) = IncomingReader::parse_watermark(
+        let (partition, filename) = blizzard_common::watermark::parse_watermark(
             "date=2024-01-28/hour=14/01926abc-def0-7123-4567-89abcdef0123.parquet",
         );
         assert_eq!(partition, "date=2024-01-28/hour=14");
@@ -458,16 +248,14 @@ mod tests {
 
     #[test]
     fn test_parse_watermark_no_partition() {
-        let (partition, filename) = IncomingReader::parse_watermark("file.parquet");
+        let (partition, filename) = blizzard_common::watermark::parse_watermark("file.parquet");
         assert_eq!(partition, "");
         assert_eq!(filename, "file.parquet");
     }
 
     #[test]
     fn test_parse_partition_values() {
-        let values = IncomingReader::parse_partition_values(
-            "date=2024-01-28/hour=14/01926abc-def0-7123.parquet",
-        );
+        let values = parse_partition_values("date=2024-01-28/hour=14/01926abc-def0-7123.parquet");
         assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
         assert_eq!(values.get("hour"), Some(&"14".to_string()));
         assert_eq!(values.len(), 2);
@@ -475,13 +263,13 @@ mod tests {
 
     #[test]
     fn test_parse_partition_values_no_partitions() {
-        let values = IncomingReader::parse_partition_values("file.parquet");
+        let values = parse_partition_values("file.parquet");
         assert!(values.is_empty());
     }
 
     #[test]
     fn test_parse_partition_values_single_partition() {
-        let values = IncomingReader::parse_partition_values("date=2024-01-28/file.parquet");
+        let values = parse_partition_values("date=2024-01-28/file.parquet");
         assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
         assert_eq!(values.len(), 1);
     }
@@ -522,15 +310,17 @@ mod tests {
         );
 
         let reader = IncomingReader::new(
-            storage,
+            storage.clone(),
             "test".to_string(),
             IncomingConfig {
                 partition_filter: None, // No filter for this test
             },
         );
 
-        // List partitions
-        let partitions = reader.list_partitions().await.unwrap();
+        // List partitions using the shared function
+        let partitions = blizzard_common::watermark::list_partitions(&storage)
+            .await
+            .unwrap();
 
         // Should find our data partitions but not internal directories (those starting with _)
         assert!(partitions.contains(&"date=2026-01-27".to_string()));

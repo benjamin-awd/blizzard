@@ -70,6 +70,18 @@ pub struct SourceConfig {
     /// Storage options for source storage (credentials, region, etc.)
     #[serde(default)]
     pub storage_options: HashMap<String, String>,
+    /// Enable watermark-based source tracking.
+    ///
+    /// When true, uses a persistent high-watermark checkpoint to track processed files.
+    /// This replaces the unbounded in-memory HashMap with efficient lexicographic filtering.
+    ///
+    /// Requirements:
+    /// - Source files must be lexicographically sortable (e.g., timestamp prefixes, UUIDv7)
+    /// - Checkpoint is stored at `{table_uri}/_blizzard/{pipeline}_checkpoint.json`
+    ///
+    /// First run performs a full scan; subsequent runs only list files above the watermark.
+    #[serde(default)]
+    pub use_watermark: bool,
 }
 
 fn default_batch_size() -> usize {
@@ -1121,5 +1133,56 @@ pipelines:
             "Should mention pipeline 'b' empty schema: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_use_watermark_default_false() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert!(
+            !pipeline.source.use_watermark,
+            "use_watermark should default to false"
+        );
+    }
+
+    #[test]
+    fn test_use_watermark_enabled() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+      use_watermark: true
+      partition_filter:
+        prefix_template: "date=%Y-%m-%d"
+        lookback: 2
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert!(
+            pipeline.source.use_watermark,
+            "use_watermark should be true"
+        );
+        assert!(pipeline.source.partition_filter.is_some());
     }
 }

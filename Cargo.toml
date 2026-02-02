@@ -50,7 +50,7 @@ tracing-limit = { path = "lib/tracing-limit" }
 
 # URL parsing
 url = { version = "2", default-features = false }
-regex = { version = "1", default-features = false, features = ["std"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
 
 # Ordered maps
 indexmap = { version = "2", features = ["serde"] }
