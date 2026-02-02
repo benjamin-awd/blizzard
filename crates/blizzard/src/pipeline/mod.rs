@@ -53,6 +53,22 @@ fn extract_partition_value(path: &str, key: &str) -> Option<String> {
     let end = rest.find('/').unwrap_or(rest.len());
     Some(rest[..end].to_string())
 }
+
+/// Create a storage provider, using the pool if available.
+async fn create_storage(
+    pool: &Option<Arc<StoragePool>>,
+    url: &str,
+    options: HashMap<String, String>,
+) -> Result<StorageProviderRef, PipelineError> {
+    match pool {
+        Some(p) => p.get_or_create(url, options).await.context(StorageSnafu),
+        None => Ok(Arc::new(
+            StorageProvider::for_url_with_options(url, options)
+                .await
+                .context(StorageSnafu)?,
+        )),
+    }
+}
 use blizzard_common::storage::DatePrefixGenerator;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
 
@@ -323,23 +339,12 @@ impl BlizzardProcessor {
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
         // Create source storage provider - use pooled if available
-        let source_storage = if let Some(pool) = &storage_pool {
-            pool.get_or_create(
-                &pipeline_config.source.path,
-                pipeline_config.source.storage_options.clone(),
-            )
-            .await
-            .context(StorageSnafu)?
-        } else {
-            Arc::new(
-                StorageProvider::for_url_with_options(
-                    &pipeline_config.source.path,
-                    pipeline_config.source.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?,
-            )
-        };
+        let source_storage = create_storage(
+            &storage_pool,
+            &pipeline_config.source.path,
+            pipeline_config.source.storage_options.clone(),
+        )
+        .await?;
 
         // Create table writer (writes parquet directly to table directory)
         let table_writer = TableWriter::new(
@@ -351,14 +356,13 @@ impl BlizzardProcessor {
 
         // Create state tracker based on configuration
         let state_tracker: Box<dyn StateTracker> = if pipeline_config.source.use_watermark {
-            let table_storage = Arc::new(
-                StorageProvider::for_url_with_options(
-                    &pipeline_config.sink.table_uri,
-                    pipeline_config.sink.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?,
-            );
+            // Checkpoint manager needs its own storage provider (not pooled)
+            let table_storage = create_storage(
+                &None,
+                &pipeline_config.sink.table_uri,
+                pipeline_config.sink.storage_options.clone(),
+            )
+            .await?;
             let checkpoint_manager = CheckpointManager::new(
                 table_storage,
                 pipeline_key.id().to_string(),
