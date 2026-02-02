@@ -25,6 +25,15 @@ use blizzard_common::metrics::events::{
     RecordsProcessed, SourceStateFiles,
 };
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
+
+/// Generate a random jitter duration up to the specified maximum seconds.
+fn random_jitter(max_secs: u64) -> Duration {
+    if max_secs > 0 {
+        Duration::from_millis(rand::rng().random_range(0..max_secs * 1000))
+    } else {
+        Duration::ZERO
+    }
+}
 use blizzard_common::storage::{DatePrefixGenerator, list_ndjson_files_with_prefixes};
 use blizzard_common::types::SourceState;
 use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, emit, shutdown_signal};
@@ -140,11 +149,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
         let key = pipeline_key.clone();
 
         // Add jitter to stagger pipeline starts (prevents thundering herd)
-        let start_jitter = if jitter_max_secs > 0 {
-            Duration::from_secs(rand::rng().random_range(0..jitter_max_secs))
-        } else {
-            Duration::ZERO
-        };
+        let start_jitter = random_jitter(jitter_max_secs);
 
         handles.spawn(async move {
             // Stagger start times, but respect shutdown signal
@@ -225,12 +230,7 @@ async fn run_single_pipeline(
     shutdown: CancellationToken,
 ) -> Result<PipelineStats, PipelineError> {
     // Add jitter to poll interval for this pipeline to spread polling load
-    let effective_interval = if poll_jitter_secs > 0 {
-        let jitter_ms = rand::rng().random_range(0..poll_jitter_secs * 1000);
-        poll_interval + Duration::from_millis(jitter_ms)
-    } else {
-        poll_interval
-    };
+    let effective_interval = poll_interval + random_jitter(poll_jitter_secs);
 
     // Initialize processor, respecting shutdown signal
     let mut processor = tokio::select! {
