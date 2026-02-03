@@ -26,7 +26,7 @@ use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::PipelineError;
 use crate::error::StorageSnafu;
 use crate::parquet::ParquetWriterConfig;
-use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
+use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
 /// Resolve the Arrow schema from explicit config or by inference from source files.
 async fn resolve_schema(
@@ -59,8 +59,8 @@ pub(super) struct ProcessorContext {
     pub destination_storage: StorageProviderRef,
     /// Arrow schema (from config or inferred).
     pub schema: SchemaRef,
-    /// NDJSON reader with schema validation.
-    pub reader: Arc<NdjsonReader>,
+    /// File reader for parsing source files.
+    pub reader: Arc<dyn FileReader>,
     /// Extracts partition values from source paths.
     pub partition_extractor: PartitionExtractor,
 }

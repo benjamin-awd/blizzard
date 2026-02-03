@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::{PipelineError, ReaderSnafu, TaskJoinSnafu};
-use crate::source::{FileReader, NdjsonReader};
+use crate::source::FileReader;
 
 pub(super) use download::{DownloadTask, DownloadedFile};
 pub(super) use upload::UploadTask;
@@ -31,7 +31,7 @@ pub(super) type ProcessFuture =
 /// Spawn a blocking task to decompress and parse a downloaded file.
 pub(super) fn spawn_read_task(
     downloaded: DownloadedFile,
-    reader: Arc<NdjsonReader>,
+    reader: Arc<dyn FileReader>,
 ) -> ProcessFuture {
     let DownloadedFile {
         path,

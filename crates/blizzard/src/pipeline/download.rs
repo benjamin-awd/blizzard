@@ -21,20 +21,20 @@ use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::StateTracker;
 use crate::dlq::FailureTracker;
 use crate::error::PipelineError;
-use crate::source::NdjsonReader;
+use crate::source::FileReader;
 
 /// Orchestrates the download -> parse -> write pipeline.
 ///
 /// Manages concurrent downloads and parsing with backpressure,
 /// coordinating between the file downloader, reader, and sink writer.
 pub(super) struct Downloader {
-    reader: Arc<NdjsonReader>,
+    reader: Arc<dyn FileReader>,
     max_in_flight: usize,
     pipeline_key: String,
 }
 
 impl Downloader {
-    pub fn new(reader: Arc<NdjsonReader>, max_in_flight: usize, pipeline_key: String) -> Self {
+    pub fn new(reader: Arc<dyn FileReader>, max_in_flight: usize, pipeline_key: String) -> Self {
         Self {
             reader,
             max_in_flight,
