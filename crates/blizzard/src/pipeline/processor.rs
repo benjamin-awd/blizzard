@@ -28,6 +28,221 @@ use crate::error::StorageSnafu;
 use crate::parquet::ParquetWriterConfig;
 use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
+/// Builder for constructing a [`Processor`] with configurable dependencies.
+///
+/// Separates the construction of processor dependencies from the processor itself,
+/// enabling dependency injection for testing and clearer initialization logic.
+///
+/// # Example
+///
+/// ```ignore
+/// let processor = ProcessorBuilder::new(key, config, shutdown)
+///     .with_storage_pool(pool)
+///     .build()
+///     .await?;
+/// ```
+pub(super) struct ProcessorBuilder {
+    key: PipelineKey,
+    config: PipelineConfig,
+    shutdown: CancellationToken,
+    storage_pool: Option<StoragePoolRef>,
+    // Optional overrides for dependency injection
+    source_storage: Option<StorageProviderRef>,
+    destination_storage: Option<StorageProviderRef>,
+    state_tracker: Option<Box<dyn StateTracker>>,
+    reader: Option<Arc<dyn FileReader>>,
+    dlq: Option<Option<Arc<DeadLetterQueue>>>,
+}
+
+impl ProcessorBuilder {
+    /// Create a new builder with required parameters.
+    pub fn new(key: PipelineKey, config: PipelineConfig, shutdown: CancellationToken) -> Self {
+        Self {
+            key,
+            config,
+            shutdown,
+            storage_pool: None,
+            source_storage: None,
+            destination_storage: None,
+            state_tracker: None,
+            reader: None,
+            dlq: None,
+        }
+    }
+
+    /// Set the storage pool for connection reuse.
+    pub fn with_storage_pool(mut self, pool: Option<StoragePoolRef>) -> Self {
+        self.storage_pool = pool;
+        self
+    }
+
+    /// Override the source storage provider (useful for testing).
+    #[cfg(test)]
+    pub fn with_source_storage(mut self, storage: StorageProviderRef) -> Self {
+        self.source_storage = Some(storage);
+        self
+    }
+
+    /// Override the destination storage provider (useful for testing).
+    #[cfg(test)]
+    pub fn with_destination_storage(mut self, storage: StorageProviderRef) -> Self {
+        self.destination_storage = Some(storage);
+        self
+    }
+
+    /// Override the state tracker (useful for testing).
+    #[cfg(test)]
+    pub fn with_state_tracker(mut self, tracker: Box<dyn StateTracker>) -> Self {
+        self.state_tracker = Some(tracker);
+        self
+    }
+
+    /// Override the file reader (useful for testing).
+    #[cfg(test)]
+    pub fn with_reader(mut self, reader: Arc<dyn FileReader>) -> Self {
+        self.reader = Some(reader);
+        self
+    }
+
+    /// Override the dead letter queue (useful for testing).
+    #[cfg(test)]
+    pub fn with_dlq(mut self, dlq: Option<Arc<DeadLetterQueue>>) -> Self {
+        self.dlq = Some(dlq);
+        self
+    }
+
+    /// Build the processor, creating any dependencies not explicitly provided.
+    pub async fn build(self) -> Result<Processor, PipelineError> {
+        // Destructure self to avoid partial move issues
+        let Self {
+            key,
+            config,
+            shutdown,
+            storage_pool,
+            source_storage,
+            destination_storage,
+            state_tracker,
+            reader,
+            dlq,
+        } = self;
+
+        // Create or use provided source storage
+        let source_storage = match source_storage {
+            Some(storage) => storage,
+            None => {
+                get_or_create_storage(
+                    &storage_pool,
+                    &config.source.path,
+                    config.source.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?
+            }
+        };
+
+        // Create or use provided destination storage
+        let destination_storage = match destination_storage {
+            Some(storage) => storage,
+            None => {
+                get_or_create_storage(
+                    &storage_pool,
+                    &config.sink.table_uri,
+                    config.sink.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu)?
+            }
+        };
+
+        // Create or use provided state tracker
+        let state_tracker: Box<dyn StateTracker> = match state_tracker {
+            Some(tracker) => tracker,
+            None => {
+                create_state_tracker(&config, &key).await?
+            }
+        };
+
+        // Get schema - either from explicit config or by inference
+        let schema = resolve_schema(&config, &source_storage, &key).await?;
+
+        // Create or use provided reader
+        let reader: Arc<dyn FileReader> = match reader {
+            Some(reader) => reader,
+            None => {
+                let reader_config = NdjsonReaderConfig::new(
+                    config.source.batch_size,
+                    config.source.compression,
+                );
+                Arc::new(NdjsonReader::new(
+                    schema.clone(),
+                    reader_config,
+                    key.id().to_string(),
+                ))
+            }
+        };
+
+        // Set up or use provided DLQ
+        let dlq = match dlq {
+            Some(dlq) => dlq,
+            None => DeadLetterQueue::from_config(&config.error_handling)
+                .await?
+                .map(Arc::new),
+        };
+
+        // Create partition extractor from config
+        let partition_columns = config
+            .sink
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
+        let partition_extractor = PartitionExtractor::new(partition_columns);
+
+        // Build the processor context
+        let ctx = ProcessorContext {
+            source_storage,
+            destination_storage,
+            schema,
+            reader,
+            partition_extractor,
+        };
+
+        Ok(Processor {
+            failure_tracker: FailureTracker::new(
+                config.error_handling.max_failures,
+                dlq,
+                key.id().to_string(),
+            ),
+            key,
+            config,
+            ctx,
+            state_tracker,
+            shutdown,
+        })
+    }
+}
+
+/// Create the appropriate state tracker based on configuration.
+async fn create_state_tracker(
+    config: &PipelineConfig,
+    key: &PipelineKey,
+) -> Result<Box<dyn StateTracker>, PipelineError> {
+    if config.source.use_watermark {
+        // Checkpoint manager needs its own storage provider (not pooled)
+        let checkpoint_storage = get_or_create_storage(
+            &None,
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
+        let checkpoint_manager = CheckpointManager::new(checkpoint_storage, key.id().to_string());
+        Ok(Box::new(WatermarkTracker::new(checkpoint_manager)))
+    } else {
+        Ok(Box::new(HashMapTracker::new()))
+    }
+}
+
 /// Resolve the Arrow schema from explicit config or by inference from source files.
 async fn resolve_schema(
     config: &PipelineConfig,
@@ -165,92 +380,20 @@ pub(super) struct Processor {
 }
 
 impl Processor {
+    /// Create a new processor with the given configuration.
+    ///
+    /// This is a convenience method that uses [`ProcessorBuilder`] internally.
+    /// For more control over dependency injection, use the builder directly.
     pub async fn new(
         key: PipelineKey,
         config: PipelineConfig,
         storage_pool: Option<StoragePoolRef>,
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
-        // Create source storage provider - use pooled if available
-        let source_storage = get_or_create_storage(
-            &storage_pool,
-            &config.source.path,
-            config.source.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu)?;
-
-        // Create destination storage provider for uploads
-        let destination_storage = get_or_create_storage(
-            &storage_pool,
-            &config.sink.table_uri,
-            config.sink.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu)?;
-
-        // Create state tracker based on configuration
-        let state_tracker: Box<dyn StateTracker> = if config.source.use_watermark {
-            // Checkpoint manager needs its own storage provider (not pooled)
-            let checkpoint_storage = get_or_create_storage(
-                &None,
-                &config.sink.table_uri,
-                config.sink.storage_options.clone(),
-            )
+        ProcessorBuilder::new(key, config, shutdown)
+            .with_storage_pool(storage_pool)
+            .build()
             .await
-            .context(StorageSnafu)?;
-            let checkpoint_manager =
-                CheckpointManager::new(checkpoint_storage, key.id().to_string());
-            Box::new(WatermarkTracker::new(checkpoint_manager))
-        } else {
-            Box::new(HashMapTracker::new())
-        };
-
-        // Get schema - either from explicit config or by inference
-        let schema = resolve_schema(&config, &source_storage, &key).await?;
-
-        // Create NDJSON reader
-        let reader_config =
-            NdjsonReaderConfig::new(config.source.batch_size, config.source.compression);
-        let reader = Arc::new(NdjsonReader::new(
-            schema.clone(),
-            reader_config,
-            key.id().to_string(),
-        ));
-
-        // Set up DLQ if configured
-        let dlq = DeadLetterQueue::from_config(&config.error_handling).await?;
-
-        // Create partition extractor from config
-        let partition_columns = config
-            .sink
-            .partition_by
-            .as_ref()
-            .map(|p| p.partition_columns())
-            .unwrap_or_default();
-        let partition_extractor = PartitionExtractor::new(partition_columns);
-
-        // Build the processor context
-        let ctx = ProcessorContext {
-            source_storage,
-            destination_storage,
-            schema,
-            reader,
-            partition_extractor,
-        };
-
-        Ok(Self {
-            failure_tracker: FailureTracker::new(
-                config.error_handling.max_failures,
-                dlq.map(Arc::new),
-                key.id().to_string(),
-            ),
-            key,
-            config,
-            ctx,
-            state_tracker,
-            shutdown,
-        })
     }
 }
 
