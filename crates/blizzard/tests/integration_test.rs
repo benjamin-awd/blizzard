@@ -1,9 +1,6 @@
 //! Integration tests for blizzard
 
-use deltalake::arrow::array::{Int64Array, StringArray};
-use deltalake::arrow::datatypes::{DataType, Field, Schema};
-use deltalake::arrow::record_batch::RecordBatch;
-use std::sync::Arc;
+use deltalake::arrow::datatypes::DataType;
 
 mod config_tests {
     use super::*;
@@ -112,75 +109,7 @@ pipelines:
     }
 }
 
-mod storage_tests {
-    use blizzard::storage::BackendConfig;
-
-    #[test]
-    fn test_s3_url_parsing() {
-        let config = BackendConfig::parse_url("s3://mybucket/path/to/data", false).unwrap();
-        match config {
-            BackendConfig::S3(s3) => {
-                assert_eq!(s3.bucket, "mybucket");
-            }
-            _ => panic!("Expected S3 config"),
-        }
-    }
-
-    #[test]
-    fn test_gcs_url_parsing() {
-        let config = BackendConfig::parse_url("gs://mybucket/path/to/data", false).unwrap();
-        match config {
-            BackendConfig::Gcs(gcs) => {
-                assert_eq!(gcs.bucket, "mybucket");
-            }
-            _ => panic!("Expected GCS config"),
-        }
-    }
-
-    #[test]
-    fn test_local_url_parsing() {
-        let config = BackendConfig::parse_url("/local/path/to/data", false).unwrap();
-        match config {
-            BackendConfig::Local(local) => {
-                assert_eq!(local.path, "/local/path/to/data");
-            }
-            _ => panic!("Expected Local config"),
-        }
-    }
-
-    #[test]
-    fn test_file_url_parsing() {
-        let config = BackendConfig::parse_url("file:///local/path/to/data", false).unwrap();
-        match config {
-            BackendConfig::Local(local) => {
-                assert_eq!(local.path, "/local/path/to/data");
-            }
-            _ => panic!("Expected Local config"),
-        }
-    }
-
-    #[test]
-    fn test_azure_url_parsing() {
-        let config = BackendConfig::parse_url(
-            "abfss://mycontainer@mystorageaccount.dfs.core.windows.net/path/to/data",
-            false,
-        )
-        .unwrap();
-        match config {
-            BackendConfig::Azure(azure) => {
-                assert_eq!(azure.account, "mystorageaccount");
-                assert_eq!(azure.container, "mycontainer");
-            }
-            _ => panic!("Expected Azure config"),
-        }
-    }
-
-    #[test]
-    fn test_invalid_url() {
-        let result = BackendConfig::parse_url("invalid://url", false);
-        assert!(result.is_err());
-    }
-}
+// Storage URL parsing tests are in blizzard-core/src/storage/mod.rs
 
 mod checkpoint_tests {
     use blizzard::source::SourceState;
@@ -218,67 +147,7 @@ mod checkpoint_tests {
     }
 }
 
-mod parquet_tests {
-    use super::*;
-    use blizzard::config::ParquetCompression;
-    use blizzard::parquet::{ParquetWriter, ParquetWriterConfig};
-
-    fn test_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, true),
-        ]))
-    }
-
-    fn create_test_batch(num_rows: usize) -> RecordBatch {
-        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{}", i)).collect();
-        let values: Vec<i64> = (0..num_rows).map(|i| i as i64 * 10).collect();
-
-        RecordBatch::try_new(
-            test_schema(),
-            vec![
-                Arc::new(StringArray::from(ids)),
-                Arc::new(Int64Array::from(values)),
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_parquet_writer_basic() {
-        let schema = test_schema();
-        let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
-
-        let batch = create_test_batch(100);
-        writer.write_batch(&batch).unwrap();
-
-        assert!(writer.current_file_size() > 0);
-    }
-
-    #[test]
-    fn test_parquet_writer_multiple_batches() {
-        let schema = test_schema();
-        let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
-
-        for _ in 0..5 {
-            let batch = create_test_batch(100);
-            writer.write_batch(&batch).unwrap();
-        }
-
-        assert!(writer.current_file_size() > 0);
-    }
-
-    #[test]
-    fn test_parquet_writer_config() {
-        let config = ParquetWriterConfig::default()
-            .with_file_size_mb(64)
-            .with_compression(ParquetCompression::Zstd);
-
-        assert_eq!(config.target_file_size, 64 * 1024 * 1024);
-    }
-}
+// ParquetWriter tests are in blizzard/src/parquet/writer.rs
 
 mod sink_tests {
     use blizzard::parquet::FinishedFile;

@@ -66,28 +66,7 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn test_parse_watermark_with_partition() {
-        let (partition, filename) =
-            blizzard_core::watermark::parse_watermark("date=2026-01-28/file.ndjson.gz");
-        assert_eq!(partition, "date=2026-01-28");
-        assert_eq!(filename, "file.ndjson.gz");
-    }
-
-    #[test]
-    fn test_parse_watermark_nested_partitions() {
-        let (partition, filename) =
-            blizzard_core::watermark::parse_watermark("date=2026-01-28/hour=14/file.ndjson.gz");
-        assert_eq!(partition, "date=2026-01-28/hour=14");
-        assert_eq!(filename, "file.ndjson.gz");
-    }
-
-    #[test]
-    fn test_parse_watermark_no_partition() {
-        let (partition, filename) = blizzard_core::watermark::parse_watermark("file.ndjson.gz");
-        assert_eq!(partition, "");
-        assert_eq!(filename, "file.ndjson.gz");
-    }
+    // parse_watermark tests are in blizzard-core/src/watermark/listing.rs
 
     #[tokio::test]
     async fn test_list_above_watermark() {
