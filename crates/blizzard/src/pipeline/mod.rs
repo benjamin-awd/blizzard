@@ -17,8 +17,7 @@ use tracing::info;
 
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
-    Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef,
-    random_jitter,
+    Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
 };
 
 use crate::config::{Config, PipelineConfig, PipelineKey};

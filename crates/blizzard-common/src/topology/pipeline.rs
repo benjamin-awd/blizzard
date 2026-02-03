@@ -15,11 +15,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::StoragePool;
 use crate::config::GlobalConfig;
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineSetupError};
 use crate::resource::StoragePoolRef;
 use crate::signal::shutdown_signal;
-use crate::StoragePool;
 
 /// Shared resources for pipeline execution.
 #[derive(Clone)]

@@ -167,12 +167,24 @@ impl Mergeable for Config {
     type Key = TableKey;
     type Component = TableConfig;
 
+    fn components(&self) -> &IndexMap<Self::Key, Self::Component> {
+        &self.tables
+    }
+
     fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component> {
         &mut self.tables
     }
 
+    fn global(&self) -> &GlobalConfig {
+        &self.global
+    }
+
     fn global_mut(&mut self) -> &mut GlobalConfig {
         &mut self.global
+    }
+
+    fn metrics(&self) -> &MetricsConfig {
+        &self.metrics
     }
 
     fn metrics_mut(&mut self) -> &mut MetricsConfig {

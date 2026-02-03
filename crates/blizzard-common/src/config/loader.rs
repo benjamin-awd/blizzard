@@ -12,8 +12,11 @@ pub trait Mergeable: Sized + Default {
     type Key: Eq + std::hash::Hash + Clone + std::fmt::Display;
     type Component;
 
+    fn components(&self) -> &IndexMap<Self::Key, Self::Component>;
     fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component>;
+    fn global(&self) -> &GlobalConfig;
     fn global_mut(&mut self) -> &mut GlobalConfig;
+    fn metrics(&self) -> &MetricsConfig;
     fn metrics_mut(&mut self) -> &mut MetricsConfig;
     fn parse_yaml(contents: &str) -> Result<Self, ConfigError>;
 

@@ -13,13 +13,15 @@ use tokio::sync::Semaphore;
 use tracing::info;
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
-use blizzard_common::{FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider, random_jitter};
+use blizzard_common::{
+    FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider, random_jitter,
+};
 
 use crate::emit;
 use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
 
 use crate::checkpoint::CheckpointCoordinator;
-use crate::config::{Config, TableConfig, TableKey};
+use crate::config::{Config, Mergeable, TableConfig, TableKey};
 use crate::error::{DeltaSinkNotInitializedSnafu, PipelineError, StorageSnafu};
 use crate::incoming::{IncomingConfig, IncomingReader};
 use crate::schema::evolution::EvolutionAction;
@@ -37,7 +39,7 @@ impl PenguinPipeline {
     /// Create pipelines from configuration.
     pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
         config
-            .tables
+            .components()
             .iter()
             .map(|(key, cfg)| Self {
                 key: key.clone(),
