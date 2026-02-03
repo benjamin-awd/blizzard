@@ -14,24 +14,18 @@ use std::time::Duration;
 
 use rand::Rng;
 use snafu::ResultExt;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::info;
 
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
-    StoragePool, StoragePoolRef, StorageProvider, StorageProviderRef, shutdown_signal,
+    Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider, StorageProviderRef,
 };
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 /// Generate a random jitter duration up to the specified maximum seconds.
 fn random_jitter(max_secs: u64) -> Duration {
@@ -58,9 +52,79 @@ pub(crate) async fn create_storage(
     }
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
+/// A blizzard pipeline unit for processing NDJSON files to Parquet.
+pub struct BlizzardPipeline {
+    pub key: PipelineKey,
+    pub config: PipelineConfig,
+    pub context: PipelineContext,
+}
+
+impl BlizzardPipeline {
+    /// Run this pipeline's polling loop.
+    async fn execute(self) -> Result<(), PipelineError> {
+        let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
+        let effective_interval = poll_interval + random_jitter(self.context.poll_jitter_secs);
+
+        // Initialize processor, respecting shutdown signal
+        let mut processor = tokio::select! {
+            biased;
+
+            _ = self.context.shutdown.cancelled() => {
+                info!(target = %self.key, "Shutdown requested during initialization");
+                return Ok(());
+            }
+
+            result = BlizzardProcessor::new(
+                self.key.clone(),
+                self.config,
+                self.context.storage_pool,
+                self.context.shutdown.clone(),
+            ) => result?,
+        };
+
+        info!(
+            target = %self.key,
+            poll_interval_secs = effective_interval.as_secs(),
+            "Pipeline processor initialized"
+        );
+
+        run_polling_loop(
+            &mut processor,
+            effective_interval,
+            self.context.shutdown,
+            self.key.id(),
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+impl Pipeline for BlizzardPipeline {
+    type Key = PipelineKey;
+    type Error = PipelineError;
+
+    fn key(&self) -> &Self::Key {
+        &self.key
+    }
+
+    async fn run(self) -> Result<(), Self::Error> {
+        self.execute().await
+    }
+}
+
+/// Create pipelines from configuration.
+fn create_pipelines(config: &Config, context: PipelineContext) -> Vec<BlizzardPipeline> {
+    config
+        .pipelines
+        .iter()
+        .map(|(key, cfg)| BlizzardPipeline {
+            key: key.clone(),
+            config: cfg.clone(),
+            context: context.clone(),
+        })
+        .collect()
+}
 
 /// Run the pipeline with the given configuration.
 ///
@@ -71,149 +135,23 @@ pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
     let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
     blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
 
-    // Set up shared shutdown handling
+    // Create shared context and pipelines
     let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        shutdown_clone.cancel();
-    });
-
-    // Create optional global semaphore for cross-pipeline concurrency limiting
-    let global_semaphore = config
-        .global
-        .total_concurrency
-        .map(|n| Arc::new(Semaphore::new(n)));
-
-    // Create shared storage pool if connection pooling is enabled
-    let storage_pool = config
-        .global
-        .connection_pooling
-        .then(|| Arc::new(StoragePool::new()));
-
-    let jitter_max_secs = config.global.poll_jitter_secs;
-
-    // Spawn independent task per pipeline with jittered start
-    let mut handles: JoinSet<(PipelineKey, Result<(), PipelineError>)> = JoinSet::new();
-
-    for (pipeline_key, pipeline_config) in config.pipelines {
-        let shutdown = shutdown.clone();
-        let global_sem = global_semaphore.clone();
-        let pool = storage_pool.clone();
-        let poll_interval = Duration::from_secs(pipeline_config.source.poll_interval_secs);
-        let key = pipeline_key.clone();
-
-        // Add jitter to stagger pipeline starts (prevents thundering herd)
-        let start_jitter = random_jitter(jitter_max_secs);
-
-        handles.spawn(async move {
-            // Stagger start times, but respect shutdown signal
-            if !start_jitter.is_zero() {
-                info!(
-                    target = %key,
-                    jitter_secs = start_jitter.as_secs(),
-                    "Delaying pipeline start for jitter"
-                );
-                if shutdown
-                    .run_until_cancelled(tokio::time::sleep(start_jitter))
-                    .await
-                    .is_none()
-                {
-                    info!(target = %key, "Shutdown requested during jitter delay");
-                    return (key, Ok(()));
-                }
-            }
-
-            let result = run_single_pipeline(
-                key.clone(),
-                pipeline_config,
-                global_sem,
-                pool,
-                poll_interval,
-                jitter_max_secs,
-                shutdown,
-            )
-            .await;
-            (key, result)
-        });
-    }
-
-    info!("Spawned {} pipeline tasks", handles.len());
-
-    // Wait for all pipelines to complete
-    while let Some(result) = handles.join_next().await {
-        match result {
-            Ok((key, Ok(()))) => {
-                info!(target = %key, "Pipeline completed");
-            }
-            Ok((key, Err(e))) => {
-                error!(target = %key, error = %e, "Pipeline failed");
-            }
-            Err(e) => {
-                error!(error = %e, "Pipeline task panicked");
-            }
-        }
-    }
-
-    info!("All pipelines complete");
-
-    Ok(())
-}
-
-// ============================================================================
-// Internal orchestration
-// ============================================================================
-
-/// Run a single pipeline's polling loop.
-async fn run_single_pipeline(
-    pipeline_key: PipelineKey,
-    pipeline_config: PipelineConfig,
-    _global_semaphore: Option<Arc<Semaphore>>,
-    storage_pool: Option<StoragePoolRef>,
-    poll_interval: Duration,
-    poll_jitter_secs: u64,
-    shutdown: CancellationToken,
-) -> Result<(), PipelineError> {
-    // Add jitter to poll interval for this pipeline
-    let effective_interval = poll_interval + random_jitter(poll_jitter_secs);
-
-    // Initialize processor, respecting shutdown signal
-    let mut processor = tokio::select! {
-        biased;
-
-        _ = shutdown.cancelled() => {
-            info!(target = %pipeline_key, "Shutdown requested during initialization");
-            return Ok(());
-        }
-
-        result = BlizzardProcessor::new(
-            pipeline_key.clone(),
-            pipeline_config,
-            storage_pool,
-            shutdown.clone(),
-        ) => result?,
-    };
-
-    info!(
-        target = %pipeline_key,
-        poll_interval_secs = effective_interval.as_secs(),
-        "Pipeline processor initialized"
+    let context = PipelineContext::new(
+        config.global.total_concurrency,
+        config.global.connection_pooling,
+        config.global.poll_jitter_secs,
+        shutdown.clone(),
     );
+    let pipelines = create_pipelines(&config, context);
 
-    run_polling_loop(
-        &mut processor,
-        effective_interval,
-        shutdown,
-        pipeline_key.id(),
-    )
-    .await?;
+    // Create and run the pipeline runner
+    let runner = PipelineRunner::new(pipelines, shutdown, config.global.poll_jitter_secs, "pipeline");
+    runner.spawn_shutdown_handler();
+    runner.run().await;
 
     Ok(())
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

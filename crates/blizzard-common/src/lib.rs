@@ -40,7 +40,10 @@ pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
 pub use resource::{StoragePool, StoragePoolRef};
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
-pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};
+pub use topology::{
+    PiecesBuilder, Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError,
+    TaskOutput, TaskResult,
+};
 pub use types::FinishedFile;
 pub use watermark::{
     FileListingConfig, generate_prefixes, list_files_above_watermark, list_files_cold_start,

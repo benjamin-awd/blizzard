@@ -36,6 +36,7 @@ bytes = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 indexmap = { workspace = true }
+rand = { workspace = true }
 
 # Metrics
 metrics = { workspace = true }

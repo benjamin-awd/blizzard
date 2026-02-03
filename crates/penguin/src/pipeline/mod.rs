@@ -3,7 +3,6 @@
 //! This module implements the main processing loop using the PollingProcessor
 //! trait from blizzard-common. It supports running multiple Delta tables
 //! concurrently with shared shutdown handling and optional global concurrency limits.
-//!
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,13 +11,12 @@ use async_trait::async_trait;
 use rand::Rng;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::info;
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{
-    FinishedFile, StoragePool, StoragePoolRef, StorageProvider, shutdown_signal,
+    FinishedFile, Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider,
 };
 
 use crate::emit;
@@ -34,155 +32,112 @@ use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 
+/// Generate a random jitter duration up to the specified maximum seconds.
+fn random_jitter(max_secs: u64) -> Duration {
+    if max_secs > 0 {
+        Duration::from_millis(rand::rng().random_range(0..max_secs * 1000))
+    } else {
+        Duration::ZERO
+    }
+}
+
+/// A penguin pipeline unit for committing parquet files to Delta Lake.
+pub struct PenguinPipeline {
+    pub key: TableKey,
+    pub config: TableConfig,
+    pub context: PipelineContext,
+}
+
+impl PenguinPipeline {
+    /// Run this pipeline's polling loop.
+    async fn execute(self) -> Result<(), PipelineError> {
+        let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
+        let effective_interval = poll_interval + random_jitter(self.context.poll_jitter_secs);
+
+        // Initialize processor, respecting shutdown signal
+        let mut processor = tokio::select! {
+            biased;
+
+            _ = self.context.shutdown.cancelled() => {
+                info!(target = %self.key, "Shutdown requested during initialization");
+                return Ok(());
+            }
+
+            result = PenguinProcessor::new(
+                self.key.clone(),
+                self.config,
+                self.context.global_semaphore,
+                self.context.storage_pool,
+            ) => result?,
+        };
+
+        info!(
+            target = %self.key,
+            poll_interval_secs = effective_interval.as_secs(),
+            "Table processor initialized"
+        );
+
+        run_polling_loop(
+            &mut processor,
+            effective_interval,
+            self.context.shutdown,
+            self.key.id(),
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+impl Pipeline for PenguinPipeline {
+    type Key = TableKey;
+    type Error = PipelineError;
+
+    fn key(&self) -> &Self::Key {
+        &self.key
+    }
+
+    async fn run(self) -> Result<(), Self::Error> {
+        self.execute().await
+    }
+}
+
+/// Create pipelines from configuration.
+fn create_pipelines(config: &Config, context: PipelineContext) -> Vec<PenguinPipeline> {
+    config
+        .tables
+        .iter()
+        .map(|(key, cfg)| PenguinPipeline {
+            key: key.clone(),
+            config: cfg.clone(),
+            context: context.clone(),
+        })
+        .collect()
+}
+
 /// Run the pipeline with the given configuration.
 ///
 /// Spawns independent tasks for each configured table, with shared shutdown
 /// handling and optional global concurrency limits.
-///
 pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
-    // 1. Initialize metrics once (shared across all tables)
+    // Initialize metrics once (shared across all tables)
     let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
     blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
 
-    // 2. Set up shared shutdown handling
+    // Create shared context and pipelines
     let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        shutdown_clone.cancel();
-    });
-
-    // 3. Create optional global semaphore for cross-table concurrency limiting
-    let global_semaphore = config
-        .global
-        .total_concurrency
-        .map(|n| Arc::new(Semaphore::new(n)));
-
-    // 4. Create shared storage pool if connection pooling is enabled
-    let storage_pool = config
-        .global
-        .connection_pooling
-        .then(|| Arc::new(StoragePool::new()));
-
-    // 5. Get jitter settings
-    let jitter_max_secs = config.global.poll_jitter_secs;
-
-    // 6. Spawn independent task per table with jittered start
-    let mut handles: JoinSet<(TableKey, Result<(), PipelineError>)> = JoinSet::new();
-
-    for (table_key, table_config) in config.tables {
-        let shutdown = shutdown.clone();
-        let global_sem = global_semaphore.clone();
-        let pool = storage_pool.clone();
-        let poll_interval = Duration::from_secs(table_config.poll_interval_secs);
-        let key = table_key.clone();
-
-        // Add jitter to stagger table starts (prevents thundering herd)
-        let start_jitter = if jitter_max_secs > 0 {
-            Duration::from_secs(rand::rng().random_range(0..jitter_max_secs))
-        } else {
-            Duration::ZERO
-        };
-
-        handles.spawn(async move {
-            // Stagger start times, but respect shutdown signal
-            if !start_jitter.is_zero() {
-                info!(
-                    target = %key,
-                    jitter_secs = start_jitter.as_secs(),
-                    "Delaying table start for jitter"
-                );
-                if shutdown
-                    .run_until_cancelled(tokio::time::sleep(start_jitter))
-                    .await
-                    .is_none()
-                {
-                    info!(target = %key, "Shutdown requested during jitter delay");
-                    return (key, Ok(()));
-                }
-            }
-
-            let result = run_single_table(
-                key.clone(),
-                table_config,
-                global_sem,
-                pool,
-                poll_interval,
-                jitter_max_secs,
-                shutdown,
-            )
-            .await;
-            (key, result)
-        });
-    }
-
-    info!("Spawned {} table tasks", handles.len());
-
-    // Wait for all tables to complete
-    while let Some(result) = handles.join_next().await {
-        match result {
-            Ok((key, Ok(()))) => {
-                info!(target = %key, "Table completed");
-            }
-            Ok((key, Err(e))) => {
-                error!(target = %key, error = %e, "Table failed");
-            }
-            Err(e) => {
-                error!(error = %e, "Table task panicked");
-            }
-        }
-    }
-
-    info!("All tables complete");
-
-    Ok(())
-}
-
-/// Run a single table's polling loop.
-///
-/// This is spawned as an independent task for each table.
-async fn run_single_table(
-    table_key: TableKey,
-    table_config: TableConfig,
-    global_semaphore: Option<Arc<Semaphore>>,
-    storage_pool: Option<StoragePoolRef>,
-    poll_interval: Duration,
-    poll_jitter_secs: u64,
-    shutdown: CancellationToken,
-) -> Result<(), PipelineError> {
-    // Add jitter to poll interval for this table to spread polling load
-    let effective_interval = if poll_jitter_secs > 0 {
-        let jitter_ms = rand::rng().random_range(0..poll_jitter_secs * 1000);
-        poll_interval + Duration::from_millis(jitter_ms)
-    } else {
-        poll_interval
-    };
-
-    // Initialize processor, respecting shutdown signal
-    let mut processor = tokio::select! {
-        biased;
-
-        _ = shutdown.cancelled() => {
-            info!(target = %table_key, "Shutdown requested during initialization");
-            return Ok(());
-        }
-
-        result = PenguinProcessor::new(
-            table_key.clone(),
-            table_config,
-            global_semaphore,
-            storage_pool,
-        ) => result?,
-    };
-
-    info!(
-        target = %table_key,
-        poll_interval_secs = effective_interval.as_secs(),
-        "Table processor initialized"
+    let context = PipelineContext::new(
+        config.global.total_concurrency,
+        config.global.connection_pooling,
+        config.global.poll_jitter_secs,
+        shutdown.clone(),
     );
+    let pipelines = create_pipelines(&config, context);
 
-    // Run the polling loop with jittered interval
-    run_polling_loop(&mut processor, effective_interval, shutdown, table_key.id()).await?;
+    // Create and run the pipeline runner
+    let runner = PipelineRunner::new(pipelines, shutdown, config.global.poll_jitter_secs, "table");
+    runner.spawn_shutdown_handler();
+    runner.run().await;
 
     Ok(())
 }
