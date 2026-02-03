@@ -9,9 +9,9 @@ use deltalake::arrow::datatypes::SchemaRef;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use blizzard_common::polling::{IterationResult, PollingProcessor};
-use blizzard_common::storage::DatePrefixGenerator;
-use blizzard_common::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
+use blizzard_core::polling::{IterationResult, PollingProcessor};
+use blizzard_core::storage::DatePrefixGenerator;
+use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
 
 use super::create_storage;
 use super::download::Downloader;

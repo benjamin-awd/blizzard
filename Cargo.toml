@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/blizzard-common",
+    "crates/blizzard-core",
     "crates/blizzard",
     "crates/penguin",
     "lib/tracing-limit",
@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
-blizzard-common = { path = "crates/blizzard-common" }
+blizzard-core = { path = "crates/blizzard-core" }
 
 # Delta Lake
 deltalake = { version = "0.30", default-features = false, features = ["s3", "gcs"] }

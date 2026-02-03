@@ -10,11 +10,11 @@ use futures::stream::FuturesUnordered;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use blizzard_common::emit;
-use blizzard_common::metrics::events::{
+use blizzard_core::emit;
+use blizzard_core::metrics::events::{
     DecompressionQueueDepth, FailureStage, FileProcessed, FileStatus, SourceStateFiles,
 };
-use blizzard_common::polling::IterationResult;
+use blizzard_core::polling::IterationResult;
 
 use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::StateTracker;

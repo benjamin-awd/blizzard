@@ -18,9 +18,9 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use blizzard_common::FinishedFile;
-use blizzard_common::metrics::events::{CheckpointAge, SourceStateFiles};
-use blizzard_common::types::SourceState;
+use blizzard_core::FinishedFile;
+use blizzard_core::metrics::events::{CheckpointAge, SourceStateFiles};
+use blizzard_core::types::SourceState;
 
 use crate::error::DeltaError;
 use crate::sink::DeltaSink;
@@ -28,7 +28,7 @@ use crate::sink::DeltaSink;
 /// Macro for emitting metrics events.
 macro_rules! emit {
     ($event:expr) => {
-        <_ as blizzard_common::metrics::events::InternalEvent>::emit($event)
+        <_ as blizzard_core::metrics::events::InternalEvent>::emit($event)
     };
 }
 

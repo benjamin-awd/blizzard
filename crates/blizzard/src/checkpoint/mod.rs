@@ -20,7 +20,7 @@ use object_store::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use blizzard_common::storage::StorageProvider;
+use blizzard_core::storage::StorageProvider;
 
 use crate::error::StorageError;
 

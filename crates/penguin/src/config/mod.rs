@@ -6,15 +6,15 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub use blizzard_common::config::{
+pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
     ParquetCompression, Resource, interpolate, load_from_paths,
 };
-pub use blizzard_common::{GlobalConfig, KB, MB};
+pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use table_key::TableKey;
 
 use crate::schema::SchemaEvolutionMode;
-use blizzard_common::error::ConfigError;
+use blizzard_core::error::ConfigError;
 
 fn default_poll_interval() -> u64 {
     10

@@ -25,7 +25,7 @@ pub struct FileListingConfig<'a> {
 /// # Examples
 ///
 /// ```
-/// use blizzard_common::watermark::parse_watermark;
+/// use blizzard_core::watermark::parse_watermark;
 ///
 /// let (partition, filename) = parse_watermark("date=2026-01-28/file.ndjson.gz");
 /// assert_eq!(partition, "date=2026-01-28");

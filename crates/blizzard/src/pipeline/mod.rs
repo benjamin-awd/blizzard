@@ -1,7 +1,7 @@
 //! Pipeline for processing NDJSON files to Parquet staging.
 //!
 //! This module implements the main processing loop using the PollingProcessor
-//! trait from blizzard-common. It supports running multiple pipelines
+//! trait from blizzard-core. It supports running multiple pipelines
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
 mod download;
@@ -15,8 +15,8 @@ use std::time::Duration;
 use snafu::ResultExt;
 use tracing::info;
 
-use blizzard_common::polling::run_polling_loop;
-use blizzard_common::{
+use blizzard_core::polling::run_polling_loop;
+use blizzard_core::{
     PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
 };
 
@@ -99,7 +99,7 @@ impl Pipeline {
     }
 }
 
-impl blizzard_common::Pipeline for Pipeline {
+impl blizzard_core::Pipeline for Pipeline {
     type Key = PipelineKey;
     type Error = PipelineError;
 

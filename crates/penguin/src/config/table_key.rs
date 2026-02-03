@@ -3,7 +3,7 @@
 //! This module provides `TableKey`, a penguin-specific wrapper around
 //! `ComponentKey` that identifies Delta tables in multi-table configurations.
 
-use blizzard_common::ComponentKey;
+use blizzard_core::ComponentKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

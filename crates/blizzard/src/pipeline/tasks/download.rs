@@ -10,11 +10,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use blizzard_common::StorageProviderRef;
-use blizzard_common::emit;
-use blizzard_common::error::StorageError;
-use blizzard_common::metrics::UtilizationTimer;
-use blizzard_common::metrics::events::{ActiveDownloads, FileDownloadCompleted};
+use blizzard_core::StorageProviderRef;
+use blizzard_core::emit;
+use blizzard_core::error::StorageError;
+use blizzard_core::metrics::UtilizationTimer;
+use blizzard_core::metrics::events::{ActiveDownloads, FileDownloadCompleted};
 
 /// Future type for download operations.
 type DownloadFuture = Pin<Box<dyn Future<Output = Result<DownloadedFile, StorageError>> + Send>>;

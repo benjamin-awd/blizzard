@@ -8,14 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use blizzard_common::config::{
+pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
     ParquetCompression, Resource, interpolate, load_from_paths,
 };
-pub use blizzard_common::{GlobalConfig, KB, MB};
+pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use pipeline_key::PipelineKey;
 
-use blizzard_common::error::ConfigError;
+use blizzard_core::error::ConfigError;
 
 /// Trait for config types that provide storage connection details.
 pub trait StorageSource {

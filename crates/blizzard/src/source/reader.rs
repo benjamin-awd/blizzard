@@ -14,8 +14,8 @@ use tracing::debug;
 
 use crate::config::CompressionFormat;
 use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError, ZstdDecompressionSnafu};
-use blizzard_common::emit;
-use blizzard_common::metrics::events::{BytesRead, FileDecompressionCompleted};
+use blizzard_core::emit;
+use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
 use super::traits::{FileReader, ReadResult};
 

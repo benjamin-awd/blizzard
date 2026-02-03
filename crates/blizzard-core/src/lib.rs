@@ -1,4 +1,4 @@
-//! blizzard-common: Shared components for blizzard and penguin crates.
+//! blizzard-core: Shared components for blizzard and penguin crates.
 //!
 //! This crate contains common functionality used by both the file loader (blizzard)
 //! and the delta checkpointer (penguin):

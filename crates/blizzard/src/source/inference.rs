@@ -11,7 +11,7 @@ use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, 
 use deltalake::arrow::json::reader::infer_json_schema;
 use tracing::{debug, info, warn};
 
-use blizzard_common::{StorageProviderRef, storage::list_ndjson_files_with_prefixes};
+use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_prefixes};
 
 use crate::config::CompressionFormat;
 use crate::error::InferenceError;

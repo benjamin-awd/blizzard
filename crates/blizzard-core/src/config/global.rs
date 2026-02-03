@@ -24,7 +24,7 @@ fn default_poll_jitter_secs() -> u64 {
 /// # Examples
 ///
 /// ```
-/// use blizzard_common::config::GlobalConfig;
+/// use blizzard_core::config::GlobalConfig;
 ///
 /// // Default configuration
 /// let config = GlobalConfig::default();

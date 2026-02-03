@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use blizzard_common::FinishedFile;
-use blizzard_common::StorageProvider;
-use blizzard_common::emit;
-use blizzard_common::metrics::events::ParquetFileWritten;
+use blizzard_core::FinishedFile;
+use blizzard_core::StorageProvider;
+use blizzard_core::emit;
+use blizzard_core::metrics::events::ParquetFileWritten;
 
 use crate::error::{TableWriteError, WriteSnafu};
 

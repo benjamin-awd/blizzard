@@ -21,9 +21,9 @@ use crate::error::{
     BufferInUseSnafu, BufferLockSnafu, ParquetError, ParquetWriteSnafu, WriterCreateSnafu,
     WriterUnavailableSnafu,
 };
-use blizzard_common::FinishedFile;
-use blizzard_common::emit;
-use blizzard_common::metrics::events::ParquetWriteCompleted;
+use blizzard_core::FinishedFile;
+use blizzard_core::emit;
+use blizzard_core::metrics::events::ParquetWriteCompleted;
 
 use super::traits::{BatchWriter, BatchWriterError};
 

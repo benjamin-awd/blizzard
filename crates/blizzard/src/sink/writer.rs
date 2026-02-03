@@ -6,8 +6,8 @@ use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
 use tracing::{debug, info};
 
-use blizzard_common::metrics::events::{BatchesProcessed, BytesWritten, RecordsProcessed};
-use blizzard_common::{PartitionExtractor, emit};
+use blizzard_core::metrics::events::{BatchesProcessed, BytesWritten, RecordsProcessed};
+use blizzard_core::{PartitionExtractor, emit};
 
 use super::storage::StorageWriter;
 use super::{ParquetWriter, ParquetWriterConfig};

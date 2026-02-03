@@ -5,9 +5,9 @@
 //! - `HashMapTracker`: Keeps processed files in memory, works with any file naming scheme
 
 use async_trait::async_trait;
-use blizzard_common::StorageProviderRef;
-use blizzard_common::storage::list_ndjson_files_with_prefixes;
-use blizzard_common::types::SourceState;
+use blizzard_core::StorageProviderRef;
+use blizzard_core::storage::list_ndjson_files_with_prefixes;
+use blizzard_core::types::SourceState;
 use tracing::warn;
 
 use crate::checkpoint::CheckpointManager;

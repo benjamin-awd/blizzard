@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use tracing::error;
 
-use blizzard_common::emit;
-use blizzard_common::metrics::events::{FailureStage, FileFailed, FileProcessed, FileStatus};
+use blizzard_core::emit;
+use blizzard_core::metrics::events::{FailureStage, FileFailed, FileProcessed, FileStatus};
 
 use crate::error::{MaxFailuresSnafu, PipelineError};
 

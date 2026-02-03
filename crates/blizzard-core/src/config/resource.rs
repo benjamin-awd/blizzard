@@ -33,7 +33,7 @@ impl Resource {
     /// # Examples
     ///
     /// ```
-    /// use blizzard_common::config::Resource;
+    /// use blizzard_core::config::Resource;
     ///
     /// let r1 = Resource::directory("gs://bucket/staging/");
     /// let r2 = Resource::directory("gs://bucket/staging");
@@ -63,7 +63,7 @@ impl Resource {
     /// # Examples
     ///
     /// ```
-    /// use blizzard_common::config::Resource;
+    /// use blizzard_core::config::Resource;
     /// use std::collections::HashSet;
     ///
     /// let components = vec![

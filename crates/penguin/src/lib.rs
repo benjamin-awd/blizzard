@@ -20,8 +20,8 @@ pub use error::PipelineError;
 pub use pipeline::Pipeline;
 pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
 
-// Re-export from blizzard-common
-pub use blizzard_common::{
+// Re-export from blizzard-core
+pub use blizzard_core::{
     CliArgs, KB, MB, MetricsConfig, PipelineContext, StorageProvider, StorageProviderRef,
     init_metrics, init_tracing, run_pipelines, shutdown_signal,
 };

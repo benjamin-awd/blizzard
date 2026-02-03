@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// # Examples
 ///
 /// ```
-/// use blizzard_common::PartitionExtractor;
+/// use blizzard_core::PartitionExtractor;
 ///
 /// // Extract all partition values
 /// let extractor = PartitionExtractor::all();

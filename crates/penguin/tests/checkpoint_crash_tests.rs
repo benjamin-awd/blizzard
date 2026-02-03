@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use blizzard_common::FinishedFile;
-use blizzard_common::storage::StorageProvider;
-use blizzard_common::types::SourceState;
+use blizzard_core::FinishedFile;
+use blizzard_core::storage::StorageProvider;
+use blizzard_core::types::SourceState;
 use penguin::SchemaEvolutionMode;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::schema::infer_schema_from_first_file;

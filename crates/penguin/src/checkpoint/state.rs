@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use blizzard_common::types::SourceState;
+use blizzard_core::types::SourceState;
 
 /// Default schema version for checkpoint state.
 fn default_schema_version() -> u32 {

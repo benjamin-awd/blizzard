@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal
-blizzard-common = { workspace = true }
+blizzard-core = { workspace = true }
 
 # Delta Lake
 deltalake = { workspace = true }

@@ -36,7 +36,7 @@ impl ComponentKey {
     /// # Examples
     ///
     /// ```
-    /// use blizzard_common::config::ComponentKey;
+    /// use blizzard_core::config::ComponentKey;
     ///
     /// assert_eq!(ComponentKey::from_uri("gs://bucket/path/to/table").id(), "table");
     /// assert_eq!(ComponentKey::from_uri("gs://bucket/path/to/table/").id(), "table");

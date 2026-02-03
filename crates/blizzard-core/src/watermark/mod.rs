@@ -39,7 +39,7 @@ pub use listing::{
 /// # Examples
 ///
 /// ```
-/// use blizzard_common::watermark::generate_prefixes;
+/// use blizzard_core::watermark::generate_prefixes;
 ///
 /// // Generate prefixes for the last 3 days
 /// let prefixes = generate_prefixes("date=%Y-%m-%d", 3);

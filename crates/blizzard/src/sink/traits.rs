@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use deltalake::arrow::array::RecordBatch;
 
-use blizzard_common::FinishedFile;
+use blizzard_core::FinishedFile;
 
 /// Error type for batch writer operations.
 pub type BatchWriterError = Box<dyn std::error::Error + Send + Sync>;

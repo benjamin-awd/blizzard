@@ -11,10 +11,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
-use blizzard_common::StorageProvider;
-use blizzard_common::config::ErrorHandlingConfig;
-use blizzard_common::error::{DlqError, DlqSerializeSnafu, DlqStorageSnafu, DlqWriteSnafu};
-use blizzard_common::metrics::events::FailureStage;
+use blizzard_core::StorageProvider;
+use blizzard_core::config::ErrorHandlingConfig;
+use blizzard_core::error::{DlqError, DlqSerializeSnafu, DlqStorageSnafu, DlqWriteSnafu};
+use blizzard_core::metrics::events::FailureStage;
 
 use super::types::{FailedFile, FailureStats};
 

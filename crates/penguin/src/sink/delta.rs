@@ -20,8 +20,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use url::Url;
 
-use blizzard_common::FinishedFile;
-use blizzard_common::storage::{BackendConfig, StorageProvider};
+use blizzard_core::FinishedFile;
+use blizzard_core::storage::{BackendConfig, StorageProvider};
 
 use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted, InternalEvent};
 
@@ -685,7 +685,7 @@ async fn commit_to_delta_with_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blizzard_common::types::SourceState;
+    use blizzard_core::types::SourceState;
 
     #[test]
     fn test_create_add_action() {

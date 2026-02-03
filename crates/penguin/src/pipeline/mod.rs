@@ -1,7 +1,7 @@
 //! Pipeline for discovering parquet files and committing to Delta Lake.
 //!
 //! This module implements the main processing loop using the PollingProcessor
-//! trait from blizzard-common. It supports running multiple Delta tables
+//! trait from blizzard-core. It supports running multiple Delta tables
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tracing::info;
 
-use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
-use blizzard_common::{
+use blizzard_core::polling::{IterationResult, PollingProcessor, run_polling_loop};
+use blizzard_core::{
     FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, random_jitter,
 };
 
@@ -85,7 +85,7 @@ impl Pipeline {
     }
 }
 
-impl blizzard_common::Pipeline for Pipeline {
+impl blizzard_core::Pipeline for Pipeline {
     type Key = TableKey;
     type Error = PipelineError;
 

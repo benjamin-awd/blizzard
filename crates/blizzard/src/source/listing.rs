@@ -13,9 +13,9 @@
 //! Files must be named such that lexicographic order matches chronological order
 //! (e.g., using timestamp prefixes or UUIDv7).
 
-use blizzard_common::error::StorageError;
-use blizzard_common::storage::StorageProvider;
-use blizzard_common::watermark::{self, FileListingConfig};
+use blizzard_core::error::StorageError;
+use blizzard_core::storage::StorageProvider;
+use blizzard_core::watermark::{self, FileListingConfig};
 
 /// File extension for NDJSON gzip files.
 const NDJSON_EXTENSION: &str = ".ndjson.gz";
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn test_parse_watermark_with_partition() {
         let (partition, filename) =
-            blizzard_common::watermark::parse_watermark("date=2026-01-28/file.ndjson.gz");
+            blizzard_core::watermark::parse_watermark("date=2026-01-28/file.ndjson.gz");
         assert_eq!(partition, "date=2026-01-28");
         assert_eq!(filename, "file.ndjson.gz");
     }
@@ -77,14 +77,14 @@ mod tests {
     #[test]
     fn test_parse_watermark_nested_partitions() {
         let (partition, filename) =
-            blizzard_common::watermark::parse_watermark("date=2026-01-28/hour=14/file.ndjson.gz");
+            blizzard_core::watermark::parse_watermark("date=2026-01-28/hour=14/file.ndjson.gz");
         assert_eq!(partition, "date=2026-01-28/hour=14");
         assert_eq!(filename, "file.ndjson.gz");
     }
 
     #[test]
     fn test_parse_watermark_no_partition() {
-        let (partition, filename) = blizzard_common::watermark::parse_watermark("file.ndjson.gz");
+        let (partition, filename) = blizzard_core::watermark::parse_watermark("file.ndjson.gz");
         assert_eq!(partition, "");
         assert_eq!(filename, "file.ndjson.gz");
     }

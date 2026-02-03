@@ -20,7 +20,7 @@ pub use utilization::UtilizationTimer;
 /// # Example
 ///
 /// ```ignore
-/// use blizzard_common::metrics::{events::RecordsProcessed, events::BytesWritten};
+/// use blizzard_core::metrics::{events::RecordsProcessed, events::BytesWritten};
 ///
 /// emit!(RecordsProcessed { count: 100 });
 /// emit!(BytesWritten { bytes: 1024 });

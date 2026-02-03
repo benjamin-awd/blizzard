@@ -3,7 +3,7 @@
 use snafu::prelude::*;
 
 // Re-export common errors
-pub use blizzard_common::error::{ConfigError, DlqError, StorageError};
+pub use blizzard_core::error::{ConfigError, DlqError, StorageError};
 
 /// Errors that can occur during schema inference from NDJSON files.
 #[derive(Debug, Snafu)]
@@ -139,7 +139,7 @@ pub enum PipelineError {
     /// Metrics error.
     #[snafu(display("Metrics error: {source}"))]
     Metrics {
-        source: blizzard_common::MetricsError,
+        source: blizzard_core::MetricsError,
     },
 }
 
@@ -195,13 +195,13 @@ impl From<InferenceError> for PipelineError {
     }
 }
 
-impl From<blizzard_common::PipelineSetupError> for PipelineError {
-    fn from(source: blizzard_common::PipelineSetupError) -> Self {
+impl From<blizzard_core::PipelineSetupError> for PipelineError {
+    fn from(source: blizzard_core::PipelineSetupError) -> Self {
         match source {
-            blizzard_common::PipelineSetupError::AddressParse { source } => {
+            blizzard_core::PipelineSetupError::AddressParse { source } => {
                 PipelineError::AddressParse { source }
             }
-            blizzard_common::PipelineSetupError::Metrics { source } => {
+            blizzard_core::PipelineSetupError::Metrics { source } => {
                 PipelineError::Metrics { source }
             }
         }

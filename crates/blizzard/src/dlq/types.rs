@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use blizzard_common::metrics::events::FailureStage;
+use blizzard_core::metrics::events::FailureStage;
 
 /// A record representing a failed file in the DLQ.
 #[derive(Debug, Clone, Serialize, Deserialize)]

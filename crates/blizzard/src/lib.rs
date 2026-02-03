@@ -15,9 +15,9 @@ pub mod pipeline;
 pub mod sink;
 pub mod source;
 
-/// Re-export storage module from blizzard-common for convenience
+/// Re-export storage module from blizzard-core for convenience
 pub mod storage {
-    pub use blizzard_common::storage::*;
+    pub use blizzard_core::storage::*;
 }
 
 // Re-export commonly used items
@@ -25,8 +25,8 @@ pub use config::Config;
 pub use error::PipelineError;
 pub use pipeline::Pipeline;
 
-// Re-export from blizzard-common
-pub use blizzard_common::{
+// Re-export from blizzard-core
+pub use blizzard_core::{
     CliArgs, KB, MB, MetricsConfig, ParquetCompression, PipelineContext, StorageProvider,
     StorageProviderRef, init_metrics, init_tracing, run_pipelines, shutdown_signal,
 };

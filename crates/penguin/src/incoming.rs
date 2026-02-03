@@ -26,10 +26,10 @@ use std::sync::Arc;
 use snafu::ResultExt;
 use tracing::{debug, info};
 
-use blizzard_common::FinishedFile;
-use blizzard_common::PartitionExtractor;
-use blizzard_common::storage::StorageProvider;
-use blizzard_common::watermark::{self, FileListingConfig, generate_prefixes};
+use blizzard_core::FinishedFile;
+use blizzard_core::PartitionExtractor;
+use blizzard_core::storage::StorageProvider;
+use blizzard_core::watermark::{self, FileListingConfig, generate_prefixes};
 
 use crate::config::PartitionFilterConfig;
 use crate::error::{IncomingError, incoming_error};
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_parse_watermark() {
-        let (partition, filename) = blizzard_common::watermark::parse_watermark(
+        let (partition, filename) = blizzard_core::watermark::parse_watermark(
             "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet",
         );
         assert_eq!(partition, "date=2024-01-28");
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_parse_watermark_nested_partitions() {
-        let (partition, filename) = blizzard_common::watermark::parse_watermark(
+        let (partition, filename) = blizzard_core::watermark::parse_watermark(
             "date=2024-01-28/hour=14/01926abc-def0-7123-4567-89abcdef0123.parquet",
         );
         assert_eq!(partition, "date=2024-01-28/hour=14");
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_parse_watermark_no_partition() {
-        let (partition, filename) = blizzard_common::watermark::parse_watermark("file.parquet");
+        let (partition, filename) = blizzard_core::watermark::parse_watermark("file.parquet");
         assert_eq!(partition, "");
         assert_eq!(filename, "file.parquet");
     }
@@ -320,7 +320,7 @@ mod tests {
         );
 
         // List partitions using the shared function
-        let partitions = blizzard_common::watermark::list_partitions(&storage)
+        let partitions = blizzard_core::watermark::list_partitions(&storage)
             .await
             .unwrap();
 

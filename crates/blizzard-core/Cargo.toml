@@ -1,5 +1,5 @@
 [package]
-name = "blizzard-common"
+name = "blizzard-core"
 version = "0.1.0"
 description = "Shared components for blizzard and penguin crates"
 edition.workspace = true
