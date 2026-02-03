@@ -1,4 +1,4 @@
-//! Delta Lake commit logic.
+//! Delta Lake sink for committing Parquet files.
 //!
 //! Handles creating/opening Delta Lake tables and committing
 //! Parquet files with exactly-once semantics.
@@ -9,32 +9,30 @@
 //! The checkpoint state is embedded in the `Txn.app_id` field as base64-encoded JSON,
 //! and committed atomically with Add actions in a single Delta commit.
 
+mod actions;
+mod commit;
+mod table;
+
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use base64::Engine;
 use deltalake::DeltaTable;
 use deltalake::arrow::datatypes::{Schema, SchemaRef};
 use deltalake::kernel::Action;
-use deltalake::operations::create::CreateBuilder;
-use deltalake::protocol::SaveMode;
-use object_store::path::Path;
-use std::collections::HashSet;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
-use url::Url;
 
 use blizzard_core::FinishedFile;
-use blizzard_core::storage::{BackendConfig, StorageProvider};
+use blizzard_core::storage::StorageProvider;
 
 use super::TableSink;
-
-use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted, InternalEvent};
-
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
 use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_schema_evolution};
 
-/// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
-const TXN_APP_ID_PREFIX: &str = "blizzard:";
+use actions::{TXN_APP_ID_PREFIX, create_add_action};
+use commit::commit_to_delta_with_checkpoint;
+use table::{arrow_schema_to_delta, ensure_handlers_registered, load_or_create_table, try_open_table};
 
 /// Maximum number of Delta log versions to scan when recovering checkpoint state.
 ///
@@ -46,14 +44,6 @@ const TXN_APP_ID_PREFIX: &str = "blizzard:";
 /// 1000 versions is generous enough to handle mixed workloads where other
 /// applications write to the same Delta table, while still bounding scan time.
 const CHECKPOINT_RECOVERY_SCAN_LIMIT: i64 = 1000;
-
-/// Ensure Delta Lake cloud storage handlers are registered.
-///
-/// This is idempotent - calling multiple times is safe.
-fn ensure_handlers_registered() {
-    deltalake::aws::register_handlers(None);
-    deltalake::gcp::register_handlers(None);
-}
 
 /// Delta Lake sink for committing Parquet files.
 pub struct DeltaSink {
@@ -304,9 +294,7 @@ impl DeltaSink {
     /// Returns a set of paths (relative to table root) for all files
     /// currently in the table. This is used to cross-check against
     /// incoming files to avoid double-commits.
-    pub fn get_committed_paths(&self) -> std::collections::HashSet<String> {
-        use std::collections::HashSet;
-
+    pub fn get_committed_paths(&self) -> HashSet<String> {
         match self.table.get_file_uris() {
             Ok(iter) => iter.collect(),
             Err(e) => {
@@ -406,291 +394,6 @@ impl DeltaSink {
     }
 }
 
-/// Convert an Arrow schema to a Delta schema.
-fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructType, DeltaError> {
-    use deltalake::kernel::engine::arrow_conversion::TryIntoKernel;
-    use deltalake::kernel::{DataType as DeltaType, StructField, StructType};
-
-    let fields: Vec<StructField> = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let delta_type: DeltaType = field
-                .data_type()
-                .try_into_kernel()
-                .map_err(|source| DeltaError::SchemaConversion { source })?;
-            Ok(StructField::new(
-                field.name(),
-                delta_type,
-                field.is_nullable(),
-            ))
-        })
-        .collect::<Result<Vec<_>, DeltaError>>()?;
-
-    StructType::try_new(fields).map_err(|e| DeltaError::StructType {
-        message: e.to_string(),
-    })
-}
-
-/// Construct the Delta table URL from a storage provider.
-fn build_table_url(storage_provider: &StorageProvider) -> Result<String, DeltaError> {
-    let empty_path = Path::parse("").map_err(|_| DeltaError::PathParse {
-        path: String::new(),
-    })?;
-
-    let table_url = match storage_provider.config() {
-        BackendConfig::S3(s3) => {
-            format!(
-                "s3://{}/{}",
-                s3.bucket,
-                storage_provider.qualify_path(&empty_path)
-            )
-        }
-        BackendConfig::Gcs(gcs) => {
-            format!(
-                "gs://{}/{}",
-                gcs.bucket,
-                storage_provider.qualify_path(&empty_path)
-            )
-        }
-        BackendConfig::Azure(azure) => {
-            format!(
-                "abfs://{}/{}",
-                azure.container,
-                storage_provider.qualify_path(&empty_path)
-            )
-        }
-        BackendConfig::Local(local) => {
-            format!("file://{}", local.path)
-        }
-    };
-
-    Ok(table_url)
-}
-
-/// Try to open an existing Delta Lake table.
-///
-/// Returns an error if the table doesn't exist. Use `DeltaError::is_table_not_found()`
-/// to check if the error indicates a missing table.
-async fn try_open_table(
-    storage_provider: &StorageProvider,
-    table_name: &str,
-) -> Result<DeltaTable, DeltaError> {
-    let table_url = build_table_url(storage_provider)?;
-
-    let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
-        url: table_url.clone(),
-    })?;
-
-    let table = deltalake::open_table_with_storage_options(
-        parsed_url,
-        storage_provider.storage_options().clone(),
-    )
-    .await
-    .map_err(|source| DeltaError::DeltaOperation { source })?;
-
-    info!(
-        target = %table_name,
-        "Opened existing Delta table at version {}",
-        table.version().unwrap_or(-1)
-    );
-    Ok(table)
-}
-
-/// Load or create a Delta Lake table with the given schema.
-pub async fn load_or_create_table(
-    storage_provider: &StorageProvider,
-    schema: &Schema,
-    partition_by: &[String],
-    table_name: &str,
-) -> Result<DeltaTable, DeltaError> {
-    let table_url = build_table_url(storage_provider)?;
-
-    // Try to open existing table
-    let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
-        url: table_url.clone(),
-    })?;
-    match deltalake::open_table_with_storage_options(
-        parsed_url.clone(),
-        storage_provider.storage_options().clone(),
-    )
-    .await
-    {
-        Ok(table) => {
-            info!(
-                target = %table_name,
-                "Loaded existing Delta table at version {}",
-                table.version().unwrap_or(-1)
-            );
-            Ok(table)
-        }
-        Err(_) => {
-            // Table doesn't exist, create it
-            info!(target = %table_name, "Creating new Delta table at {}", table_url);
-
-            // Convert Arrow schema to Delta schema
-            let delta_schema = arrow_schema_to_delta(schema)?;
-
-            let mut builder = CreateBuilder::new()
-                .with_location(&table_url)
-                .with_columns(delta_schema.fields().cloned())
-                .with_storage_options(storage_provider.storage_options().clone());
-
-            // Add partition columns if configured
-            if !partition_by.is_empty() {
-                info!(target = %table_name, "Creating table with partition columns: {:?}", partition_by);
-                builder = builder.with_partition_columns(partition_by);
-            }
-
-            let table = builder
-                .await
-                .map_err(|source| DeltaError::DeltaOperation { source })?;
-
-            Ok(table)
-        }
-    }
-}
-
-/// Create a Delta Lake Add action for a finished file.
-fn create_add_action(file: &FinishedFile) -> Action {
-    use deltalake::kernel::Add;
-    use std::collections::HashMap;
-
-    debug!("Creating add action for file {:?}", file);
-
-    let subpath = file.filename.trim_start_matches('/');
-
-    // Convert partition_values to Option<String> as required by Delta Lake
-    let partition_values: HashMap<String, Option<String>> = file
-        .partition_values
-        .iter()
-        .map(|(k, v)| (k.clone(), Some(v.clone())))
-        .collect();
-
-    Action::Add(Add {
-        path: subpath.to_string(),
-        size: i64::try_from(file.size).expect("file size should fit in i64"),
-        partition_values,
-        modification_time: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| {
-                i64::try_from(d.as_millis()).expect("modification time in millis should fit in i64")
-            })
-            .unwrap_or(0),
-        data_change: true,
-        ..Default::default()
-    })
-}
-
-/// Create a Delta Lake Txn action with embedded checkpoint state.
-///
-/// The checkpoint state is serialized to JSON and base64-encoded in the app_id field.
-/// Format: `blizzard:{base64_encoded_checkpoint_json}`
-fn create_txn_action(
-    checkpoint_state: &CheckpointState,
-    version: i64,
-) -> Result<Action, DeltaError> {
-    use deltalake::kernel::Transaction;
-
-    let checkpoint_json = serde_json::to_string(checkpoint_state)
-        .map_err(|source| DeltaError::CheckpointJsonEncode { source })?;
-
-    // Track checkpoint state size for memory monitoring
-    CheckpointStateSize {
-        bytes: checkpoint_json.len(),
-    }
-    .emit();
-
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&checkpoint_json);
-    let app_id = format!("{TXN_APP_ID_PREFIX}{encoded}");
-
-    Ok(Action::Txn(Transaction {
-        app_id,
-        version,
-        last_updated: Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| {
-                    i64::try_from(d.as_millis())
-                        .expect("modification time in millis should fit in i64")
-                })
-                .unwrap_or(0),
-        ),
-    }))
-}
-
-/// Commit actions to Delta table with optional checkpoint.
-///
-/// When checkpoint is provided, a Txn action is prepended to the add actions
-/// and committed atomically in a single transaction.
-async fn commit_to_delta_with_checkpoint(
-    table: &mut DeltaTable,
-    add_actions: Vec<Action>,
-    checkpoint: Option<(&CheckpointState, i64)>,
-    partition_by: &[String],
-    table_name: &str,
-) -> Result<i64, DeltaError> {
-    use deltalake::kernel::transaction::CommitBuilder;
-
-    let start = Instant::now();
-
-    // Build the complete action list
-    let mut all_actions = Vec::with_capacity(add_actions.len() + 1);
-
-    // Add Txn action first if checkpoint provided
-    if let Some((state, version)) = checkpoint {
-        all_actions.push(create_txn_action(state, version)?);
-        debug!(
-            target = %table_name,
-            "Including checkpoint v{} in commit ({} files)",
-            version,
-            add_actions.len()
-        );
-    }
-
-    all_actions.extend(add_actions);
-
-    // Convert partition_by to Option<Vec<String>> for Delta operation
-    let partition_by_opt = if partition_by.is_empty() {
-        None
-    } else {
-        Some(partition_by.to_vec())
-    };
-
-    let version = CommitBuilder::default()
-        .with_actions(all_actions)
-        .build(
-            Some(
-                table
-                    .snapshot()
-                    .map_err(|source| DeltaError::DeltaOperation { source })?,
-            ),
-            table.log_store(),
-            deltalake::protocol::DeltaOperation::Write {
-                mode: SaveMode::Append,
-                partition_by: partition_by_opt,
-                predicate: None,
-            },
-        )
-        .await
-        .map_err(|source| DeltaError::DeltaOperation { source })?
-        .version;
-
-    // Reload table to get new state
-    table
-        .load()
-        .await
-        .map_err(|source| DeltaError::DeltaOperation { source })?;
-
-    DeltaCommitCompleted {
-        duration: start.elapsed(),
-        target: table_name.to_string(),
-    }
-    .emit();
-
-    Ok(version)
-}
-
 #[async_trait]
 impl TableSink for DeltaSink {
     async fn commit_files_with_checkpoint(
@@ -749,147 +452,10 @@ impl TableSink for DeltaSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blizzard_core::types::SourceState;
-
-    #[test]
-    fn test_create_add_action() {
-        use std::collections::HashMap;
-
-        let file = FinishedFile {
-            filename: "test-file.parquet".to_string(),
-            size: 1024,
-            record_count: 100,
-            bytes: None,
-            partition_values: HashMap::new(),
-            source_file: None,
-        };
-
-        let action = create_add_action(&file);
-
-        match action {
-            Action::Add(add) => {
-                assert_eq!(add.path, "test-file.parquet");
-                assert_eq!(add.size, 1024);
-                assert!(add.data_change);
-                assert!(add.partition_values.is_empty());
-            }
-            _ => panic!("Expected Add action"),
-        }
-    }
-
-    #[test]
-    fn test_create_add_action_strips_leading_slash() {
-        use std::collections::HashMap;
-
-        let file = FinishedFile {
-            filename: "/path/to/file.parquet".to_string(),
-            size: 2048,
-            record_count: 200,
-            bytes: None,
-            partition_values: HashMap::new(),
-            source_file: None,
-        };
-
-        let action = create_add_action(&file);
-
-        match action {
-            Action::Add(add) => {
-                assert_eq!(add.path, "path/to/file.parquet");
-            }
-            _ => panic!("Expected Add action"),
-        }
-    }
-
-    #[test]
-    fn test_create_add_action_with_partition_values() {
-        use std::collections::HashMap;
-
-        let mut partition_values = HashMap::new();
-        partition_values.insert("date".to_string(), "2026-01-28".to_string());
-
-        let file = FinishedFile {
-            filename: "date=2026-01-28/test-file.parquet".to_string(),
-            size: 1024,
-            record_count: 100,
-            bytes: None,
-            partition_values,
-            source_file: None,
-        };
-
-        let action = create_add_action(&file);
-
-        match action {
-            Action::Add(add) => {
-                assert_eq!(add.path, "date=2026-01-28/test-file.parquet");
-                assert_eq!(
-                    add.partition_values.get("date"),
-                    Some(&Some("2026-01-28".to_string()))
-                );
-            }
-            _ => panic!("Expected Add action"),
-        }
-    }
-
-    #[test]
-    fn test_create_txn_action() {
-        let mut source_state = SourceState::new();
-        source_state.mark_finished("file1.ndjson.gz");
-
-        let checkpoint = CheckpointState {
-            schema_version: 2,
-            source_state,
-            delta_version: 5,
-            watermark: None,
-        };
-
-        let action = create_txn_action(&checkpoint, 42).unwrap();
-
-        match action {
-            Action::Txn(txn) => {
-                assert!(txn.app_id.starts_with(TXN_APP_ID_PREFIX));
-                assert_eq!(txn.version, 42);
-                assert!(txn.last_updated.is_some());
-            }
-            _ => panic!("Expected Txn action"),
-        }
-    }
-
-    #[test]
-    fn test_txn_action_roundtrip() {
-        let mut source_state = SourceState::new();
-        source_state.mark_finished("file1.ndjson.gz");
-        source_state.mark_finished("file2.ndjson.gz");
-
-        let original = CheckpointState {
-            schema_version: 2,
-            source_state,
-            delta_version: 10,
-            watermark: Some("date=2024-01-28/uuid.parquet".to_string()),
-        };
-
-        // Create Txn action
-        let action = create_txn_action(&original, 1).unwrap();
-
-        // Extract and decode
-        if let Action::Txn(txn) = action {
-            let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).unwrap();
-            let json_bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .unwrap();
-            let restored: CheckpointState = serde_json::from_slice(&json_bytes).unwrap();
-
-            assert_eq!(restored.schema_version, original.schema_version);
-            assert_eq!(restored.delta_version, original.delta_version);
-            assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
-            assert_eq!(restored.watermark, original.watermark);
-        } else {
-            panic!("Expected Txn action");
-        }
-    }
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_try_open_nonexistent_table() {
-        use std::collections::HashMap;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
@@ -913,7 +479,6 @@ mod tests {
     #[tokio::test]
     async fn test_try_open_existing_table() {
         use deltalake::arrow::datatypes::{DataType, Field, Schema};
-        use std::collections::HashMap;
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();

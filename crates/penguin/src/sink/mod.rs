@@ -1,6 +1,6 @@
 //! Delta Lake sink for committing Parquet files.
 
-mod delta;
+pub mod delta;
 mod traits;
 
 pub use delta::DeltaSink;
