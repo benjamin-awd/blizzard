@@ -282,32 +282,16 @@ impl PollingProcessor for Processor {
             )
             .await?;
 
-        self.finalize_iteration(writer).await?;
-
-        Ok(result)
-    }
-}
-
-impl Processor {
-    async fn finalize_iteration(&mut self, writer: SinkWriter) -> Result<(), PipelineError> {
+        // Finalize iteration: flush writer, DLQ, and save state
         writer.finalize().await?;
-
         self.failure_tracker.finalize_dlq().await;
 
         if let Err(e) = self.state_tracker.save().await {
-            warn!(
-                target = %self.key,
-                error = %e,
-                "Failed to save state"
-            );
+            warn!(target = %self.key, error = %e, "Failed to save state");
         } else {
-            debug!(
-                target = %self.key,
-                mode = self.state_tracker.mode_name(),
-                "Saved state"
-            );
+            debug!(target = %self.key, mode = self.state_tracker.mode_name(), "Saved state");
         }
 
-        Ok(())
+        Ok(result)
     }
 }
