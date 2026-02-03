@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing::info;
 
-use penguin::{CliArgs, Config, PenguinPipeline, init_tracing, run_pipelines};
+use penguin::{CliArgs, Config, Pipeline, init_tracing, run_pipelines};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -43,7 +43,7 @@ async fn main() -> ExitCode {
         &config.metrics.address,
         &config.global,
         "table",
-        |context| PenguinPipeline::from_config(&config, context),
+        |context| Pipeline::from_config(&config, context),
     )
     .await;
 

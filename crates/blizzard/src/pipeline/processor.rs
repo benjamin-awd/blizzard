@@ -1,4 +1,4 @@
-//! The BlizzardProcessor - core file processing logic.
+//! The Processor - core file processing logic.
 //!
 //! Implements the PollingProcessor trait for processing NDJSON files to Parquet.
 
@@ -91,11 +91,8 @@ impl Iteration {
         );
 
         let max_in_flight = config.source.max_concurrent_files * 2;
-        let downloader = Downloader::new(
-            ctx.reader.clone(),
-            max_in_flight,
-            pipeline_key.to_string(),
-        );
+        let downloader =
+            Downloader::new(ctx.reader.clone(), max_in_flight, pipeline_key.to_string());
 
         Ok(Self {
             writer,
@@ -129,8 +126,8 @@ impl Iteration {
 
 /// The blizzard file loader pipeline processor.
 ///
-/// Each pipeline runs its own `BlizzardProcessor` instance.
-pub(super) struct BlizzardProcessor {
+/// Each pipeline runs its own `Processor` instance.
+pub(super) struct Processor {
     /// Identifier for this pipeline (used in logging and metrics).
     pipeline_key: PipelineKey,
     /// Configuration for this specific pipeline.
@@ -145,7 +142,7 @@ pub(super) struct BlizzardProcessor {
     shutdown: CancellationToken,
 }
 
-impl BlizzardProcessor {
+impl Processor {
     pub async fn new(
         pipeline_key: PipelineKey,
         pipeline_config: PipelineConfig,
@@ -236,7 +233,7 @@ impl BlizzardProcessor {
 }
 
 #[async_trait]
-impl PollingProcessor for BlizzardProcessor {
+impl PollingProcessor for Processor {
     type State = Vec<String>;
     type Error = PipelineError;
 
@@ -295,7 +292,7 @@ impl PollingProcessor for BlizzardProcessor {
     }
 }
 
-impl BlizzardProcessor {
+impl Processor {
     async fn finalize_iteration(&mut self, writer: SinkWriter) -> Result<(), PipelineError> {
         writer.finalize().await?;
 

@@ -17,13 +17,13 @@ use tracing::info;
 
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
-    Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
+    PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
 };
 
 use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey, StorageSource};
 use crate::error::{PipelineError, StorageSnafu};
 
-use processor::BlizzardProcessor;
+use processor::Processor;
 
 /// Create a storage provider from a config, using the pool if available.
 pub(crate) async fn create_storage(
@@ -43,13 +43,13 @@ pub(crate) async fn create_storage(
 }
 
 /// A blizzard pipeline unit for processing NDJSON files to Parquet.
-pub struct BlizzardPipeline {
+pub struct Pipeline {
     pub key: PipelineKey,
     pub config: PipelineConfig,
     pub context: PipelineContext,
 }
 
-impl BlizzardPipeline {
+impl Pipeline {
     /// Create pipelines from configuration.
     pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
         config.build_pipelines(context, |key, config, context| Self {
@@ -73,7 +73,7 @@ impl BlizzardPipeline {
                 return Ok(());
             }
 
-            result = BlizzardProcessor::new(
+            result = Processor::new(
                 self.key.clone(),
                 self.config,
                 self.context.storage_pool,
@@ -99,7 +99,7 @@ impl BlizzardPipeline {
     }
 }
 
-impl Pipeline for BlizzardPipeline {
+impl blizzard_common::Pipeline for Pipeline {
     type Key = PipelineKey;
     type Error = PipelineError;
 

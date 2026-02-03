@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing::info;
 
-use blizzard::{BlizzardPipeline, CliArgs, Config, init_tracing, run_pipelines};
+use blizzard::{CliArgs, Config, Pipeline, init_tracing, run_pipelines};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -46,7 +46,7 @@ async fn main() -> ExitCode {
         &config.metrics.address,
         &config.global,
         "pipeline",
-        |context| BlizzardPipeline::from_config(&config, context),
+        |context| Pipeline::from_config(&config, context),
     )
     .await;
 

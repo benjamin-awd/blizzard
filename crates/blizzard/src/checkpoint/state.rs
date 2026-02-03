@@ -30,7 +30,7 @@ fn default_schema_version() -> u32 {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BlizzardCheckpointState {
+pub struct CheckpointState {
     /// Schema version for forward compatibility.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -43,7 +43,7 @@ pub struct BlizzardCheckpointState {
     pub last_update_ts: i64,
 }
 
-impl BlizzardCheckpointState {
+impl CheckpointState {
     /// Create a new checkpoint state with a watermark.
     pub fn with_watermark(watermark: String) -> Self {
         Self {
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_state_default() {
-        let state = BlizzardCheckpointState::default();
+        let state = CheckpointState::default();
         assert_eq!(state.schema_version, 0); // Default is 0, then serde default kicks in
         assert!(state.watermark.is_none());
         assert_eq!(state.last_update_ts, 0);
@@ -86,14 +86,14 @@ mod tests {
 
     #[test]
     fn test_checkpoint_state_serialization() {
-        let state = BlizzardCheckpointState {
+        let state = CheckpointState {
             schema_version: 1,
             watermark: Some("date=2026-01-28/1738100400-uuid.ndjson.gz".to_string()),
             last_update_ts: 1738100500,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
-        let restored: BlizzardCheckpointState = serde_json::from_str(&json).unwrap();
+        let restored: CheckpointState = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.schema_version, 1);
         assert_eq!(
@@ -107,7 +107,7 @@ mod tests {
     fn test_checkpoint_state_backwards_compatible() {
         // Old checkpoint without watermark should deserialize with watermark = None
         let json = r#"{"schema_version":1}"#;
-        let state: BlizzardCheckpointState = serde_json::from_str(json).unwrap();
+        let state: CheckpointState = serde_json::from_str(json).unwrap();
 
         assert_eq!(state.schema_version, 1);
         assert!(state.watermark.is_none());
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_update_watermark_from_none() {
-        let mut state = BlizzardCheckpointState::default();
+        let mut state = CheckpointState::default();
         assert!(state.update_watermark("date=2026-01-28/file1.ndjson.gz"));
         assert_eq!(
             state.watermark,
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn test_update_watermark_greater() {
         let mut state =
-            BlizzardCheckpointState::with_watermark("date=2026-01-28/file1.ndjson.gz".to_string());
+            CheckpointState::with_watermark("date=2026-01-28/file1.ndjson.gz".to_string());
         assert!(state.update_watermark("date=2026-01-28/file2.ndjson.gz"));
         assert_eq!(
             state.watermark,
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn test_update_watermark_not_greater() {
         let mut state =
-            BlizzardCheckpointState::with_watermark("date=2026-01-28/file2.ndjson.gz".to_string());
+            CheckpointState::with_watermark("date=2026-01-28/file2.ndjson.gz".to_string());
         assert!(!state.update_watermark("date=2026-01-28/file1.ndjson.gz"));
         assert_eq!(
             state.watermark,
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn test_update_watermark_equal() {
         let mut state =
-            BlizzardCheckpointState::with_watermark("date=2026-01-28/file1.ndjson.gz".to_string());
+            CheckpointState::with_watermark("date=2026-01-28/file1.ndjson.gz".to_string());
         assert!(!state.update_watermark("date=2026-01-28/file1.ndjson.gz"));
     }
 }

@@ -14,7 +14,7 @@ use tracing::info;
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{
-    FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider, random_jitter,
+    FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, random_jitter,
 };
 
 use crate::emit;
@@ -29,13 +29,13 @@ use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 
 /// A penguin pipeline unit for committing parquet files to Delta Lake.
-pub struct PenguinPipeline {
+pub struct Pipeline {
     pub key: TableKey,
     pub config: TableConfig,
     pub context: PipelineContext,
 }
 
-impl PenguinPipeline {
+impl Pipeline {
     /// Create pipelines from configuration.
     pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
         config.build_pipelines(context, |key, config, context| Self {
@@ -59,7 +59,7 @@ impl PenguinPipeline {
                 return Ok(());
             }
 
-            result = PenguinProcessor::new(
+            result = Processor::new(
                 self.key.clone(),
                 self.config,
                 self.context.global_semaphore,
@@ -85,7 +85,7 @@ impl PenguinPipeline {
     }
 }
 
-impl Pipeline for PenguinPipeline {
+impl blizzard_common::Pipeline for Pipeline {
     type Key = TableKey;
     type Error = PipelineError;
 
@@ -100,9 +100,9 @@ impl Pipeline for PenguinPipeline {
 
 /// The penguin delta checkpointer pipeline processor.
 ///
-/// Each table runs its own `PenguinProcessor` instance, with optional
+/// Each table runs its own `Processor` instance, with optional
 /// sharing of a global semaphore for cross-table concurrency control.
-struct PenguinProcessor {
+struct Processor {
     /// Identifier for this table (used in logging and metrics).
     table_key: TableKey,
     /// Configuration for this specific table.
@@ -121,7 +121,7 @@ struct PenguinProcessor {
     global_semaphore: Option<Arc<Semaphore>>,
 }
 
-impl PenguinProcessor {
+impl Processor {
     async fn new(
         table_key: TableKey,
         table_config: TableConfig,
@@ -286,7 +286,7 @@ impl PenguinProcessor {
 }
 
 #[async_trait]
-impl PollingProcessor for PenguinProcessor {
+impl PollingProcessor for Processor {
     type State = Vec<FinishedFile>;
     type Error = PipelineError;
 

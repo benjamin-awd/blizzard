@@ -13,7 +13,7 @@
 
 pub mod state;
 
-pub use state::BlizzardCheckpointState;
+pub use state::CheckpointState;
 
 use object_store::PutPayload;
 use object_store::path::Path;
@@ -34,7 +34,7 @@ pub struct CheckpointManager {
     /// Pipeline identifier (used in checkpoint filename).
     pipeline_key: String,
     /// Current checkpoint state.
-    state: BlizzardCheckpointState,
+    state: CheckpointState,
 }
 
 impl CheckpointManager {
@@ -47,7 +47,7 @@ impl CheckpointManager {
         Self {
             storage,
             pipeline_key,
-            state: BlizzardCheckpointState::default(),
+            state: CheckpointState::default(),
         }
     }
 
@@ -74,7 +74,7 @@ impl CheckpointManager {
         match self.storage.get(path).await {
             Ok(bytes) => {
                 let json = String::from_utf8_lossy(&bytes);
-                match serde_json::from_str::<BlizzardCheckpointState>(&json) {
+                match serde_json::from_str::<CheckpointState>(&json) {
                     Ok(state) => {
                         info!(
                             target = %self.pipeline_key,
@@ -91,7 +91,7 @@ impl CheckpointManager {
                             error = %e,
                             "Failed to parse checkpoint JSON, starting fresh"
                         );
-                        self.state = BlizzardCheckpointState::default();
+                        self.state = CheckpointState::default();
                         Ok(false)
                     }
                 }
@@ -147,7 +147,7 @@ impl CheckpointManager {
     }
 
     /// Get a reference to the current checkpoint state.
-    pub fn state(&self) -> &BlizzardCheckpointState {
+    pub fn state(&self) -> &CheckpointState {
         &self.state
     }
 }
