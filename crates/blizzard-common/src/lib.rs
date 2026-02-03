@@ -28,8 +28,8 @@ pub mod watermark;
 
 // Re-export commonly used items
 pub use config::{
-    ComponentKey, ErrorHandlingConfig, GlobalConfig, KB, MB, MetricsConfig, ParquetCompression,
-    Resource,
+    CliArgs, ComponentKey, ErrorHandlingConfig, GlobalConfig, KB, MB, MetricsConfig,
+    ParquetCompression, Resource,
 };
 pub use error::{ConfigError, DlqError, MetricsError, PipelineSetupError, StorageError};
 pub use metrics::{

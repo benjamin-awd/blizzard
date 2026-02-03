@@ -1,39 +1,17 @@
 //! Blizzard CLI: File loader for streaming NDJSON.gz files to Parquet.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 use tracing::info;
 
-use blizzard::config::ConfigPath;
-use blizzard::{BlizzardPipeline, Config, init_tracing, run_pipelines};
-
-/// Blizzard - NDJSON.gz file loader
-#[derive(Parser, Debug)]
-#[command(name = "blizzard")]
-#[command(about = "Streams NDJSON.gz files to Parquet staging for Delta Lake ingestion")]
-struct Args {
-    /// Path to configuration file (can be specified multiple times)
-    #[arg(short, long)]
-    config: Vec<PathBuf>,
-
-    /// Path to configuration directory (can be specified multiple times)
-    #[arg(short = 'C', long = "config-dir")]
-    config_dirs: Vec<PathBuf>,
-}
-
-impl Args {
-    fn config_paths(&self) -> Vec<ConfigPath> {
-        ConfigPath::from_cli_args(&self.config, &self.config_dirs)
-    }
-}
+use blizzard::{BlizzardPipeline, CliArgs, Config, init_tracing, run_pipelines};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
 
-    let args = Args::parse();
+    let args = CliArgs::parse();
 
     let paths = args.config_paths();
     if paths.is_empty() {

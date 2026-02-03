@@ -10,7 +10,7 @@ mod vars;
 pub use component_key::ComponentKey;
 pub use global::GlobalConfig;
 pub use loader::{Mergeable, load_from_paths};
-pub use path::{ConfigPath, is_yaml_file};
+pub use path::{CliArgs, ConfigPath, is_yaml_file};
 pub use resource::Resource;
 pub use vars::{InterpolationResult, interpolate};
 

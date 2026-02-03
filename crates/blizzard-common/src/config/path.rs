@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use clap::Parser;
+
 /// A configuration source - either a single file or a directory.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigPath {
@@ -38,4 +40,23 @@ pub fn is_yaml_file(path: &std::path::Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext == "yaml" || ext == "yml")
         .unwrap_or(false)
+}
+
+#[derive(Parser, Debug)]
+#[command(version)]
+pub struct CliArgs {
+    /// Path to configuration file (can be specified multiple times)
+    #[arg(short, long)]
+    pub config: Vec<PathBuf>,
+
+    /// Path to configuration directory (can be specified multiple times)
+    #[arg(short = 'C', long = "config-dir")]
+    pub config_dirs: Vec<PathBuf>,
+}
+
+impl CliArgs {
+    /// Convert CLI arguments to configuration paths.
+    pub fn config_paths(&self) -> Vec<ConfigPath> {
+        ConfigPath::from_cli_args(&self.config, &self.config_dirs)
+    }
 }
