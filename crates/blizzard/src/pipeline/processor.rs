@@ -31,7 +31,7 @@ use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_f
 /// Builder for constructing a [`Processor`] with configurable dependencies.
 ///
 /// Separates the construction of processor dependencies from the processor itself,
-/// enabling dependency injection for testing and clearer initialization logic.
+/// providing clearer initialization logic.
 ///
 /// # Example
 ///
@@ -46,12 +46,6 @@ pub(super) struct ProcessorBuilder {
     config: PipelineConfig,
     shutdown: CancellationToken,
     storage_pool: Option<StoragePoolRef>,
-    // Optional overrides for dependency injection
-    source_storage: Option<StorageProviderRef>,
-    destination_storage: Option<StorageProviderRef>,
-    state_tracker: Option<Box<dyn StateTracker>>,
-    reader: Option<Arc<dyn FileReader>>,
-    dlq: Option<Option<Arc<DeadLetterQueue>>>,
 }
 
 impl ProcessorBuilder {
@@ -62,11 +56,6 @@ impl ProcessorBuilder {
             config,
             shutdown,
             storage_pool: None,
-            source_storage: None,
-            destination_storage: None,
-            state_tracker: None,
-            reader: None,
-            dlq: None,
         }
     }
 
@@ -76,118 +65,52 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Override the source storage provider (useful for testing).
-    #[cfg(test)]
-    pub fn with_source_storage(mut self, storage: StorageProviderRef) -> Self {
-        self.source_storage = Some(storage);
-        self
-    }
-
-    /// Override the destination storage provider (useful for testing).
-    #[cfg(test)]
-    pub fn with_destination_storage(mut self, storage: StorageProviderRef) -> Self {
-        self.destination_storage = Some(storage);
-        self
-    }
-
-    /// Override the state tracker (useful for testing).
-    #[cfg(test)]
-    pub fn with_state_tracker(mut self, tracker: Box<dyn StateTracker>) -> Self {
-        self.state_tracker = Some(tracker);
-        self
-    }
-
-    /// Override the file reader (useful for testing).
-    #[cfg(test)]
-    pub fn with_reader(mut self, reader: Arc<dyn FileReader>) -> Self {
-        self.reader = Some(reader);
-        self
-    }
-
-    /// Override the dead letter queue (useful for testing).
-    #[cfg(test)]
-    pub fn with_dlq(mut self, dlq: Option<Arc<DeadLetterQueue>>) -> Self {
-        self.dlq = Some(dlq);
-        self
-    }
-
-    /// Build the processor, creating any dependencies not explicitly provided.
+    /// Build the processor, creating all dependencies.
     pub async fn build(self) -> Result<Processor, PipelineError> {
-        // Destructure self to avoid partial move issues
         let Self {
             key,
             config,
             shutdown,
             storage_pool,
-            source_storage,
-            destination_storage,
-            state_tracker,
-            reader,
-            dlq,
         } = self;
 
-        // Create or use provided source storage
-        let source_storage = match source_storage {
-            Some(storage) => storage,
-            None => {
-                get_or_create_storage(
-                    &storage_pool,
-                    &config.source.path,
-                    config.source.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?
-            }
-        };
+        // Create source storage provider
+        let source_storage = get_or_create_storage(
+            &storage_pool,
+            &config.source.path,
+            config.source.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
-        // Create or use provided destination storage
-        let destination_storage = match destination_storage {
-            Some(storage) => storage,
-            None => {
-                get_or_create_storage(
-                    &storage_pool,
-                    &config.sink.table_uri,
-                    config.sink.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?
-            }
-        };
+        // Create destination storage provider
+        let destination_storage = get_or_create_storage(
+            &storage_pool,
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
-        // Create or use provided state tracker
-        let state_tracker: Box<dyn StateTracker> = match state_tracker {
-            Some(tracker) => tracker,
-            None => {
-                create_state_tracker(&config, &key).await?
-            }
-        };
+        // Create state tracker
+        let state_tracker = create_state_tracker(&config, &key).await?;
 
         // Get schema - either from explicit config or by inference
         let schema = resolve_schema(&config, &source_storage, &key).await?;
 
-        // Create or use provided reader
-        let reader: Arc<dyn FileReader> = match reader {
-            Some(reader) => reader,
-            None => {
-                let reader_config = NdjsonReaderConfig::new(
-                    config.source.batch_size,
-                    config.source.compression,
-                );
-                Arc::new(NdjsonReader::new(
-                    schema.clone(),
-                    reader_config,
-                    key.id().to_string(),
-                ))
-            }
-        };
+        // Create reader
+        let reader_config =
+            NdjsonReaderConfig::new(config.source.batch_size, config.source.compression);
+        let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
+            schema.clone(),
+            reader_config,
+            key.id().to_string(),
+        ));
 
-        // Set up or use provided DLQ
-        let dlq = match dlq {
-            Some(dlq) => dlq,
-            None => DeadLetterQueue::from_config(&config.error_handling)
-                .await?
-                .map(Arc::new),
-        };
+        // Set up DLQ if configured
+        let dlq = DeadLetterQueue::from_config(&config.error_handling)
+            .await?
+            .map(Arc::new);
 
         // Create partition extractor from config
         let partition_columns = config

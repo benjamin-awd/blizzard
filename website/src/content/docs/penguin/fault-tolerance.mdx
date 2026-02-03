@@ -3,6 +3,8 @@ title: Fault Tolerance
 description: How Blizzard and Penguin provide crash recovery and exactly-once semantics
 ---
 
+import PollingCaveat from '../../../components/PollingCaveat.astro';
+
 The Blizzard/Penguin pipeline provides fault tolerance through a watermark-based coordination protocol. This two-stage architecture ensures data is never lost or duplicated, even when either component crashes.
 
 ## Architecture Overview
@@ -25,6 +27,8 @@ The Blizzard/Penguin pipeline provides fault tolerance through a watermark-based
 ```
 
 ## Coordination Protocol
+
+<PollingCaveat />
 
 ### 1. Blizzard Writes Files
 

@@ -3,6 +3,8 @@ title: Source Processing
 description: How Blizzard reads and parses compressed NDJSON files from cloud storage
 ---
 
+import PollingCaveat from '../../../components/PollingCaveat.astro';
+
 Blizzard's source layer handles reading compressed NDJSON files from cloud storage, decompressing them, and parsing the JSON into Arrow RecordBatches for efficient columnar processing.
 
 ## Source Pipeline
@@ -57,6 +59,8 @@ Behavior:
 - Filters to `.ndjson.gz` files only
 - Sorts files alphabetically for deterministic ordering
 - Filters out already-processed files (from checkpoint)
+
+<PollingCaveat />
 
 ## Compression Formats
 

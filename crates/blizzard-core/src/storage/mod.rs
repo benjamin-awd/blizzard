@@ -21,8 +21,8 @@ use object_store::{ObjectStore, PutPayload};
 use snafu::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::debug;
 

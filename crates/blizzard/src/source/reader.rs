@@ -64,7 +64,7 @@ impl NdjsonReader {
     /// # Arguments
     /// * `compressed` - The compressed file data
     /// * `path` - File path (used for error messages and logging)
-    fn read_internal(&self, compressed: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
+    fn read_internal(&self, compressed: &Bytes, path: &str) -> Result<ReadResult, ReaderError> {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
@@ -77,12 +77,13 @@ impl NdjsonReader {
         // Create a streaming reader using the compression codec.
         // This avoids loading the entire decompressed file into memory.
         let codec = self.config.compression.codec();
-        let reader = codec
-            .create_reader(&compressed)
-            .map_err(|e| ReaderError::ZstdDecompression {
-                path: path.to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.message),
-            })?;
+        let reader =
+            codec
+                .create_reader(compressed)
+                .map_err(|e| ReaderError::ZstdDecompression {
+                    path: path.to_string(),
+                    source: std::io::Error::other(e.message),
+                })?;
 
         // Build streaming JSON reader that processes data as it's decompressed
         let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
@@ -135,7 +136,7 @@ impl NdjsonReader {
 
 impl FileReader for NdjsonReader {
     fn read(&self, data: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
-        self.read_internal(data, path)
+        self.read_internal(&data, path)
     }
 
     fn schema(&self) -> &SchemaRef {

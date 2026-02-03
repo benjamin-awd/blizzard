@@ -178,8 +178,7 @@ mod tests {
     const TEST_DATA: &[u8] = b"Hello, World!\nThis is a test.\n";
 
     fn make_gzip(data: &[u8]) -> Vec<u8> {
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(data).unwrap();
         encoder.finish().unwrap()
     }
