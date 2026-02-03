@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
 use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -20,21 +19,13 @@ use tracing::info;
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
     Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider, StorageProviderRef,
+    random_jitter,
 };
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
-
-/// Generate a random jitter duration up to the specified maximum seconds.
-fn random_jitter(max_secs: u64) -> Duration {
-    if max_secs > 0 {
-        Duration::from_millis(rand::rng().random_range(0..max_secs * 1000))
-    } else {
-        Duration::ZERO
-    }
-}
 
 /// Create a storage provider, using the pool if available.
 pub(crate) async fn create_storage(

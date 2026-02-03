@@ -42,7 +42,7 @@ pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{
     PiecesBuilder, Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError,
-    TaskOutput, TaskResult,
+    TaskOutput, TaskResult, random_jitter,
 };
 pub use types::FinishedFile;
 pub use watermark::{

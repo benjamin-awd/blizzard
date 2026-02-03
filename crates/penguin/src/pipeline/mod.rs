@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::Rng;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -17,6 +16,7 @@ use tracing::info;
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{
     FinishedFile, Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider,
+    random_jitter,
 };
 
 use crate::emit;
@@ -31,15 +31,6 @@ use crate::incoming::{IncomingConfig, IncomingReader};
 use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
-
-/// Generate a random jitter duration up to the specified maximum seconds.
-fn random_jitter(max_secs: u64) -> Duration {
-    if max_secs > 0 {
-        Duration::from_millis(rand::rng().random_range(0..max_secs * 1000))
-    } else {
-        Duration::ZERO
-    }
-}
 
 /// A penguin pipeline unit for committing parquet files to Delta Lake.
 pub struct PenguinPipeline {

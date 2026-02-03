@@ -157,7 +157,7 @@ impl<P: Pipeline> PipelineRunner<P> {
 }
 
 /// Generate a random jitter duration up to the specified maximum seconds.
-fn random_jitter(max_secs: u64) -> Duration {
+pub fn random_jitter(max_secs: u64) -> Duration {
     if max_secs > 0 {
         Duration::from_millis(rand::rng().random_range(0..max_secs * 1000))
     } else {
