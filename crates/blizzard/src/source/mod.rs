@@ -8,7 +8,7 @@ mod listing;
 mod reader;
 
 pub use inference::infer_schema_from_source;
-pub use listing::{generate_prefixes, list_ndjson_files_above_watermark};
+pub use listing::list_ndjson_files_above_watermark;
 pub use reader::{NdjsonReader, NdjsonReaderConfig, ReadResult};
 
 // Re-export SourceState from blizzard-common

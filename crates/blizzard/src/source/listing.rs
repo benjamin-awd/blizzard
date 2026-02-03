@@ -54,9 +54,6 @@ pub async fn list_ndjson_files_above_watermark(
     }
 }
 
-// Re-export generate_prefixes from blizzard_common for convenience
-pub use blizzard_common::watermark::generate_prefixes;
-
 #[cfg(test)]
 mod tests {
     use super::*;
