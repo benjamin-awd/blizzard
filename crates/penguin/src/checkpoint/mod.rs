@@ -237,7 +237,7 @@ impl CheckpointCoordinator {
             .await
         {
             Ok(Some(version)) => {
-                info!(
+                debug!(
                     target = %self.table,
                     "Committed {} files with checkpoint to table, version {}",
                     count, version

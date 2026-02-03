@@ -195,7 +195,7 @@ impl ParquetWriter {
         config: ParquetWriterConfig,
         pipeline: String,
     ) -> Result<Self, ParquetError> {
-        tracing::info!(
+        tracing::debug!(
             target = %pipeline,
             "Creating ParquetWriter with config: target_file_size={} bytes ({:.2} MB), row_group_size_bytes={} ({:.2} MB), rolling_policies={:?}",
             config.target_file_size,

@@ -547,7 +547,7 @@ pub async fn list_ndjson_files_with_prefixes(
             let mut files = Vec::new();
             let mut total_listed = 0;
 
-            tracing::info!(
+            tracing::debug!(
                 target = %pipeline,
                 "Listing files under {} date prefixes: {:?}",
                 prefixes.len(),

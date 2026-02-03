@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{debug, info};
 
 use blizzard_core::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_core::{
@@ -162,7 +162,7 @@ impl Processor {
         .await
         {
             Ok(sink) => {
-                info!(target = %table_key, "Opened existing Delta table");
+                debug!(target = %table_key, "Opened existing Delta table");
                 Some(sink)
             }
             Err(e) if e.is_table_not_found() => {
@@ -318,7 +318,7 @@ impl PollingProcessor for Processor {
             return Ok(None);
         }
 
-        info!(
+        debug!(
             target = %self.table_key,
             files = files.len(),
             "Found files to commit"
@@ -383,7 +383,7 @@ impl PollingProcessor for Processor {
                 version: delta_sink.version(),
             });
 
-            info!(
+            debug!(
                 target = %self.table_key,
                 files = committed_count,
                 version = delta_sink.version(),

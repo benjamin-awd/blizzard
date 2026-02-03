@@ -325,7 +325,7 @@ impl DeltaSink {
             .map_err(|source| DeltaError::DeltaOperation { source })?;
 
         let current_version = self.table.version().unwrap_or(-1);
-        info!(
+        debug!(
             target = %self.table_name,
             "Recovering checkpoint from Delta log, current_version={}",
             current_version

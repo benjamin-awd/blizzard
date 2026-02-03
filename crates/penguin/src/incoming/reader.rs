@@ -96,7 +96,7 @@ impl IncomingReader {
             .collect();
 
         if !uncommitted.is_empty() {
-            info!(
+            debug!(
                 target = %self.table,
                 count = uncommitted.len(),
                 "Found uncommitted incoming files"
