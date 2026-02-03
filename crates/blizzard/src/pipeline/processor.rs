@@ -3,6 +3,7 @@
 //! Implements the PollingProcessor trait for processing NDJSON files to Parquet.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -399,7 +400,10 @@ impl BlizzardProcessor {
             target: self.pipeline_key.id().to_string(),
         });
 
-        let short_name = path.split('/').next_back().unwrap_or(&path);
+        let short_name = Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&path);
         debug!(
             target = %self.pipeline_key,
             file = short_name,
