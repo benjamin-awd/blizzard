@@ -1,7 +1,7 @@
-//! Incoming file reader for discovering parquet files.
+//! Parquet file reader implementation.
 //!
-//! This module handles scanning table directories for parquet files placed
-//! directly by external writers in partition directories.
+//! This module provides the `IncomingReader` implementation that discovers
+//! parquet files placed directly by external writers in partition directories.
 //!
 //! # How It Works
 //!
@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use snafu::ResultExt;
 use tracing::{debug, info};
 
@@ -33,6 +34,8 @@ use blizzard_core::watermark::{self, FileListingConfig, generate_prefixes};
 
 use crate::config::PartitionFilterConfig;
 use crate::error::{IncomingError, incoming_error};
+
+use super::FileReader;
 
 /// File extension for parquet files.
 const PARQUET_EXTENSION: &str = ".parquet";
@@ -223,6 +226,28 @@ impl IncomingReader {
             partition_values,
             None, // No source file for external writes
         ))
+    }
+}
+
+#[async_trait]
+impl FileReader for IncomingReader {
+    async fn list_uncommitted_files(
+        &self,
+        watermark: Option<&str>,
+        committed_paths: &HashSet<String>,
+    ) -> Result<Vec<IncomingFile>, IncomingError> {
+        IncomingReader::list_uncommitted_files(self, watermark, committed_paths).await
+    }
+
+    async fn read_file_metadata(
+        &self,
+        incoming: &IncomingFile,
+    ) -> Result<FinishedFile, IncomingError> {
+        self.read_parquet_metadata(incoming).await
+    }
+
+    fn table_name(&self) -> &str {
+        &self.table
     }
 }
 
