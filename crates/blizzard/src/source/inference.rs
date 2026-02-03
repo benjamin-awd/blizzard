@@ -46,7 +46,7 @@ pub async fn infer_schema_from_source(
     let mut last_error = None;
 
     for path in files.iter().take(max_attempts) {
-        debug!(target = %pipeline, "Attempting to infer schema from file: {}", path);
+        debug!(target = %pipeline, "Attempting to infer schema from file: {path}");
 
         match storage.get(path.as_str()).await {
             Ok(bytes) => match infer_schema_from_bytes(&bytes, compression) {
@@ -61,12 +61,12 @@ pub async fn infer_schema_from_source(
                     return Ok(schema);
                 }
                 Err(e) => {
-                    warn!(target = %pipeline, "Failed to infer schema from {}: {}", path, e);
+                    warn!(target = %pipeline, "Failed to infer schema from {path}: {e}");
                     last_error = Some(e);
                 }
             },
             Err(e) => {
-                warn!(target = %pipeline, "Failed to read file {}: {}", path, e);
+                warn!(target = %pipeline, "Failed to read file {path}: {e}");
                 last_error = Some(InferenceError::ReadFile { source: e });
             }
         }
@@ -97,7 +97,7 @@ pub fn infer_schema_from_bytes(
         return Err(InferenceError::NoValidRecords);
     }
 
-    debug!("Arrow inferred schema from {} records", records_read);
+    debug!("Arrow inferred schema from {records_read} records");
 
     // Coerce schema for Delta Lake compatibility (timestamps to microseconds)
     Ok(coerce_schema(&schema))

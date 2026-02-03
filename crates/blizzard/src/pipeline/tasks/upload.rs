@@ -130,7 +130,7 @@ impl UploadTask {
                             );
                         }
                         Err(e) => {
-                            warn!("[upload] Upload failed: {}", e);
+                            warn!("[upload] Upload failed: {e}");
                         }
                     }
 
@@ -144,7 +144,8 @@ impl UploadTask {
                 // Accept new files only when under max_concurrent limit
                 result = file_rx.recv(), if active_uploads < max_concurrent => {
                     let Some(file) = result else {
-                        debug!("[upload] Input channel closed, draining {} remaining uploads", uploads.len());
+                        let remaining = uploads.len();
+                        debug!("[upload] Input channel closed, draining {remaining} remaining uploads");
                         break;
                     };
 
@@ -183,7 +184,7 @@ impl UploadTask {
                     );
                 }
                 Err(e) => {
-                    warn!("[upload] Upload failed during drain: {}", e);
+                    warn!("[upload] Upload failed during drain: {e}");
                 }
             }
 

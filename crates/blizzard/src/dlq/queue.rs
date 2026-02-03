@@ -48,7 +48,7 @@ impl DeadLetterQueue {
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
         let filename = format!("failures-{timestamp}.ndjson");
 
-        info!("DLQ enabled: {}/{}", dlq_path, filename);
+        info!("DLQ enabled: {dlq_path}/{filename}");
 
         Ok(Some(Self {
             storage: Arc::new(storage),
@@ -105,7 +105,7 @@ impl DeadLetterQueue {
         };
 
         let count = records.len();
-        debug!("Flushing {} DLQ records", count);
+        debug!("Flushing {count} DLQ records");
 
         // Serialize records to NDJSON
         let mut ndjson = String::new();
@@ -123,7 +123,7 @@ impl DeadLetterQueue {
             .await
             .context(DlqWriteSnafu)?;
 
-        info!("Flushed {} records to DLQ", count);
+        info!("Flushed {count} records to DLQ");
         Ok(())
     }
 

@@ -330,7 +330,7 @@ impl PollingProcessor for Processor {
 
         if cold_start {
             match self.state_tracker.init().await? {
-                Some(msg) => info!(target = %self.key, "{}", msg),
+                Some(msg) => info!(target = %self.key, "{msg}"),
                 None => info!(
                     target = %self.key,
                     mode = self.state_tracker.mode_name(),

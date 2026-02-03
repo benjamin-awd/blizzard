@@ -128,7 +128,7 @@ impl DownloadTask {
                 Err(e) => {
                     // Skip 404 errors, propagate others
                     if e.is_not_found() {
-                        warn!("[download] Skipping missing file: {}", e);
+                        warn!("[download] Skipping missing file: {e}");
                         false // Don't send error, just skip
                     } else {
                         true // Send error to consumer

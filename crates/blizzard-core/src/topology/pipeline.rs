@@ -141,13 +141,14 @@ impl<P: Pipeline> PipelineRunner<P> {
             });
         }
 
-        info!("Spawned {} {} tasks", handles.len(), typetag);
+        let task_count = handles.len();
+        info!("Spawned {task_count} {typetag} tasks");
 
         // Wait for all pipelines to complete
         while let Some(result) = handles.join_next().await {
             match result {
                 Ok((key, Ok(()))) => {
-                    info!(target = %key, "{} completed", typetag);
+                    info!(target = %key, "{typetag} completed");
                 }
                 Ok((key, Err(e))) => {
                     error!(target = %key, error = %e, "{} failed", typetag);
@@ -158,7 +159,7 @@ impl<P: Pipeline> PipelineRunner<P> {
             }
         }
 
-        info!("All {}s complete", typetag);
+        info!("All {typetag}s complete");
     }
 }
 

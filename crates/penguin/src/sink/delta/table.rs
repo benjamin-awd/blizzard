@@ -141,7 +141,7 @@ pub async fn load_or_create_table(
         }
         Err(_) => {
             // Table doesn't exist, create it
-            info!(target = %table_name, "Creating new Delta table at {}", table_url);
+            info!(target = %table_name, "Creating new Delta table at {table_url}");
 
             // Convert Arrow schema to Delta schema
             let delta_schema = arrow_schema_to_delta(schema)?;

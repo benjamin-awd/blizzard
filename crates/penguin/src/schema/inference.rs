@@ -73,7 +73,7 @@ pub async fn infer_schema_from_first_file(
     for file in files.iter().take(max_attempts) {
         let file_path = &file.filename;
 
-        debug!(target = %table, "Attempting to infer schema from file: {}", file_path);
+        debug!(target = %table, "Attempting to infer schema from file: {file_path}");
 
         match storage.get(file_path.as_str()).await {
             Ok(bytes) => match infer_schema_from_parquet_bytes(&bytes) {
@@ -96,7 +96,7 @@ pub async fn infer_schema_from_first_file(
                 }
             },
             Err(e) => {
-                warn!(target = %table, "Failed to read file {}: {}", file_path, e);
+                warn!(target = %table, "Failed to read file {file_path}: {e}");
                 last_error = Some(SchemaError::StorageRead { source: e });
             }
         }

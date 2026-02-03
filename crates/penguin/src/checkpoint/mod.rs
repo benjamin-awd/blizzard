@@ -199,7 +199,7 @@ impl CheckpointCoordinator {
                     *counter = 0;
                 }
                 Err(e) => {
-                    warn!(target = %self.table, "Failed to create table checkpoint: {}", e);
+                    warn!(target = %self.table, "Failed to create table checkpoint: {e}");
                     // Don't reset counter on failure - will retry on next commit
                 }
             }

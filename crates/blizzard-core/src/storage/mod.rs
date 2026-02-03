@@ -456,7 +456,8 @@ impl StorageProvider {
                     emit!(ActiveMultipartParts { count });
 
                     let part_id = result.context(ObjectStoreSnafu)?;
-                    debug!("Uploaded part {}/{}", idx + 1, total_parts);
+                    let part_num = idx + 1;
+                    debug!("Uploaded part {part_num}/{total_parts}");
                     Ok::<_, StorageError>((idx, part_id))
                 }
             })
@@ -493,7 +494,7 @@ impl StorageProvider {
 
         complete_result.context(ObjectStoreSnafu)?;
         emit!(MultipartUploadCompleted);
-        debug!("Completed parallel multipart upload for {}", path);
+        debug!("Completed parallel multipart upload for {path}");
 
         Ok(())
     }

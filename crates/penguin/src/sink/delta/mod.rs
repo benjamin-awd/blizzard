@@ -286,7 +286,7 @@ impl DeltaSink {
             .map_err(|source| DeltaError::DeltaOperation { source })?;
 
         self.last_version = version;
-        info!(target = %self.table_name, "Schema evolution committed at version {}", version);
+        info!(target = %self.table_name, "Schema evolution committed at version {version}");
 
         Ok(())
     }
@@ -300,7 +300,7 @@ impl DeltaSink {
         match self.table.get_file_uris() {
             Ok(iter) => iter.collect(),
             Err(e) => {
-                warn!(target = %self.table_name, "Failed to get committed paths: {}", e);
+                warn!(target = %self.table_name, "Failed to get committed paths: {e}");
                 HashSet::new()
             }
         }

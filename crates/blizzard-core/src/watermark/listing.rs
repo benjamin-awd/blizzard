@@ -209,7 +209,7 @@ async fn list_all_files(
                 }
             }
             Err(e) => {
-                warn!(target = %config.target, "Error listing file: {}", e);
+                warn!(target = %config.target, "Error listing file: {e}");
             }
         }
     }
@@ -240,7 +240,7 @@ pub async fn list_partitions(storage: &StorageProvider) -> Result<Vec<String>, S
                 }
             }
             Err(e) => {
-                warn!("Error listing file: {}", e);
+                warn!("Error listing file: {e}");
             }
         }
     }
