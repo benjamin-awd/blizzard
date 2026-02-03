@@ -15,7 +15,6 @@ use tracing::info;
 use blizzard_core::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_core::{
     FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, get_or_create_storage,
-    random_jitter,
 };
 
 use crate::emit;
@@ -49,7 +48,7 @@ impl Pipeline {
     /// Run this pipeline's polling loop.
     async fn execute(self) -> Result<(), PipelineError> {
         let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
-        let effective_interval = poll_interval + random_jitter(self.context.poll_jitter_secs);
+        let poll_jitter_secs = self.context.poll_jitter_secs;
 
         // Initialize processor, respecting shutdown signal
         let mut processor = tokio::select! {
@@ -70,13 +69,15 @@ impl Pipeline {
 
         info!(
             target = %self.key,
-            poll_interval_secs = effective_interval.as_secs(),
+            poll_interval_secs = poll_interval.as_secs(),
+            poll_jitter_secs,
             "Table processor initialized"
         );
 
         run_polling_loop(
             &mut processor,
-            effective_interval,
+            poll_interval,
+            poll_jitter_secs,
             self.context.shutdown,
             self.key.id(),
         )

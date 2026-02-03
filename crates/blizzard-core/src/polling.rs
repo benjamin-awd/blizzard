@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
+
+use crate::topology::random_jitter;
 
 /// Result of a single processing iteration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,13 +51,16 @@ pub trait PollingProcessor {
 /// This function handles the common polling logic:
 /// 1. Call `prepare()` to set up state (with cold_start=true on first iteration)
 /// 2. Call `process()` if there's work to do
-/// 3. Wait for poll_interval or shutdown signal
+/// 3. Wait for poll_interval (plus random jitter) or shutdown signal
 /// 4. Repeat until shutdown
 ///
 /// The `name` parameter identifies the pipeline/table in log messages.
+/// The `poll_jitter_secs` parameter adds random jitter (0 to N seconds) on each
+/// iteration to prevent thundering herd when multiple pipelines poll simultaneously.
 pub async fn run_polling_loop<P: PollingProcessor>(
     processor: &mut P,
     poll_interval: Duration,
+    poll_jitter_secs: u64,
     shutdown: CancellationToken,
     name: &str,
 ) -> Result<(), P::Error> {
@@ -95,7 +100,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                 }
             }
             None => {
-                info!(target = name, "No items to process");
+                debug!(target = name, "No items to process");
                 IterationResult::NoItems
             }
         };
@@ -104,14 +109,14 @@ pub async fn run_polling_loop<P: PollingProcessor>(
         match result {
             IterationResult::Shutdown => break,
             IterationResult::NoItems => {
-                info!(
+                debug!(
                     target = name,
                     "No new items, waiting {}s before next poll",
                     poll_interval.as_secs()
                 );
             }
             IterationResult::ProcessedItems => {
-                info!(
+                debug!(
                     target = name,
                     "Iteration complete, waiting {}s before next poll",
                     poll_interval.as_secs()
@@ -119,9 +124,11 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             }
         }
 
-        // Wait for poll interval or shutdown
+        // Wait for poll interval (plus jitter) or shutdown
+        let jitter = random_jitter(poll_jitter_secs);
+        let sleep_duration = poll_interval + jitter;
         if shutdown
-            .run_until_cancelled(tokio::time::sleep(poll_interval))
+            .run_until_cancelled(tokio::time::sleep(sleep_duration))
             .await
             .is_none()
         {
