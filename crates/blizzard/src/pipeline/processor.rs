@@ -32,11 +32,6 @@ fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
         .map(|pf| DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes())
 }
 
-/// State prepared for a single processing iteration.
-pub(super) struct PreparedState {
-    pub pending_files: Vec<String>,
-}
-
 /// The blizzard file loader pipeline processor.
 ///
 /// Each pipeline runs its own `BlizzardProcessor` instance.
@@ -150,7 +145,7 @@ impl BlizzardProcessor {
 
 #[async_trait]
 impl PollingProcessor for BlizzardProcessor {
-    type State = PreparedState;
+    type State = Vec<String>;
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
@@ -182,11 +177,11 @@ impl PollingProcessor for BlizzardProcessor {
 
         info!(target = %self.pipeline_key, files = pending_files.len(), "Found files to process");
 
-        Ok(Some(PreparedState { pending_files }))
+        Ok(Some(pending_files))
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let PreparedState { pending_files } = state;
+        let pending_files = state;
 
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(self.pipeline_config.sink.file_size_mb)

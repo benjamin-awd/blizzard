@@ -98,12 +98,6 @@ impl Pipeline for PenguinPipeline {
     }
 }
 
-/// State prepared for a single processing iteration.
-struct PreparedState {
-    /// Files discovered in the table directory to commit.
-    files: Vec<FinishedFile>,
-}
-
 /// The penguin delta checkpointer pipeline processor.
 ///
 /// Each table runs its own `PenguinProcessor` instance, with optional
@@ -293,7 +287,7 @@ impl PenguinProcessor {
 
 #[async_trait]
 impl PollingProcessor for PenguinProcessor {
-    type State = PreparedState;
+    type State = Vec<FinishedFile>;
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
@@ -363,11 +357,11 @@ impl PollingProcessor for PenguinProcessor {
         // Ensure delta sink exists (creates table with inferred schema if needed)
         self.ensure_delta_sink(&files).await?;
 
-        Ok(Some(PreparedState { files }))
+        Ok(Some(files))
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let PreparedState { files } = state;
+        let files = state;
 
         // Emit pending files metric
         emit!(PendingFiles {
