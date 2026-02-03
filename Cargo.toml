@@ -74,5 +74,25 @@ rand = { version = "0.9.2", default-features = false, features = ["std", "std_rn
 [workspace.lints.clippy]
 uninlined_format_args = "warn"
 
+# Correctness / safety
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+
+# Code quality
+cloned_instead_of_copied = "warn"
+inefficient_to_string = "warn"
+manual_string_new = "warn"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+semicolon_if_nothing_returned = "warn"
+
+# Async
+future_not_send = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_must_use = "warn"
+
 [patch.crates-io]
 object_store = { git = "https://github.com/benjamin-awd/arrow-rs-object-store", branch = "0.12.5/gcs-content-length" }

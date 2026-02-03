@@ -112,6 +112,7 @@ pub fn interpolate(input: &str) -> InterpolationResult {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // env::set_var/remove_var are unsafe in Rust 2024
 mod tests {
     use super::*;
     use std::env;

@@ -19,7 +19,7 @@ pub use pipeline_key::PipelineKey;
 use blizzard_core::error::ConfigError;
 
 /// Trait for config types that provide storage connection details.
-pub trait StorageSource {
+pub trait StorageSource: Send + Sync {
     /// The URL/path for this storage location.
     fn url(&self) -> &str;
     /// Storage options (credentials, region, etc.).
@@ -981,7 +981,7 @@ pipelines:
     #[test]
     fn test_partition_by_config_empty_template() {
         let config = PartitionByConfig {
-            prefix_template: "".to_string(),
+            prefix_template: String::new(),
         };
         let columns = config.partition_columns();
         assert!(columns.is_empty());

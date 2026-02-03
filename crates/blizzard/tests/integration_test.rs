@@ -162,7 +162,9 @@ mod parquet_tests {
 
     fn create_test_batch(num_rows: usize) -> RecordBatch {
         let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
-        let values: Vec<i64> = (0..num_rows).map(|i| i as i64 * 10).collect();
+        let values: Vec<i64> = (0..num_rows)
+            .map(|i| i64::try_from(i).unwrap() * 10)
+            .collect();
 
         RecordBatch::try_new(
             test_schema(),

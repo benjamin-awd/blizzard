@@ -38,9 +38,9 @@ pub trait Mergeable: Sized + Default {
         }
 
         self.global_mut()
-            .merge_from(std::mem::take(other.global_mut()));
+            .merge_from(&std::mem::take(other.global_mut()));
         self.metrics_mut()
-            .merge_from(std::mem::take(other.metrics_mut()));
+            .merge_from(&std::mem::take(other.metrics_mut()));
         Ok(())
     }
 

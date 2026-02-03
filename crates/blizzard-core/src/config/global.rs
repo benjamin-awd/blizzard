@@ -96,7 +96,7 @@ impl GlobalConfig {
     }
 
     /// Merge values from another GlobalConfig (last-write-wins).
-    pub fn merge_from(&mut self, other: Self) {
+    pub fn merge_from(&mut self, other: &Self) {
         if other.total_concurrency.is_some() {
             self.total_concurrency = other.total_concurrency;
         }
@@ -198,7 +198,7 @@ poll_jitter_secs: 45
             connection_pooling: false,
             poll_jitter_secs: 60,
         };
-        config.merge_from(other);
+        config.merge_from(&other);
         assert_eq!(config.total_concurrency, Some(16));
         assert!(!config.connection_pooling);
         assert_eq!(config.poll_jitter_secs, 60);

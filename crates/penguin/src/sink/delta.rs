@@ -431,7 +431,7 @@ fn arrow_schema_to_delta(schema: &Schema) -> Result<deltalake::kernel::StructTyp
 /// Construct the Delta table URL from a storage provider.
 fn build_table_url(storage_provider: &StorageProvider) -> Result<String, DeltaError> {
     let empty_path = Path::parse("").map_err(|_| DeltaError::PathParse {
-        path: "".to_string(),
+        path: String::new(),
     })?;
 
     let table_url = match storage_provider.config() {
@@ -565,11 +565,13 @@ fn create_add_action(file: &FinishedFile) -> Action {
 
     Action::Add(Add {
         path: subpath.to_string(),
-        size: file.size as i64,
+        size: i64::try_from(file.size).expect("file size should fit in i64"),
         partition_values,
         modification_time: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| {
+                i64::try_from(d.as_millis()).expect("modification time in millis should fit in i64")
+            })
             .unwrap_or(0),
         data_change: true,
         ..Default::default()
@@ -604,7 +606,10 @@ fn create_txn_action(
         last_updated: Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
+                .map(|d| {
+                    i64::try_from(d.as_millis())
+                        .expect("modification time in millis should fit in i64")
+                })
                 .unwrap_or(0),
         ),
     }))

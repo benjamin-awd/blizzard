@@ -199,7 +199,10 @@ impl IncomingReader {
         let record_count: usize = metadata
             .row_groups()
             .iter()
-            .map(|rg| rg.num_rows() as usize)
+            .map(|rg| {
+                usize::try_from(rg.num_rows())
+                    .expect("row count should be non-negative and fit in usize")
+            })
             .sum();
 
         // Parse partition values from path

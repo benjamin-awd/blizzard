@@ -55,7 +55,7 @@ static EPOCH: OnceLock<Instant> = OnceLock::new();
 /// Get nanoseconds since the epoch.
 fn nanos_since_epoch() -> u64 {
     let epoch = EPOCH.get_or_init(Instant::now);
-    epoch.elapsed().as_nanos() as u64
+    u64::try_from(epoch.elapsed().as_nanos()).expect("elapsed time in nanos should fit in u64")
 }
 
 /// Default rate limit window in seconds.
@@ -166,7 +166,7 @@ impl tracing_core::field::Visit for LimitVisitor {
 
     fn record_i64(&mut self, field: &tracing_core::field::Field, value: i64) {
         if field.name() == "internal_log_rate_secs" && value > 0 {
-            self.rate_limit_secs = Some(value as u64);
+            self.rate_limit_secs = Some(value.cast_unsigned());
         }
     }
 

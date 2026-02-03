@@ -40,9 +40,9 @@ impl Default for MetricsConfig {
 
 impl MetricsConfig {
     /// Merge values from another MetricsConfig (last-write-wins).
-    pub fn merge_from(&mut self, other: Self) {
+    pub fn merge_from(&mut self, other: &Self) {
         if other.address != default_metrics_address() {
-            self.address = other.address;
+            self.address = other.address.clone();
         }
     }
 }

@@ -148,10 +148,10 @@ impl BackendConfig {
         for (k, v) in matchers() {
             if let Some(matches) = v.iter().filter_map(|r| r.captures(url)).next() {
                 return match k {
-                    Backend::S3 => Self::parse_s3(matches),
-                    Backend::Gcs => Self::parse_gcs(matches),
-                    Backend::Azure => Self::parse_azure(matches),
-                    Backend::Local => Self::parse_local(matches, with_key),
+                    Backend::S3 => Self::parse_s3(&matches),
+                    Backend::Gcs => Self::parse_gcs(&matches),
+                    Backend::Azure => Self::parse_azure(&matches),
+                    Backend::Local => Self::parse_local(&matches, with_key),
                 };
             }
         }
@@ -162,7 +162,7 @@ impl BackendConfig {
         .fail()
     }
 
-    fn parse_s3(matches: regex::Captures) -> Result<Self, StorageError> {
+    fn parse_s3(matches: &regex::Captures) -> Result<Self, StorageError> {
         let bucket = matches
             .name("bucket")
             .expect("bucket should always be available")
@@ -197,7 +197,7 @@ impl BackendConfig {
         }))
     }
 
-    fn parse_gcs(matches: regex::Captures) -> Result<Self, StorageError> {
+    fn parse_gcs(matches: &regex::Captures) -> Result<Self, StorageError> {
         let bucket = matches
             .name("bucket")
             .expect("bucket should always be available")
@@ -209,7 +209,7 @@ impl BackendConfig {
         Ok(BackendConfig::Gcs(GcsConfig { bucket, key }))
     }
 
-    fn parse_azure(matches: regex::Captures) -> Result<Self, StorageError> {
+    fn parse_azure(matches: &regex::Captures) -> Result<Self, StorageError> {
         let container = matches
             .name("container")
             .expect("container should always be available")
@@ -231,7 +231,7 @@ impl BackendConfig {
         }))
     }
 
-    fn parse_local(matches: regex::Captures, with_key: bool) -> Result<Self, StorageError> {
+    fn parse_local(matches: &regex::Captures, with_key: bool) -> Result<Self, StorageError> {
         let path = matches
             .name("path")
             .expect("path regex must contain a path group")
