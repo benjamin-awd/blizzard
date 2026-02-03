@@ -17,6 +17,9 @@ use blizzard_common::polling::{IterationResult, PollingProcessor};
 use blizzard_common::storage::DatePrefixGenerator;
 use blizzard_common::{PartitionExtractor, StoragePoolRef, StorageProviderRef, emit};
 
+use super::create_storage;
+use super::tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
+use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
@@ -24,11 +27,6 @@ use crate::error::PipelineError;
 use crate::sink::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 use crate::staging::TableWriter;
-
-use super::partition::PartitionExtractor;
-use super::tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
-use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
-use super::create_storage;
 
 /// Generate date prefixes for partition filtering based on pipeline config.
 fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {

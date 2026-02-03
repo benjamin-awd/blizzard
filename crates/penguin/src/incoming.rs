@@ -27,10 +27,9 @@ use snafu::ResultExt;
 use tracing::{debug, info};
 
 use blizzard_common::FinishedFile;
+use blizzard_common::PartitionExtractor;
 use blizzard_common::storage::StorageProvider;
-use blizzard_common::watermark::{
-    self, FileListingConfig, generate_prefixes, parse_partition_values,
-};
+use blizzard_common::watermark::{self, FileListingConfig, generate_prefixes};
 
 use crate::config::PartitionFilterConfig;
 use crate::error::{IncomingError, incoming_error};
@@ -204,7 +203,7 @@ impl IncomingReader {
             .sum();
 
         // Parse partition values from path
-        let partition_values = parse_partition_values(&incoming.path);
+        let partition_values = PartitionExtractor::all().extract(&incoming.path);
 
         debug!(
             target = %self.table,
@@ -254,22 +253,25 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_partition_values() {
-        let values = parse_partition_values("date=2024-01-28/hour=14/01926abc-def0-7123.parquet");
+    fn test_partition_extractor_all() {
+        let extractor = PartitionExtractor::all();
+        let values = extractor.extract("date=2024-01-28/hour=14/01926abc-def0-7123.parquet");
         assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
         assert_eq!(values.get("hour"), Some(&"14".to_string()));
         assert_eq!(values.len(), 2);
     }
 
     #[test]
-    fn test_parse_partition_values_no_partitions() {
-        let values = parse_partition_values("file.parquet");
+    fn test_partition_extractor_all_no_partitions() {
+        let extractor = PartitionExtractor::all();
+        let values = extractor.extract("file.parquet");
         assert!(values.is_empty());
     }
 
     #[test]
-    fn test_parse_partition_values_single_partition() {
-        let values = parse_partition_values("date=2024-01-28/file.parquet");
+    fn test_partition_extractor_all_single_partition() {
+        let extractor = PartitionExtractor::all();
+        let values = extractor.extract("date=2024-01-28/file.parquet");
         assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
         assert_eq!(values.len(), 1);
     }

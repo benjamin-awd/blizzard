@@ -4,7 +4,6 @@
 //! trait from blizzard-common. It supports running multiple pipelines
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
-mod partition;
 mod processor;
 mod tasks;
 mod tracker;

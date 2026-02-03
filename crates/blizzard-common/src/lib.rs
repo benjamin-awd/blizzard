@@ -16,6 +16,7 @@
 pub mod config;
 pub mod error;
 pub mod metrics;
+pub mod partition;
 pub mod polling;
 pub mod resource;
 pub mod signal;
@@ -34,6 +35,7 @@ pub use metrics::{
     DEFAULT_METRICS_ADDR, MetricsController, UtilizationTimer, init_global as init_metrics,
     init_test as init_metrics_test,
 };
+pub use partition::PartitionExtractor;
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
 pub use resource::{StoragePool, StoragePoolRef};
 pub use signal::shutdown_signal;
@@ -42,5 +44,5 @@ pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};
 pub use types::FinishedFile;
 pub use watermark::{
     FileListingConfig, generate_prefixes, list_files_above_watermark, list_files_cold_start,
-    parse_partition_values, parse_watermark,
+    parse_watermark,
 };

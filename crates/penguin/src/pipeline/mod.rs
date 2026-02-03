@@ -64,7 +64,6 @@ pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
         .connection_pooling
         .then(|| Arc::new(StoragePool::new()));
 
-
     // 5. Get jitter settings
     let jitter_max_secs = config.global.poll_jitter_secs;
 

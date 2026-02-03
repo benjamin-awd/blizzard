@@ -13,8 +13,6 @@
 //! Files must be named such that lexicographic order matches chronological order
 //! (e.g., using timestamp prefixes or UUIDv7).
 
-use std::collections::HashMap;
-
 use crate::storage::DatePrefixGenerator;
 
 pub mod listing;
@@ -51,82 +49,9 @@ pub fn generate_prefixes(prefix_template: &str, lookback: u32) -> Vec<String> {
     DatePrefixGenerator::new(prefix_template, lookback).generate_prefixes()
 }
 
-/// Parse partition values from a Hive-style partitioned file path.
-///
-/// Extracts key=value pairs from path segments, excluding the filename.
-///
-/// # Arguments
-///
-/// * `path` - A file path with Hive-style partition segments
-///
-/// # Returns
-///
-/// A HashMap of partition keys to their values.
-///
-/// # Examples
-///
-/// ```
-/// use blizzard_common::watermark::parse_partition_values;
-///
-/// let values = parse_partition_values("date=2024-01-28/hour=14/file.parquet");
-/// assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
-/// assert_eq!(values.get("hour"), Some(&"14".to_string()));
-/// assert_eq!(values.len(), 2);
-///
-/// let values = parse_partition_values("file.parquet");
-/// assert!(values.is_empty());
-/// ```
-pub fn parse_partition_values(path: &str) -> HashMap<String, String> {
-    let mut values = HashMap::new();
-
-    for segment in path.split('/') {
-        if let Some(eq_pos) = segment.find('=') {
-            let key = &segment[..eq_pos];
-            let value = &segment[eq_pos + 1..];
-            // Skip if this looks like a filename (contains a dot after the '=')
-            // This handles cases like "key=value.parquet" which is a filename, not a partition
-            if !value.contains('.') {
-                values.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-
-    values
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_partition_values_multiple() {
-        let values = parse_partition_values("date=2024-01-28/hour=14/file.parquet");
-        assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
-        assert_eq!(values.get("hour"), Some(&"14".to_string()));
-        assert_eq!(values.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_partition_values_single() {
-        let values = parse_partition_values("date=2024-01-28/file.parquet");
-        assert_eq!(values.get("date"), Some(&"2024-01-28".to_string()));
-        assert_eq!(values.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_partition_values_no_partitions() {
-        let values = parse_partition_values("file.parquet");
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn test_parse_partition_values_nested() {
-        let values = parse_partition_values("year=2024/month=01/day=28/file.parquet");
-        assert_eq!(values.get("year"), Some(&"2024".to_string()));
-        assert_eq!(values.get("month"), Some(&"01".to_string()));
-        assert_eq!(values.get("day"), Some(&"28".to_string()));
-        assert_eq!(values.len(), 3);
-    }
 
     #[test]
     fn test_generate_prefixes() {
