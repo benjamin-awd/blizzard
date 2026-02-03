@@ -6,10 +6,12 @@
 mod inference;
 mod listing;
 mod reader;
+mod traits;
 
 pub use inference::infer_schema_from_source;
 pub use listing::list_ndjson_files_above_watermark;
-pub use reader::{NdjsonReader, NdjsonReaderConfig, ReadResult};
+pub use reader::{NdjsonReader, NdjsonReaderConfig};
+pub use traits::{FileReader, ReadResult};
 
 // Re-export SourceState from blizzard-common
 pub use blizzard_common::types::SourceState;

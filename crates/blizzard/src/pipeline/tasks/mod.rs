@@ -12,15 +12,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::{PipelineError, ReaderSnafu, TaskJoinSnafu};
-use crate::source::NdjsonReader;
+use crate::source::{FileReader, NdjsonReader};
 
-pub(super) use download::{DownloadedFile, Downloader};
+pub(super) use download::{DownloadTask, DownloadedFile};
 
 /// Result of processing a downloaded file.
 pub(super) struct ProcessedFile {
     pub path: String,
     pub batches: Vec<RecordBatch>,
-    pub total_records: usize,
 }
 
 /// Future type for file processing operations.
@@ -50,7 +49,6 @@ pub(super) fn spawn_read_task(
         Ok(ProcessedFile {
             path,
             batches: result.batches,
-            total_records: result.total_records,
         })
     })
 }

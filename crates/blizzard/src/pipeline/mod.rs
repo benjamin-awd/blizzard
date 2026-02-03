@@ -4,11 +4,11 @@
 //! trait from blizzard-common. It supports running multiple pipelines
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
+mod download;
 mod processor;
 mod tasks;
 mod tracker;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,17 +20,18 @@ use blizzard_common::{
     Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
 };
 
-use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey};
+use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey, StorageSource};
 use crate::error::{PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
 
-/// Create a storage provider, using the pool if available.
+/// Create a storage provider from a config, using the pool if available.
 pub(crate) async fn create_storage(
     pool: &Option<StoragePoolRef>,
-    url: &str,
-    options: HashMap<String, String>,
+    source: &impl StorageSource,
 ) -> Result<StorageProviderRef, PipelineError> {
+    let url = source.url();
+    let options = source.storage_options().clone();
     match pool {
         Some(p) => p.get_or_create(url, options).await.context(StorageSnafu),
         None => Ok(Arc::new(

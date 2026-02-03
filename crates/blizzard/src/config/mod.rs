@@ -17,6 +17,14 @@ pub use pipeline_key::PipelineKey;
 
 use blizzard_common::error::ConfigError;
 
+/// Trait for config types that provide storage connection details.
+pub trait StorageSource {
+    /// The URL/path for this storage location.
+    fn url(&self) -> &str;
+    /// Storage options (credentials, region, etc.).
+    fn storage_options(&self) -> &HashMap<String, String>;
+}
+
 /// Configuration for a partition filter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +104,15 @@ fn default_poll_interval() -> u64 {
     60
 }
 
+impl StorageSource for SourceConfig {
+    fn url(&self) -> &str {
+        &self.path
+    }
+    fn storage_options(&self) -> &HashMap<String, String> {
+        &self.storage_options
+    }
+}
+
 /// Compression format of input files.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +144,15 @@ pub struct SinkConfig {
     /// Storage options for table storage (credentials, region, etc.).
     #[serde(default)]
     pub storage_options: HashMap<String, String>,
+}
+
+impl StorageSource for SinkConfig {
+    fn url(&self) -> &str {
+        &self.table_uri
+    }
+    fn storage_options(&self) -> &HashMap<String, String> {
+        &self.storage_options
+    }
 }
 
 fn default_file_size_mb() -> usize {

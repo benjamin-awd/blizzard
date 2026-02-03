@@ -25,6 +25,8 @@ use blizzard_common::FinishedFile;
 use blizzard_common::emit;
 use blizzard_common::metrics::events::ParquetWriteCompleted;
 
+use super::traits::{BatchWriter, BatchWriterError};
+
 /// Statistics for tracking writer state.
 #[derive(Debug, Clone, Copy)]
 pub struct WriterStats {
@@ -441,6 +443,29 @@ impl ParquetWriter {
             .map(|w| w.in_progress_size())
             .unwrap_or(0);
         buffer_size + in_progress_size
+    }
+}
+
+impl BatchWriter for ParquetWriter {
+    fn set_partition_context(
+        &mut self,
+        values: HashMap<String, String>,
+    ) -> Result<(), BatchWriterError> {
+        self.set_partition_context(values)?;
+        Ok(())
+    }
+
+    fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), BatchWriterError> {
+        self.write_batch(batch)?;
+        Ok(())
+    }
+
+    fn take_finished_files(&mut self) -> Vec<FinishedFile> {
+        self.take_finished_files()
+    }
+
+    fn close(self: Box<Self>) -> Result<Vec<FinishedFile>, BatchWriterError> {
+        Ok(ParquetWriter::close(*self)?)
     }
 }
 

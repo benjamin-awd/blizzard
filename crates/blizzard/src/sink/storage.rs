@@ -1,25 +1,7 @@
-//! Table writer for direct parquet file output.
+//! Storage writer for parquet file output.
 //!
-//! Blizzard writes Parquet files directly to the table partition directories.
-//! Penguin discovers these files using watermark-based scanning and commits
-//! them to Delta Lake.
-//!
-//! ## Directory Structure
-//!
-//! ```text
-//! table_uri/
-//! ├── _delta_log/              # Delta transaction log (managed by penguin)
-//! ├── date=2024-01-01/         # Partitioned parquet files
-//! │   └── {uuidv7}.parquet
-//! └── ...
-//! ```
-//!
-//! ## Protocol
-//!
-//! 1. Blizzard writes parquet file to `{table_uri}/{partition}/{uuidv7}.parquet`
-//! 2. Penguin scans table directory for uncommitted parquet files (above watermark)
-//! 3. Penguin commits discovered files to Delta log
-//! 4. Penguin updates watermark to highest committed file path
+//! Writes Parquet files to storage (local filesystem, S3, GCS, Azure, etc.)
+//! with support for partitioned directory structures.
 
 use object_store::PutPayload;
 use snafu::prelude::*;
@@ -34,30 +16,31 @@ use blizzard_common::metrics::events::ParquetFileWritten;
 
 use crate::error::{TableWriteError, WriteSnafu};
 
-/// Writer for direct table output.
+/// Writer for storing parquet files to a destination.
 ///
-/// Writes Parquet files directly to the table partition directories.
-/// Penguin will discover and commit these files using watermark-based scanning.
-pub struct TableWriter {
+/// Writes Parquet files to the configured storage location with support
+/// for partitioned directory structures (e.g., `date=2024-01-28/{uuid}.parquet`).
+#[derive(Clone)]
+pub struct StorageWriter {
     storage: Arc<StorageProvider>,
     /// Pipeline identifier for metrics labeling.
     pipeline: String,
 }
 
-impl TableWriter {
-    /// Create a new table writer for the given table URI.
+impl StorageWriter {
+    /// Create a new storage writer for the given destination URI.
     pub async fn new(
-        table_uri: &str,
+        destination_uri: &str,
         storage_options: HashMap<String, String>,
         pipeline: String,
     ) -> Result<Self, TableWriteError> {
         debug!(
             target = %pipeline,
-            table_uri = %table_uri,
+            destination_uri = %destination_uri,
             storage_options = ?storage_options,
-            "Creating TableWriter"
+            "Creating StorageWriter"
         );
-        let storage = StorageProvider::for_url_with_options(table_uri, storage_options)
+        let storage = StorageProvider::for_url_with_options(destination_uri, storage_options)
             .await
             .context(WriteSnafu)?;
 
@@ -67,12 +50,10 @@ impl TableWriter {
         })
     }
 
-    /// Write a finished file directly to the table directory.
+    /// Write a finished file to storage.
     ///
-    /// The file is written to its final partition path (e.g., `date=2024-01-28/{uuid}.parquet`).
-    /// Penguin will discover this file during its next scan and commit it to Delta Lake.
+    /// The file is written to its path (e.g., `date=2024-01-28/{uuid}.parquet`).
     pub async fn write_file(&self, file: &FinishedFile) -> Result<(), TableWriteError> {
-        // Write the Parquet file directly to the table directory
         if let Some(bytes) = &file.bytes {
             self.storage
                 .put_payload(
@@ -92,13 +73,13 @@ impl TableWriter {
             path = %file.filename,
             size = file.size,
             records = file.record_count,
-            "Wrote parquet file to table"
+            "Wrote parquet file to storage"
         );
 
         Ok(())
     }
 
-    /// Write multiple finished files to the table directory.
+    /// Write multiple finished files to storage.
     pub async fn write_files(&self, files: &[FinishedFile]) -> Result<(), TableWriteError> {
         for file in files {
             self.write_file(file).await?;
@@ -117,7 +98,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_uri = temp_dir.path().to_str().unwrap();
 
-        let writer = TableWriter::new(table_uri, HashMap::new(), "test".to_string())
+        let writer = StorageWriter::new(table_uri, HashMap::new(), "test".to_string())
             .await
             .unwrap();
 
@@ -149,7 +130,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let table_uri = temp_dir.path().to_str().unwrap();
 
-        let writer = TableWriter::new(table_uri, HashMap::new(), "test".to_string())
+        let writer = StorageWriter::new(table_uri, HashMap::new(), "test".to_string())
             .await
             .unwrap();
 

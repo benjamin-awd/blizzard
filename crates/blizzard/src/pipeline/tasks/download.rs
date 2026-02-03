@@ -26,12 +26,12 @@ pub(in crate::pipeline) struct DownloadedFile {
 }
 
 /// Handle to the background downloader task.
-pub(in crate::pipeline) struct Downloader {
+pub(in crate::pipeline) struct DownloadTask {
     pub rx: mpsc::Receiver<Result<DownloadedFile, StorageError>>,
     handle: JoinHandle<()>,
 }
 
-impl Downloader {
+impl DownloadTask {
     /// Spawn the downloader task.
     pub fn spawn(
         pending_files: Vec<String>,

@@ -14,7 +14,6 @@ pub mod error;
 pub mod pipeline;
 pub mod sink;
 pub mod source;
-pub mod staging;
 
 /// Re-export storage module from blizzard-common for convenience
 pub mod storage {

@@ -4,7 +4,6 @@
 //! to Arrow RecordBatches using a user-provided schema.
 
 use bytes::Bytes;
-use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::arrow::json::ReaderBuilder;
 use snafu::prelude::*;
@@ -17,6 +16,8 @@ use crate::config::CompressionFormat;
 use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError, ZstdDecompressionSnafu};
 use blizzard_common::emit;
 use blizzard_common::metrics::events::{BytesRead, FileDecompressionCompleted};
+
+use super::traits::{FileReader, ReadResult};
 
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]
@@ -35,15 +36,6 @@ impl NdjsonReaderConfig {
             compression,
         }
     }
-}
-
-/// Result of reading and parsing a file.
-#[derive(Debug)]
-pub struct ReadResult {
-    /// Parsed record batches.
-    pub batches: Vec<RecordBatch>,
-    /// Total number of records read.
-    pub total_records: usize,
 }
 
 /// A reader for NDJSON.gz files that yields Arrow RecordBatches.
@@ -74,7 +66,7 @@ impl NdjsonReader {
     /// # Arguments
     /// * `compressed` - The compressed file data
     /// * `path` - File path (used for error messages and logging)
-    pub fn read(&self, compressed: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
+    fn read_internal(&self, compressed: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
@@ -144,5 +136,15 @@ impl NdjsonReader {
             batches,
             total_records,
         })
+    }
+}
+
+impl FileReader for NdjsonReader {
+    fn read(&self, data: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
+        self.read_internal(data, path)
+    }
+
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
