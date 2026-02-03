@@ -7,9 +7,22 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::error::{InvalidUrlSnafu, StorageError};
+use crate::error::{InvalidUrlSnafu, RegexGroupMissingSnafu, StorageError};
 
 use super::{AzureConfig, GcsConfig, LocalConfig, S3Config};
+
+/// Extract a required named capture group from regex matches.
+fn required_capture(matches: &regex::Captures, name: &str) -> Result<String, StorageError> {
+    matches
+        .name(name)
+        .map(|m| m.as_str().to_string())
+        .ok_or_else(|| {
+            RegexGroupMissingSnafu {
+                group: name.to_string(),
+            }
+            .build()
+        })
+}
 
 // URL patterns for different storage backends
 const S3_PATH: &str =
@@ -115,11 +128,7 @@ impl BackendConfig {
     }
 
     fn parse_s3(matches: &regex::Captures) -> Result<Self, StorageError> {
-        let bucket = matches
-            .name("bucket")
-            .expect("bucket should always be available")
-            .as_str()
-            .to_string();
+        let bucket = required_capture(matches, "bucket")?;
 
         let region = std::env::var("AWS_DEFAULT_REGION")
             .ok()
@@ -150,11 +159,7 @@ impl BackendConfig {
     }
 
     fn parse_gcs(matches: &regex::Captures) -> Result<Self, StorageError> {
-        let bucket = matches
-            .name("bucket")
-            .expect("bucket should always be available")
-            .as_str()
-            .to_string();
+        let bucket = required_capture(matches, "bucket")?;
 
         let key = matches.name("key").map(|r| r.as_str().into());
 
@@ -162,17 +167,8 @@ impl BackendConfig {
     }
 
     fn parse_azure(matches: &regex::Captures) -> Result<Self, StorageError> {
-        let container = matches
-            .name("container")
-            .expect("container should always be available")
-            .as_str()
-            .to_string();
-
-        let account = matches
-            .name("account")
-            .expect("account should always be available")
-            .as_str()
-            .to_string();
+        let container = required_capture(matches, "container")?;
+        let account = required_capture(matches, "account")?;
 
         let key = matches.name("key").map(|r| r.as_str().into());
 
@@ -184,10 +180,7 @@ impl BackendConfig {
     }
 
     fn parse_local(matches: &regex::Captures, with_key: bool) -> Result<Self, StorageError> {
-        let path = matches
-            .name("path")
-            .expect("path regex must contain a path group")
-            .as_str();
+        let path = required_capture(matches, "path")?;
 
         let mut path = if !path.starts_with('/') {
             std::path::PathBuf::from(format!("/{path}"))

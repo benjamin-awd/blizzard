@@ -15,6 +15,10 @@ pub enum StorageError {
     #[snafu(display("Invalid storage URL: {url}"))]
     InvalidUrl { url: String },
 
+    /// Required regex capture group missing (internal error).
+    #[snafu(display("Missing required URL component: {group}"))]
+    RegexGroupMissing { group: String },
+
     /// Object store operation failed.
     #[snafu(display("Storage operation failed: {source}"))]
     ObjectStore { source: object_store::Error },
