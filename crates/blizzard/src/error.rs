@@ -138,9 +138,7 @@ pub enum PipelineError {
 
     /// Metrics error.
     #[snafu(display("Metrics error: {source}"))]
-    Metrics {
-        source: blizzard_core::MetricsError,
-    },
+    Metrics { source: blizzard_core::MetricsError },
 }
 
 impl PipelineError {

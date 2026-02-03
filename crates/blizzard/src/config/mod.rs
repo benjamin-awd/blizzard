@@ -12,6 +12,7 @@ pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
     ParquetCompression, Resource, interpolate, load_from_paths,
 };
+use blizzard_core::storage::DatePrefixGenerator;
 pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use pipeline_key::PipelineKey;
 
@@ -110,6 +111,17 @@ impl StorageSource for SourceConfig {
     }
     fn storage_options(&self) -> &HashMap<String, String> {
         &self.storage_options
+    }
+}
+
+impl SourceConfig {
+    /// Generate date prefixes for partition filtering.
+    ///
+    /// Returns `None` if no partition filter is configured.
+    pub fn date_prefixes(&self) -> Option<Vec<String>> {
+        self.partition_filter.as_ref().map(|pf| {
+            DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes()
+        })
     }
 }
 

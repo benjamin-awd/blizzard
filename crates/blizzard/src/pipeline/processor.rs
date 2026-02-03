@@ -10,7 +10,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use blizzard_core::polling::{IterationResult, PollingProcessor};
-use blizzard_core::storage::DatePrefixGenerator;
 use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
 
 use super::create_storage;
@@ -23,15 +22,6 @@ use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::PipelineError;
 use crate::sink::{ParquetWriterConfig, SinkWriter, StorageWriter};
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
-
-/// Generate date prefixes for partition filtering based on pipeline config.
-fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
-    config
-        .source
-        .partition_filter
-        .as_ref()
-        .map(|pf| DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes())
-}
 
 /// Runtime dependencies shared across processing iterations.
 ///
@@ -173,7 +163,7 @@ impl Processor {
 
         // Get schema - either from explicit config or by inference
         let schema = if pipeline_config.schema.should_infer() {
-            let prefixes = generate_date_prefixes(&pipeline_config);
+            let prefixes = pipeline_config.source.date_prefixes();
             infer_schema_from_source(
                 &source_storage,
                 pipeline_config.source.compression,
@@ -238,7 +228,7 @@ impl PollingProcessor for Processor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        let prefixes = generate_date_prefixes(&self.pipeline_config);
+        let prefixes = self.pipeline_config.source.date_prefixes();
 
         if cold_start {
             match self.state_tracker.init().await? {

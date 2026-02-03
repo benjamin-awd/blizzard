@@ -174,9 +174,7 @@ pub enum PipelineError {
 
     /// Metrics error.
     #[snafu(display("Metrics error: {source}"))]
-    Metrics {
-        source: blizzard_core::MetricsError,
-    },
+    Metrics { source: blizzard_core::MetricsError },
 
     /// Internal state error - delta sink not initialized when expected.
     #[snafu(display("Internal error: delta sink not initialized"))]
