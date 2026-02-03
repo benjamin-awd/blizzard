@@ -2,7 +2,6 @@
 //!
 //! Implements the PollingProcessor trait for processing NDJSON files to Parquet.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,6 +25,7 @@ use crate::sink::{ParquetWriter, ParquetWriterConfig};
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 use crate::staging::TableWriter;
 
+use super::partition::PartitionExtractor;
 use super::tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
 use super::{PipelineStats, create_storage};
@@ -37,17 +37,6 @@ fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
         .partition_filter
         .as_ref()
         .map(|pf| DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes())
-}
-
-/// Extract a partition value from a path for a given key.
-///
-/// Looks for `key=value` pattern and extracts the value (up to the next `/` or end of string).
-fn extract_partition_value(path: &str, key: &str) -> Option<String> {
-    let pattern = format!("{}=", key);
-    let start = path.find(&pattern)? + pattern.len();
-    let rest = &path[start..];
-    let end = rest.find('/').unwrap_or(rest.len());
-    Some(rest[..end].to_string())
 }
 
 /// State prepared for a single processing iteration.
@@ -77,6 +66,8 @@ pub(super) struct BlizzardProcessor {
     pub stats: PipelineStats,
     /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
+    /// Extracts partition values from source paths.
+    partition_extractor: PartitionExtractor,
     /// Shutdown signal for graceful termination.
     shutdown: CancellationToken,
 }
@@ -148,6 +139,15 @@ impl BlizzardProcessor {
         // Set up DLQ if configured
         let dlq = DeadLetterQueue::from_config(&pipeline_config.error_handling).await?;
 
+        // Create partition extractor from config
+        let partition_columns = pipeline_config
+            .sink
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
+        let partition_extractor = PartitionExtractor::new(partition_columns);
+
         Ok(Self {
             failure_tracker: FailureTracker::new(
                 pipeline_config.error_handling.max_failures,
@@ -162,23 +162,9 @@ impl BlizzardProcessor {
             reader,
             state_tracker,
             stats: PipelineStats::default(),
+            partition_extractor,
             shutdown,
         })
-    }
-
-    /// Extract partition values from a source path.
-    ///
-    /// Looks for `key=value` patterns in the path for each configured partition column.
-    fn extract_partition_values(&self, path: &str) -> HashMap<String, String> {
-        self.pipeline_config
-            .sink
-            .partition_by
-            .as_ref()
-            .map(|p| p.partition_columns())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|key| extract_partition_value(path, &key).map(|value| (key, value)))
-            .collect()
     }
 }
 
@@ -375,7 +361,7 @@ impl BlizzardProcessor {
             total_records,
         } = processed;
 
-        let partition_values = self.extract_partition_values(&path);
+        let partition_values = self.partition_extractor.extract(&path);
         parquet_writer.set_partition_context(partition_values)?;
 
         let batch_count = batches.len();
