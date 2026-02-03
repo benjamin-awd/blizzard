@@ -23,6 +23,26 @@ use crate::error::PipelineError;
 use crate::sink::{ParquetWriterConfig, SinkWriter, StorageWriter};
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
+/// Resolve the Arrow schema from explicit config or by inference from source files.
+async fn resolve_schema(
+    config: &PipelineConfig,
+    storage: &StorageProviderRef,
+    pipeline_key: &PipelineKey,
+) -> Result<SchemaRef, PipelineError> {
+    if config.schema.should_infer() {
+        let prefixes = config.source.date_prefixes();
+        Ok(infer_schema_from_source(
+            storage,
+            config.source.compression,
+            prefixes.as_deref(),
+            pipeline_key.as_ref(),
+        )
+        .await?)
+    } else {
+        Ok(config.schema.to_arrow_schema())
+    }
+}
+
 /// Runtime dependencies shared across processing iterations.
 ///
 /// Groups the components needed for reading source files and writing output,
@@ -161,18 +181,7 @@ impl Processor {
         };
 
         // Get schema - either from explicit config or by inference
-        let schema = if config.schema.should_infer() {
-            let prefixes = config.source.date_prefixes();
-            infer_schema_from_source(
-                &source_storage,
-                config.source.compression,
-                prefixes.as_deref(),
-                key.as_ref(),
-            )
-            .await?
-        } else {
-            config.schema.to_arrow_schema()
-        };
+        let schema = resolve_schema(&config, &source_storage, &key).await?;
 
         // Create NDJSON reader
         let reader_config =
