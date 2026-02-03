@@ -403,9 +403,6 @@ impl Mergeable for Config {
 
         if errors.is_empty() {
             Ok(())
-        } else if errors.len() == 1 {
-            // For a single error, return a more specific error type if possible
-            Err(ConfigError::MultipleErrors { errors })
         } else {
             Err(ConfigError::MultipleErrors { errors })
         }
