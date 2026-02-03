@@ -7,37 +7,29 @@ The Dead Letter Queue (DLQ) captures information about files that fail processin
 
 ## Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Dead Letter Queue Flow                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  File Processing                                                │
-│       │                                                         │
-│       ▼                                                         │
-│  ┌─────────────────┐                                            │
-│  │ Error occurs    │                                            │
-│  └─────────────────┘                                            │
-│       │                                                         │
-│       ▼                                                         │
-│  ┌─────────────────┐      ┌─────────────────────────────────┐   │
-│  │ DLQ configured? │─Yes─▶│ Record failure to DLQ           │   │
-│  └─────────────────┘      │ (path, error, stage, timestamp) │   │
-│       │                   └─────────────────────────────────┘   │
-│       │ No                          │                           │
-│       ▼                             ▼                           │
-│  Continue processing          Buffer in memory                  │
-│                                     │                           │
-│                                     ▼ (every 100 records)       │
-│                              ┌─────────────────┐                │
-│                              │ Flush to storage│                │
-│                              └─────────────────┘                │
-│                                     │                           │
-│                                     ▼                           │
-│                              s3://bucket/dlq/                   │
-│                              failures-20240126-103000.ndjson    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Dead Letter Queue Flow: {
+  processing: File Processing
+  error: Error occurs
+  dlq_check: DLQ configured? {
+    shape: diamond
+  }
+  record: Record failure to DLQ {
+    label: "Record failure to DLQ\n(path, error, stage, timestamp)"
+  }
+  continue: Continue processing
+  buffer: Buffer in memory
+  flush: Flush to storage {
+    label: "Flush to storage\n(every 100 records)"
+  }
+  output: "s3://bucket/dlq/\nfailures-20240126-103000.ndjson"
+
+  processing -> error -> dlq_check
+  dlq_check -> continue: No
+  dlq_check -> record: Yes
+  record -> buffer -> flush -> output
+}
 ```
 
 ## Configuration
@@ -128,13 +120,19 @@ The DLQ uses a buffered write strategy to minimize storage operations:
 | Auto-flush | On threshold | Flushes when buffer reaches 100 records |
 | Final flush | On shutdown | All remaining records flushed at pipeline end |
 
-```
-Record 1  ──┐
-Record 2  ──┤
-  ...       ├──▶ Buffer (in memory) ──▶ Flush to storage
-Record 99 ──┤                              │
-Record 100 ─┘                              ▼
-                                    failures-*.ndjson
+```d2
+direction: right
+records: "Record 1-100" {
+  r1: Record 1
+  r2: Record 2
+  r99: Record 99
+  r100: Record 100
+}
+buffer: Buffer (in memory)
+flush: Flush to storage
+output: "failures-*.ndjson"
+
+records -> buffer -> flush -> output
 ```
 
 ## Failure Statistics

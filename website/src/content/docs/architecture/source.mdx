@@ -9,40 +9,33 @@ Blizzard's source layer handles reading compressed NDJSON files from cloud stora
 
 ## Source Pipeline
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Source Processing                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Cloud Storage                                                  │
-│  ┌───────────────────────────────────────────┐                  │
-│  │  s3://bucket/data/*.ndjson.gz             │                  │
-│  │  ├── file1.ndjson.gz                      │                  │
-│  │  ├── file2.ndjson.gz                      │                  │
-│  │  └── file3.ndjson.gz                      │                  │
-│  └───────────────────────────────────────────┘                  │
-│                        │                                        │
-│                        ▼                                        │
-│              ┌──────────────────┐                               │
-│              │  Download (I/O)  │                               │
-│              └──────────────────┘                               │
-│                        │                                        │
-│                        ▼ Bytes                                  │
-│              ┌──────────────────┐                               │
-│              │  Decompress      │  gzip / zstd                  │
-│              └──────────────────┘                               │
-│                        │                                        │
-│                        ▼ NDJSON                                 │
-│              ┌──────────────────┐                               │
-│              │  Parse JSON      │  Arrow JSON decoder           │
-│              └──────────────────┘                               │
-│                        │                                        │
-│                        ▼                                        │
-│              ┌──────────────────┐                               │
-│              │  RecordBatches   │  Columnar Arrow format        │
-│              └──────────────────┘                               │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Source Processing: {
+  cloud: Cloud Storage {
+    label: "Cloud Storage\ns3://bucket/data/*.ndjson.gz"
+    files: |
+      file1.ndjson.gz
+      file2.ndjson.gz
+      file3.ndjson.gz
+    |
+  }
+  download: Download (I/O)
+  decompress: Decompress {
+    label: "Decompress\ngzip / zstd"
+  }
+  parse: Parse JSON {
+    label: "Parse JSON\nArrow JSON decoder"
+  }
+  batches: RecordBatches {
+    label: "RecordBatches\nColumnar Arrow format"
+  }
+
+  cloud -> download
+  download -> decompress: Bytes
+  decompress -> parse: NDJSON
+  parse -> batches
+}
 ```
 
 ## File Discovery
@@ -128,16 +121,18 @@ The batch size affects:
 
 When recovering from a checkpoint, the source layer skips already-processed records:
 
-```
-Checkpoint: file2.ndjson.gz → RecordsRead(5000)
+```d2
+direction: right
+checkpoint: "Checkpoint: file2.ndjson.gz → RecordsRead(5000)"
 
-Processing:
-┌─────────────────────────────────────────┐
-│ file2.ndjson.gz (10000 records)         │
-├─────────────────────────────────────────┤
-│ [0-4999]     │ [5000-9999]              │
-│   SKIP       │   PROCESS                │
-└─────────────────────────────────────────┘
+file: "file2.ndjson.gz (10000 records)" {
+  skip: "[0-4999]\nSKIP" {
+    style.fill: "#ffcccc"
+  }
+  process: "[5000-9999]\nPROCESS" {
+    style.fill: "#ccffcc"
+  }
+}
 ```
 
 The skip logic is handled in the JSON decoder:

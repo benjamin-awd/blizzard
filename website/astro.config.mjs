@@ -1,12 +1,14 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import d2 from 'astro-d2';
 
 // https://astro.build/config
 export default defineConfig({
 	site: 'https://benjamin-awd.github.io',
 	base: '/blizzard',
 	integrations: [
+		d2(),
 		starlight({
 			title: '❄️ Blizzard',
 			social: [

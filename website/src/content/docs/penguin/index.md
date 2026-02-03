@@ -21,23 +21,24 @@ Penguin only supports watermark-based tracking, which assumes files are written 
 
 ## Architecture
 
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
-│   Source    │────▶│    Blizzard      │────▶│   Staging   │
-│  (NDJSON)   │     │  (Parquet Writer)│     │  Directory  │
-└─────────────┘     └──────────────────┘     └──────┬──────┘
-                                                   │
-                                                   ▼
-                                           ┌─────────────┐
-                                           │   Penguin   │
-                                           │ (Committer) │
-                                           └──────┬──────┘
-                                                  │
-                                                  ▼
-                                           ┌─────────────┐
-                                           │ Delta Lake  │
-                                           │   Table     │
-                                           └─────────────┘
+```d2
+direction: right
+source: Source {
+  label: "Source\n(NDJSON)"
+}
+blizzard: Blizzard {
+  label: "Blizzard\n(Parquet Writer)"
+}
+staging: Staging Directory
+
+source -> blizzard -> staging
+
+penguin: Penguin {
+  label: "Penguin\n(Committer)"
+}
+delta: Delta Lake Table
+
+staging -> penguin -> delta
 ```
 
 Blizzard writes Parquet files directly to the table directory (e.g., `{table_uri}/{partition}/{uuid}.parquet`). Penguin scans the table directory, discovers uncommitted files using watermark-based tracking, and commits them to the Delta Lake table.

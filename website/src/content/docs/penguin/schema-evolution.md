@@ -92,37 +92,34 @@ When Penguin processes incoming files:
 4. **Evolution**: Apply schema changes if needed (merge/overwrite modes)
 5. **Commit**: Commit files with the updated schema
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Schema Evolution Flow                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌───────────────────┐                                           │
-│  │  Infer Schema     │  Read schema from incoming Parquet file   │
-│  └───────────────────┘                                           │
-│           │                                                      │
-│           ▼                                                      │
-│  ┌───────────────────┐                                           │
-│  │  Compare Schemas  │  Detect new/missing fields, type changes  │
-│  └───────────────────┘                                           │
-│           │                                                      │
-│           ▼                                                      │
-│  ┌───────────────────┐                                           │
-│  │  Validate Mode    │  Check if changes allowed by config       │
-│  └───────────────────┘                                           │
-│           │                                                      │
-│     ┌─────┴─────┐                                                │
-│     ▼           ▼                                                │
-│  ┌──────┐  ┌────────┐                                            │
-│  │ Pass │  │  Fail  │  Reject commit with error                  │
-│  └──────┘  └────────┘                                            │
-│     │                                                            │
-│     ▼                                                            │
-│  ┌───────────────────┐                                           │
-│  │  Apply Evolution  │  Update table metadata if needed          │
-│  └───────────────────┘                                           │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Schema Evolution Flow: {
+  infer: Infer Schema {
+    label: "Infer Schema\nRead schema from incoming Parquet file"
+  }
+  compare: Compare Schemas {
+    label: "Compare Schemas\nDetect new/missing fields, type changes"
+  }
+  validate: Validate Mode {
+    label: "Validate Mode\nCheck if changes allowed by config"
+  }
+  pass: Pass {
+    style.fill: "#ccffcc"
+  }
+  fail: Fail {
+    label: "Fail\nReject commit with error"
+    style.fill: "#ffcccc"
+  }
+  apply: Apply Evolution {
+    label: "Apply Evolution\nUpdate table metadata if needed"
+  }
+
+  infer -> compare -> validate
+  validate -> pass
+  validate -> fail
+  pass -> apply
+}
 ```
 
 ## Examples

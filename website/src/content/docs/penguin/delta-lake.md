@@ -32,31 +32,24 @@ File names use UUIDv7 which provides lexicographic ordering by time, enabling ef
 
 Penguin performs the following steps to commit files to Delta Lake:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Penguin Commit Flow                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────────┐                                                        │
-│  │  Scan Directory  │  List files above watermark in partition directories   │
-│  └──────────────────┘                                                        │
-│           │                                                                  │
-│           ▼                                                                  │
-│  ┌──────────────────┐                                                        │
-│  │  Read Metadata   │  Parse parquet metadata for record count, schema       │
-│  └──────────────────┘                                                        │
-│           │                                                                  │
-│           ▼                                                                  │
-│  ┌──────────────────┐                                                        │
-│  │  Delta Commit    │  Add file actions to _delta_log/                       │
-│  └──────────────────┘                                                        │
-│           │                                                                  │
-│           ▼                                                                  │
-│  ┌──────────────────┐                                                        │
-│  │ Update Watermark │  Store highest committed path for next scan            │
-│  └──────────────────┘                                                        │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Penguin Commit Flow: {
+  scan: Scan Directory {
+    label: "Scan Directory\nList files above watermark in partition directories"
+  }
+  metadata: Read Metadata {
+    label: "Read Metadata\nParse parquet metadata for record count, schema"
+  }
+  commit: Delta Commit {
+    label: "Delta Commit\nAdd file actions to _delta_log/"
+  }
+  watermark: Update Watermark {
+    label: "Update Watermark\nStore highest committed path for next scan"
+  }
+
+  scan -> metadata -> commit -> watermark
+}
 ```
 
 ### Polling

@@ -9,40 +9,15 @@ Blizzard uses structured error types and provides configurable error handling wi
 
 Errors are organized into categories based on where they occur:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Error Hierarchy                            │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  PipelineError (top-level)                                       │
-│  ├── StorageError                                                │
-│  │   ├── InvalidUrl                                              │
-│  │   ├── ObjectStore                                             │
-│  │   ├── S3Config / GcsConfig / AzureConfig                      │
-│  │   └── Io                                                      │
-│  ├── ConfigError                                                 │
-│  │   ├── EmptySourcePath / EmptySinkPath / EmptySchema           │
-│  │   ├── EnvInterpolation                                        │
-│  │   ├── YamlParse                                               │
-│  │   └── ReadFile                                                │
-│  ├── ReaderError                                                 │
-│  │   ├── GzipDecompression / ZstdDecompression                   │
-│  │   ├── DecoderBuild                                            │
-│  │   ├── JsonDecode                                              │
-│  │   └── BatchFlush                                              │
-│  ├── SchemaError                                                 │
-│  │   ├── StructType / SchemaConversion                           │
-│  │   └── UrlParse                                                │
-│  ├── StagingError                                                │
-│  │   └── StagingWrite / Serialize                                │
-│  ├── ParquetError                                                │
-│  │   └── Write                                                   │
-│  ├── DlqError                                                    │
-│  │   ├── DlqWrite / DlqSerialize / DlqStorage                    │
-│  └── MaxFailuresExceeded                                         │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+- **PipelineError** (top-level)
+  - **StorageError**: InvalidUrl, ObjectStore, S3Config / GcsConfig / AzureConfig, Io
+  - **ConfigError**: EmptySourcePath / EmptySinkPath / EmptySchema, EnvInterpolation, YamlParse, ReadFile
+  - **ReaderError**: GzipDecompression / ZstdDecompression, DecoderBuild, JsonDecode, BatchFlush
+  - **SchemaError**: StructType / SchemaConversion, UrlParse
+  - **StagingError**: StagingWrite / Serialize
+  - **ParquetError**: Write
+  - **DlqError**: DlqWrite / DlqSerialize / DlqStorage
+  - **MaxFailuresExceeded**
 
 ## Storage Errors
 
@@ -142,39 +117,41 @@ When max failures is reached:
 
 ## Error Handling Flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Error Handling Flow                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Error occurs during processing                                  │
-│       │                                                          │
-│       ▼                                                          │
-│  ┌─────────────────┐                                             │
-│  │ Is "not found"? │──── Yes ──▶ Skip file, continue             │
-│  └─────────────────┘                                             │
-│       │ No                                                       │
-│       ▼                                                          │
-│  ┌─────────────────┐                                             │
-│  │ Increment       │                                             │
-│  │ failure count   │                                             │
-│  └─────────────────┘                                             │
-│       │                                                          │
-│       ▼                                                          │
-│  ┌─────────────────┐                                             │
-│  │ DLQ configured? │──── Yes ──▶ Record to DLQ                   │
-│  └─────────────────┘                                             │
-│       │                                                          │
-│       ▼                                                          │
-│  ┌─────────────────┐                                             │
-│  │ max_failures    │                                             │
-│  │ exceeded?       │──── Yes ──▶ Stop pipeline                   │
-│  └─────────────────┘                                             │
-│       │ No                                                       │
-│       ▼                                                          │
-│  Continue processing next file                                   │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Error Handling Flow: {
+  error: Error occurs during processing
+  not_found: 'Is "not found"?' {
+    shape: diamond
+  }
+  skip: Skip file, continue {
+    style.fill: "#ccffcc"
+  }
+  increment: Increment failure count
+  dlq_check: DLQ configured? {
+    shape: diamond
+  }
+  record_dlq: Record to DLQ
+  max_check: max_failures exceeded? {
+    shape: diamond
+  }
+  stop: Stop pipeline {
+    style.fill: "#ffcccc"
+  }
+  continue: Continue processing next file {
+    style.fill: "#ccffcc"
+  }
+
+  error -> not_found
+  not_found -> skip: Yes
+  not_found -> increment: No
+  increment -> dlq_check
+  dlq_check -> record_dlq: Yes
+  dlq_check -> max_check
+  record_dlq -> max_check
+  max_check -> stop: Yes
+  max_check -> continue: No
+}
 ```
 
 ## Metrics

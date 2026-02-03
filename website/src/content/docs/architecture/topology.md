@@ -9,36 +9,41 @@ Both Blizzard and Penguin use this topology framework to manage their multi-pipe
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           PipelineRunner                                 │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                       PipelineContext                            │    │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐     │    │
-│  │  │   Semaphore  │  │ StoragePool  │  │ CancellationToken  │     │    │
-│  │  │  (optional)  │  │  (optional)  │  │    (shutdown)      │     │    │
-│  │  └──────────────┘  └──────────────┘  └────────────────────┘     │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                │                                         │
-│                   shared across all pipelines                            │
-│                                │                                         │
-│       ┌────────────────────────┼────────────────────────┐               │
-│       │                        │                        │               │
-│       ▼                        ▼                        ▼               │
-│  ┌──────────┐            ┌──────────┐            ┌──────────┐          │
-│  │ Pipeline │            │ Pipeline │            │ Pipeline │          │
-│  │  (key A) │            │  (key B) │            │  (key C) │          │
-│  └──────────┘            └──────────┘            └──────────┘          │
-│       │                        │                        │               │
-│       │ jittered               │ jittered               │ jittered     │
-│       │ start                  │ start                  │ start        │
-│       ▼                        ▼                        ▼               │
-│  ┌──────────┐            ┌──────────┐            ┌──────────┐          │
-│  │   Task   │            │   Task   │            │   Task   │          │
-│  └──────────┘            └──────────┘            └──────────┘          │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+```d2
+PipelineRunner: {
+  PipelineContext: {
+    semaphore: Semaphore {
+      label: "Semaphore\n(optional)"
+    }
+    storage: StoragePool {
+      label: "StoragePool\n(optional)"
+    }
+    token: CancellationToken {
+      label: "CancellationToken\n(shutdown)"
+    }
+  }
+
+  shared: "shared across all pipelines" {
+    style.stroke-dash: 3
+  }
+
+  pipeline_a: Pipeline (key A)
+  pipeline_b: Pipeline (key B)
+  pipeline_c: Pipeline (key C)
+
+  task_a: Task
+  task_b: Task
+  task_c: Task
+
+  PipelineContext -> shared
+  shared -> pipeline_a
+  shared -> pipeline_b
+  shared -> pipeline_c
+
+  pipeline_a -> task_a: jittered start
+  pipeline_b -> task_b: jittered start
+  pipeline_c -> task_c: jittered start
+}
 ```
 
 ## Core Components
@@ -97,13 +102,17 @@ Orchestrates multiple pipelines with shared shutdown handling:
 2. **Handles shutdown signals** (SIGINT, SIGTERM, SIGQUIT)
 3. **Collects results** and logs completion/failure status
 
-```
-Pipeline Lifecycle:
+```d2
+direction: right
+spawn: Spawn
+jitter: Jitter Delay
+run: Run
+complete: Complete/Fail
+cancel: Cancel
 
-  Spawn ──► Jitter Delay ──► Run ──► Complete/Fail
-              │                          │
-              │    (shutdown signal)     │
-              └──────────► Cancel ◄──────┘
+spawn -> jitter -> run -> complete
+jitter -> cancel: shutdown signal
+complete -> cancel
 ```
 
 ### Task
@@ -150,12 +159,23 @@ pub trait RunningTopology {
 
 Pipelines start with random delays to avoid thundering herd:
 
-```
-Pipeline A: [====delay====]──────────run──────────►
-Pipeline B: [==delay==]──────────run──────────────►
-Pipeline C: [========delay========]──────run──────►
-
-            0s              5s              10s
+```d2
+direction: right
+Pipeline A: {
+  delay_a: "delay" {style.fill: "#e0e0e0"}
+  run_a: "run" {style.fill: "#ccffcc"}
+  delay_a -> run_a
+}
+Pipeline B: {
+  delay_b: "delay" {style.fill: "#e0e0e0"}
+  run_b: "run" {style.fill: "#ccffcc"}
+  delay_b -> run_b
+}
+Pipeline C: {
+  delay_c: "delay" {style.fill: "#e0e0e0"}
+  run_c: "run" {style.fill: "#ccffcc"}
+  delay_c -> run_c
+}
 ```
 
 Configuration:
@@ -174,17 +194,18 @@ Benefits:
 
 The topology coordinates shutdown across all components:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Shutdown Sequence                           │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Signal received (SIGINT/SIGTERM/SIGQUIT)                     │
-│  2. CancellationToken triggered                                  │
-│  3. Pipelines in jitter delay: Exit immediately                  │
-│  4. Running pipelines: Finish current work                       │
-│  5. All tasks collected and logged                               │
-│  6. Runner exits                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Shutdown Sequence: {
+  step1: "1. Signal received (SIGINT/SIGTERM/SIGQUIT)"
+  step2: "2. CancellationToken triggered"
+  step3: "3. Pipelines in jitter delay: Exit immediately"
+  step4: "4. Running pipelines: Finish current work"
+  step5: "5. All tasks collected and logged"
+  step6: "6. Runner exits"
+
+  step1 -> step2 -> step3 -> step4 -> step5 -> step6
+}
 ```
 
 Shutdown respects work in progress - pipelines complete their current iteration before stopping.

@@ -9,21 +9,27 @@ The Blizzard/Penguin pipeline provides fault tolerance through a watermark-based
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Fault Tolerance Flow                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐     ┌──────────────────┐     ┌─────────────┐  │
-│  │   Blizzard   │────▶│  Table Directory │────▶│   Penguin   │  │
-│  │  (Parquet)   │     │   (Parquet)      │     │  (Commits)  │  │
-│  └──────────────┘     └──────────────────┘     └─────────────┘  │
-│                              │                        │          │
-│                              ▼                        ▼          │
-│                    {partition}/*.parquet       _delta_log/       │
-│                                                *.json            │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: right
+Fault Tolerance Flow: {
+  blizzard: Blizzard {
+    label: "Blizzard\n(Parquet)"
+  }
+  table_dir: Table Directory {
+    label: "Table Directory\n(Parquet)"
+  }
+  penguin: Penguin {
+    label: "Penguin\n(Commits)"
+  }
+
+  blizzard -> table_dir -> penguin
+
+  parquet_files: "{partition}/*.parquet"
+  delta_log: "_delta_log/\n*.json"
+
+  table_dir -> parquet_files
+  penguin -> delta_log
+}
 ```
 
 ## Coordination Protocol

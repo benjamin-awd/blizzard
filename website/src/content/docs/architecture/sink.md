@@ -7,29 +7,24 @@ Blizzard's sink layer handles writing Arrow RecordBatches to Parquet files and u
 
 ## Sink Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Sink Processing                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  RecordBatches                                                               │
-│       │                                                                      │
-│       ▼                                                                      │
-│  ┌──────────────────┐                                                        │
-│  │  Parquet Writer  │  Buffer batches, compress, roll files                  │
-│  └──────────────────┘                                                        │
-│       │                                                                      │
-│       ▼ FinishedFile (bytes + metadata)                                     │
-│  ┌──────────────────┐                                                        │
-│  │  Uploader Task   │  Concurrent multipart uploads                          │
-│  └──────────────────┘                                                        │
-│       │                                                                      │
-│       ▼ Uploaded files                                                       │
-│  ┌──────────────────┐                                                        │
-│  │  Staging Writer  │  Write parquet + metadata for Penguin                  │
-│  └──────────────────┘                                                        │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Sink Processing: {
+  input: RecordBatches
+  writer: Parquet Writer {
+    label: "Parquet Writer\nBuffer batches, compress, roll files"
+  }
+  uploader: Uploader Task {
+    label: "Uploader Task\nConcurrent multipart uploads"
+  }
+  staging: Staging Writer {
+    label: "Staging Writer\nWrite parquet + metadata for Penguin"
+  }
+
+  input -> writer
+  writer -> uploader: "FinishedFile\n(bytes + metadata)"
+  uploader -> staging: Uploaded files
+}
 ```
 
 ## Parquet Writer

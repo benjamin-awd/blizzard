@@ -136,26 +136,23 @@ The `StorageProvider` abstraction provides these operations:
 
 Large files are uploaded using parallel multipart uploads:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                   Parallel Multipart Upload                  │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  File (256 MB)                                              │
-│  ┌────────┬────────┬────────┬────────┬────────┬────────┐   │
-│  │ Part 1 │ Part 2 │ Part 3 │ Part 4 │ Part 5 │ Part 6 │   │
-│  │ 32 MB  │ 32 MB  │ 32 MB  │ 32 MB  │ 32 MB  │ 32 MB  │   │
-│  └────────┴────────┴────────┴────────┴────────┴────────┘   │
-│       │        │        │        │        │        │        │
-│       ▼        ▼        ▼        ▼        ▼        ▼        │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │        Concurrent Part Uploads (max: 8)              │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                          │                                  │
-│                          ▼                                  │
-│                    Complete Multipart                       │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Parallel Multipart Upload: {
+  file: "File (256 MB)" {
+    grid-columns: 6
+    p1: "Part 1\n32 MB"
+    p2: "Part 2\n32 MB"
+    p3: "Part 3\n32 MB"
+    p4: "Part 4\n32 MB"
+    p5: "Part 5\n32 MB"
+    p6: "Part 6\n32 MB"
+  }
+  concurrent: "Concurrent Part Uploads (max: 8)"
+  complete: Complete Multipart
+
+  file -> concurrent -> complete
+}
 ```
 
 ### Configuration

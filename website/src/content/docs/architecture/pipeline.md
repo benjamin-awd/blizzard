@@ -15,50 +15,49 @@ On each iteration:
 
 ## Architecture Overview
 
-```
-                      ┌──────────────────┐
-                      │   Source Files   │
-                      │  (S3/GCS/Azure)  │
-                      │    NDJSON.gz     │
-                      └────────┬─────────┘
-                               │
-┌──────────────────────────────┼──────────────────────────────────────────────┐
-│  Blizzard Pipeline           ▼                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                                                                     │    │
-│  │  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐   │    │
-│  │  │  Downloader  │        │  Processor   │        │   Uploader   │   │    │
-│  │  │  (I/O bound) │───────>│  (CPU bound) │───────>│  (I/O bound) │   │    │
-│  │  │ async tokio  │ channel│   blocking   │ channel│ async tokio  │   │    │
-│  │  └──────────────┘        └──────────────┘        └──────────────┘   │    │
-│  │         │                       │                       │           │    │
-│  │         │ download              │ decompress            │ upload    │    │
-│  │         │ files                 │ parse NDJSON          │ parquet   │    │
-│  │         │                       │ write parquet         │           │    │
-│  │         │                       │                       │           │    │
-│  └─────────┼───────────────────────┼───────────────────────┼───────────┘    │
-│            │                       │                       │                │
-│            │                       │                       ▼                │
-│            │                       │              ┌──────────────────┐      │
-│            │                       │              │  Table Directory │      │
-│            │                       └─────────────>│  {partition}/    │      │
-│            │                         parquet      │  *.parquet       │      │
-│            │                         schema       └────────┬─────────┘      │
-│            │                                               │                │
-│            │                                               │                │
-│            │                                               ▼                │
-│            │                                      ┌──────────────────┐      │
-│            │                                      │     Penguin      │      │
-│            │                                      │   (Committer)    │      │
-│            │                                      └────────┬─────────┘      │
-│            │                                               │                │
-│            │                                               ▼                │
-│            │                                      ┌──────────────────┐      │
-│            │                                      │   Delta Lake     │      │
-│            │                                      │     Table        │      │
-│            │                                      └──────────────────┘      │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+```d2
+source: Source Files {
+  label: "Source Files\n(S3/GCS/Azure)\nNDJSON.gz"
+}
+
+Blizzard Pipeline: {
+  downloader: Downloader {
+    label: "Downloader\n(I/O bound)\nasync tokio"
+  }
+  processor: Processor {
+    label: "Processor\n(CPU bound)\nblocking"
+  }
+  uploader: Uploader {
+    label: "Uploader\n(I/O bound)\nasync tokio"
+  }
+
+  downloader -> processor: channel
+  processor -> uploader: channel
+
+  downloader_note: "download\nfiles" {
+    style.stroke-dash: 3
+  }
+  processor_note: "decompress\nparse NDJSON\nwrite parquet" {
+    style.stroke-dash: 3
+  }
+  uploader_note: "upload\nparquet" {
+    style.stroke-dash: 3
+  }
+}
+
+table_dir: Table Directory {
+  label: "Table Directory\n{partition}/\n*.parquet"
+}
+
+penguin: Penguin {
+  label: "Penguin\n(Committer)"
+}
+
+delta: Delta Lake Table
+
+source -> Blizzard Pipeline.downloader
+Blizzard Pipeline.uploader -> table_dir
+table_dir -> penguin -> delta
 ```
 
 ## Processing Stages
@@ -79,17 +78,15 @@ The downloader task manages concurrent file downloads:
 - Respects `max_concurrent_files` concurrency limit
 - Sends downloaded bytes through a bounded channel
 
-```
-Source Files: [file1, file2, file3, file4, ...]
-                    │
-                    ▼
-        ┌────────────────────────┐
-        │   Concurrent Download  │
-        │   (max_concurrent=16)  │
-        └────────────────────────┘
-                    │
-                    ▼
-          mpsc channel (buffered)
+```d2
+direction: down
+files: "Source Files: [file1, file2, file3, file4, ...]"
+download: Concurrent Download {
+  label: "Concurrent Download\n(max_concurrent=16)"
+}
+channel: "mpsc channel (buffered)"
+
+files -> download -> channel
 ```
 
 ### Stage 2: Processor
@@ -101,26 +98,21 @@ The processor runs on Tokio's blocking thread pool for CPU-intensive work:
 3. **Write**: Batches to in-memory Parquet buffer
 4. **Roll**: Complete Parquet files when size threshold reached
 
-```
-Downloaded File
-      │
-      ▼
-┌─────────────────┐
-│  Decompress     │  (gzip/zstd)
-└─────────────────┘
-      │
-      ▼
-┌─────────────────┐
-│  Parse NDJSON   │  (Arrow JSON decoder)
-└─────────────────┘
-      │
-      ▼
-┌─────────────────┐
-│  Write Parquet  │  (buffered, rolling)
-└─────────────────┘
-      │
-      ▼
-Finished Parquet Files
+```d2
+direction: down
+input: Downloaded File
+decompress: Decompress {
+  label: "Decompress\n(gzip/zstd)"
+}
+parse: Parse NDJSON {
+  label: "Parse NDJSON\n(Arrow JSON decoder)"
+}
+write: Write Parquet {
+  label: "Write Parquet\n(buffered, rolling)"
+}
+output: Finished Parquet Files
+
+input -> decompress -> parse -> write -> output
 ```
 
 ### Stage 3: Uploader
@@ -169,17 +161,18 @@ Shutdown sequence within a processing iteration:
 4. **Final flush**: Close Parquet writer, upload remaining files
 5. **Exit**: Report stats and exit
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Shutdown Sequence                           │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Shutdown signal received                                     │
-│  2. Downloader: Stop accepting new files                        │
-│  3. Processor: Finish in-flight batches                         │
-│  4. Writer: Close and flush final Parquet file                  │
-│  5. Uploader: Upload remaining files to table                   │
-│  6. Exit with stats                                             │
-└─────────────────────────────────────────────────────────────────┘
+```d2
+direction: down
+Shutdown Sequence: {
+  step1: "1. Shutdown signal received"
+  step2: "2. Downloader: Stop accepting new files"
+  step3: "3. Processor: Finish in-flight batches"
+  step4: "4. Writer: Close and flush final Parquet file"
+  step5: "5. Uploader: Upload remaining files to table"
+  step6: "6. Exit with stats"
+
+  step1 -> step2 -> step3 -> step4 -> step5 -> step6
+}
 ```
 
 ## Pipeline Statistics
