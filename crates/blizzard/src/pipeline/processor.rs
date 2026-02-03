@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use deltalake::arrow::datatypes::SchemaRef;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -32,6 +33,23 @@ fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
         .map(|pf| DatePrefixGenerator::new(&pf.prefix_template, pf.lookback).generate_prefixes())
 }
 
+/// Runtime dependencies shared across processing iterations.
+///
+/// Groups the components needed for reading source files and writing output,
+/// reducing field count in the main processor struct.
+pub(super) struct ProcessorContext {
+    /// Storage provider for reading source files.
+    pub source_storage: StorageProviderRef,
+    /// Arrow schema (from config or inferred).
+    pub schema: SchemaRef,
+    /// NDJSON reader with schema validation.
+    pub reader: Arc<NdjsonReader>,
+    /// Storage writer for persisting parquet files (cloned per iteration).
+    pub storage_writer: StorageWriter,
+    /// Extracts partition values from source paths.
+    pub partition_extractor: PartitionExtractor,
+}
+
 /// The blizzard file loader pipeline processor.
 ///
 /// Each pipeline runs its own `BlizzardProcessor` instance.
@@ -40,20 +58,12 @@ pub(super) struct BlizzardProcessor {
     pipeline_key: PipelineKey,
     /// Configuration for this specific pipeline.
     pipeline_config: PipelineConfig,
-    /// Storage provider for reading source files.
-    source_storage: StorageProviderRef,
-    /// Arrow schema (from config or inferred).
-    schema: deltalake::arrow::datatypes::SchemaRef,
-    /// NDJSON reader with schema validation.
-    reader: Arc<NdjsonReader>,
+    /// Runtime dependencies for reading and writing.
+    ctx: ProcessorContext,
     /// Tracks which source files have been processed.
     state_tracker: Box<dyn StateTracker>,
     /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
-    /// Storage writer for persisting parquet files (cloned per iteration).
-    storage_writer: StorageWriter,
-    /// Extracts partition values from source paths.
-    partition_extractor: PartitionExtractor,
     /// Shutdown signal for graceful termination.
     shutdown: CancellationToken,
 }
@@ -124,6 +134,15 @@ impl BlizzardProcessor {
             .unwrap_or_default();
         let partition_extractor = PartitionExtractor::new(partition_columns);
 
+        // Build the processor context
+        let ctx = ProcessorContext {
+            source_storage,
+            schema,
+            reader,
+            storage_writer,
+            partition_extractor,
+        };
+
         Ok(Self {
             failure_tracker: FailureTracker::new(
                 pipeline_config.error_handling.max_failures,
@@ -132,12 +151,8 @@ impl BlizzardProcessor {
             ),
             pipeline_key,
             pipeline_config,
-            source_storage,
-            schema,
-            reader,
+            ctx,
             state_tracker,
-            storage_writer,
-            partition_extractor,
             shutdown,
         })
     }
@@ -165,7 +180,7 @@ impl PollingProcessor for BlizzardProcessor {
         let pending_files = self
             .state_tracker
             .list_pending(
-                &self.source_storage,
+                &self.ctx.source_storage,
                 prefixes.as_deref(),
                 self.pipeline_key.as_ref(),
             )
@@ -189,16 +204,16 @@ impl PollingProcessor for BlizzardProcessor {
             .with_compression(self.pipeline_config.sink.compression);
 
         let mut writer = SinkWriter::new(
-            self.schema.clone(),
+            self.ctx.schema.clone(),
             writer_config,
-            self.storage_writer.clone(),
-            self.partition_extractor.clone(),
+            self.ctx.storage_writer.clone(),
+            self.ctx.partition_extractor.clone(),
             self.pipeline_key.id().to_string(),
         )?;
 
         let download_task = DownloadTask::spawn(
             pending_files,
-            self.source_storage.clone(),
+            self.ctx.source_storage.clone(),
             self.shutdown.clone(),
             self.pipeline_config.source.max_concurrent_files,
             self.pipeline_key.id().to_string(),
@@ -206,7 +221,7 @@ impl PollingProcessor for BlizzardProcessor {
 
         let max_in_flight = self.pipeline_config.source.max_concurrent_files * 2;
         let downloader = Downloader::new(
-            self.reader.clone(),
+            self.ctx.reader.clone(),
             max_in_flight,
             self.pipeline_key.id().to_string(),
         );
