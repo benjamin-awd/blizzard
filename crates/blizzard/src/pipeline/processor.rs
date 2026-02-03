@@ -15,7 +15,7 @@ use blizzard_common::metrics::events::{
 };
 use blizzard_common::polling::{IterationResult, PollingProcessor};
 use blizzard_common::storage::DatePrefixGenerator;
-use blizzard_common::{StoragePool, StorageProviderRef, emit};
+use blizzard_common::{PartitionExtractor, StoragePoolRef, StorageProviderRef, emit};
 
 use crate::checkpoint::CheckpointManager;
 use crate::config::{PipelineConfig, PipelineKey};
@@ -74,7 +74,7 @@ impl BlizzardProcessor {
     pub async fn new(
         pipeline_key: PipelineKey,
         pipeline_config: PipelineConfig,
-        storage_pool: Option<Arc<StoragePool>>,
+        storage_pool: Option<StoragePoolRef>,
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
         // Create source storage provider - use pooled if available

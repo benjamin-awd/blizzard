@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
-use blizzard_common::{FinishedFile, StoragePool, StorageProvider, shutdown_signal};
+use blizzard_common::{
+    FinishedFile, StoragePool, StoragePoolRef, StorageProvider, shutdown_signal,
+};
 
 use crate::emit;
 use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
@@ -144,7 +146,7 @@ async fn run_single_table(
     table_key: TableKey,
     table_config: TableConfig,
     global_semaphore: Option<Arc<Semaphore>>,
-    storage_pool: Option<Arc<StoragePool>>,
+    storage_pool: Option<StoragePoolRef>,
     poll_interval: Duration,
     poll_jitter_secs: u64,
     shutdown: CancellationToken,
@@ -220,7 +222,7 @@ impl PenguinProcessor {
         table_key: TableKey,
         table_config: TableConfig,
         global_semaphore: Option<Arc<Semaphore>>,
-        storage_pool: Option<Arc<StoragePool>>,
+        storage_pool: Option<StoragePoolRef>,
     ) -> Result<Self, PipelineError> {
         // Create sink storage provider - use pooled if available
         let sink_storage = if let Some(pool) = &storage_pool {

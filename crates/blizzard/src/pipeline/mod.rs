@@ -21,7 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use blizzard_common::polling::run_polling_loop;
-use blizzard_common::{StoragePool, StorageProvider, StorageProviderRef, shutdown_signal};
+use blizzard_common::{
+    StoragePool, StoragePoolRef, StorageProvider, StorageProviderRef, shutdown_signal,
+};
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
@@ -43,7 +45,7 @@ fn random_jitter(max_secs: u64) -> Duration {
 
 /// Create a storage provider, using the pool if available.
 pub(crate) async fn create_storage(
-    pool: &Option<Arc<StoragePool>>,
+    pool: &Option<StoragePoolRef>,
     url: &str,
     options: HashMap<String, String>,
 ) -> Result<StorageProviderRef, PipelineError> {
@@ -168,7 +170,7 @@ async fn run_single_pipeline(
     pipeline_key: PipelineKey,
     pipeline_config: PipelineConfig,
     _global_semaphore: Option<Arc<Semaphore>>,
-    storage_pool: Option<Arc<StoragePool>>,
+    storage_pool: Option<StoragePoolRef>,
     poll_interval: Duration,
     poll_jitter_secs: u64,
     shutdown: CancellationToken,

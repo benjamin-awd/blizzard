@@ -10,4 +10,4 @@
 
 mod pool;
 
-pub use pool::StoragePool;
+pub use pool::{StoragePool, StoragePoolRef};

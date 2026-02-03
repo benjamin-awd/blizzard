@@ -35,7 +35,7 @@ pub use metrics::{
     init_test as init_metrics_test,
 };
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
-pub use resource::StoragePool;
+pub use resource::{StoragePool, StoragePoolRef};
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{PiecesBuilder, RunningTopology, Task, TaskError, TaskResult};

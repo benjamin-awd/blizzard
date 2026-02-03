@@ -15,6 +15,9 @@ use crate::error::StorageError;
 use crate::storage::BackendConfig;
 use crate::{StorageProvider, StorageProviderRef};
 
+/// Reference-counted handle to a [`StoragePool`].
+pub type StoragePoolRef = Arc<StoragePool>;
+
 /// Cached ObjectStore connection that can be shared across providers.
 #[derive(Clone)]
 struct SharedStore {
