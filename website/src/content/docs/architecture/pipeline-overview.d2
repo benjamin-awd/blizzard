@@ -1,0 +1,39 @@
+direction: down
+
+source: Source Storage {
+  shape: cylinder
+}
+
+blizzard_pipeline: Blizzard Pipeline {
+  direction: right
+
+  dl: Downloader {
+    label: "Downloader\n(async, I/O bound)"
+  }
+
+  pr: Processor {
+    label: "Processor\n(blocking, CPU bound)"
+  }
+
+  ul: Uploader {
+    label: "Uploader\n(async, I/O bound)"
+  }
+
+  dl -> pr -> ul
+}
+
+table: Table Directory {
+  shape: cylinder
+}
+
+penguin: Penguin {
+  shape: hexagon
+}
+
+delta: Delta Lake {
+  shape: cylinder
+}
+
+source -> blizzard_pipeline.dl: NDJSON.gz
+blizzard_pipeline.ul -> table: Parquet
+table -> penguin -> delta

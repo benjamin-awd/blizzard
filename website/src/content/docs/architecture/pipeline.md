@@ -16,48 +16,42 @@ On each iteration:
 ## Architecture Overview
 
 ```d2
-source: Source Files {
-  label: "Source Files\n(S3/GCS/Azure)\nNDJSON.gz"
+source: Source Storage {
+  shape: cylinder
 }
 
-Blizzard Pipeline: {
-  downloader: Downloader {
-    label: "Downloader\n(I/O bound)\nasync tokio"
-  }
-  processor: Processor {
-    label: "Processor\n(CPU bound)\nblocking"
-  }
-  uploader: Uploader {
-    label: "Uploader\n(I/O bound)\nasync tokio"
+pipeline: Blizzard Pipeline {
+  download: Downloader {
+    label: "Downloader\n(async, I/O bound)"
   }
 
-  downloader -> processor: channel
-  processor -> uploader: channel
+  process: Processor {
+    label: "Processor\n(blocking, CPU bound)"
+  }
 
-  downloader_note: "download\nfiles" {
-    style.stroke-dash: 3
+  upload: Uploader {
+    label: "Uploader\n(async, I/O bound)"
   }
-  processor_note: "decompress\nparse NDJSON\nwrite parquet" {
-    style.stroke-dash: 3
-  }
-  uploader_note: "upload\nparquet" {
-    style.stroke-dash: 3
-  }
+
+  download -> process: channel
+  process -> upload: channel
 }
 
-table_dir: Table Directory {
-  label: "Table Directory\n{partition}/\n*.parquet"
+table: Table Directory {
+  shape: cylinder
 }
 
 penguin: Penguin {
-  label: "Penguin\n(Committer)"
+  shape: hexagon
 }
 
-delta: Delta Lake Table
+delta: Delta Lake {
+  shape: cylinder
+}
 
-source -> Blizzard Pipeline.downloader
-Blizzard Pipeline.uploader -> table_dir
-table_dir -> penguin -> delta
+source -> pipeline.download: NDJSON.gz
+pipeline -> table: Parquet
+table -> penguin -> delta
 ```
 
 ## Processing Stages
@@ -72,47 +66,75 @@ The pipeline consists of three concurrent stages connected by bounded channels:
 
 ### Stage 1: Downloader
 
-The downloader task manages concurrent file downloads:
+The `DownloadTask` runs as a background tokio task managing concurrent file downloads:
 
 - Downloads compressed NDJSON files from source storage
-- Respects `max_concurrent_files` concurrency limit
-- Sends downloaded bytes through a bounded channel
+- Uses `FuturesUnordered` to manage concurrent downloads
+- Respects `max_concurrent_files` concurrency limit (default: 4)
+- Sends `DownloadedFile { path, compressed_data }` through a bounded channel
 
 ```d2
 direction: down
-files: "Source Files: [file1, file2, file3, file4, ...]"
-download: Concurrent Download {
-  label: "Concurrent Download\n(max_concurrent=16)"
-}
-channel: "mpsc channel (buffered)"
 
-files -> download -> channel
+files: Pending Files {
+  label: "Pending Files\n[file1, file2, ...]"
+  shape: document
+}
+
+download_task: DownloadTask {
+  futures: FuturesUnordered {
+    label: "FuturesUnordered\n<DownloadFuture>"
+  }
+  concurrent: {
+    label: "max_concurrent_files\n(default: 4)"
+    style.stroke-dash: 3
+  }
+}
+
+channel: {
+  label: "mpsc::channel\n(bounded: max_concurrent_files)"
+  shape: queue
+}
+
+files -> download_task.futures: spawn download
+download_task.futures -> channel: DownloadedFile
 ```
 
 ### Stage 2: Processor
 
-The processor runs on Tokio's blocking thread pool for CPU-intensive work:
+The processor runs CPU-intensive work via `tokio::task::spawn_blocking`:
 
 1. **Decompress**: Gzip or Zstd decompression
-2. **Parse**: NDJSON to Arrow RecordBatches
-3. **Write**: Batches to in-memory Parquet buffer
-4. **Roll**: Complete Parquet files when size threshold reached
+2. **Parse**: NDJSON to Arrow RecordBatches using the Arrow JSON decoder
+3. **Return**: `ProcessedFile { path, batches }` to the main loop
+
+The main `Downloader` loop then writes batches to the `Sink`, which handles Parquet writing and rolling.
 
 ```d2
 direction: down
-input: Downloaded File
-decompress: Decompress {
-  label: "Decompress\n(gzip/zstd)"
-}
-parse: Parse NDJSON {
-  label: "Parse NDJSON\n(Arrow JSON decoder)"
-}
-write: Write Parquet {
-  label: "Write Parquet\n(buffered, rolling)"
-}
-output: Finished Parquet Files
 
-input -> decompress -> parse -> write -> output
+input: DownloadedFile {
+  label: "DownloadedFile\n{ path, compressed_data }"
+  shape: document
+}
+
+blocking: spawn_blocking {
+  decompress: Decompress {
+    label: "Decompress\n(gzip/zstd)"
+  }
+  parse: Parse {
+    label: "Parse NDJSON\n(Arrow JSON decoder)"
+  }
+  decompress -> parse
+}
+
+output: ProcessedFile {
+  label: "ProcessedFile\n{ path, batches: Vec<RecordBatch> }"
+  shape: document
+}
+
+input -> blocking.decompress
+blocking.parse -> output
 ```
 
 ### Stage 3: Uploader
@@ -163,16 +185,16 @@ Shutdown sequence within a processing iteration:
 
 ```d2
 direction: down
-Shutdown Sequence: {
-  step1: "1. Shutdown signal received"
-  step2: "2. Downloader: Stop accepting new files"
-  step3: "3. Processor: Finish in-flight batches"
-  step4: "4. Writer: Close and flush final Parquet file"
-  step5: "5. Uploader: Upload remaining files to table"
-  step6: "6. Exit with stats"
 
-  step1 -> step2 -> step3 -> step4 -> step5 -> step6
-}
+signal: "SIGINT/SIGTERM received" { shape: oval }
+abort: "DownloadTask.abort()\nStop new downloads"
+drain: "Drain FuturesUnordered\nFinish in-flight parsing"
+close: "BatchWriter.close()\nFlush final Parquet"
+finalize: "UploadTask.finalize()\nWait for uploads"
+save: "StateTracker.save()\nCheckpoint progress"
+exit: "Exit with stats" { shape: oval }
+
+signal -> abort -> drain -> close -> finalize -> save -> exit
 ```
 
 ## Pipeline Statistics
