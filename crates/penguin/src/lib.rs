@@ -18,7 +18,7 @@ pub mod sink;
 pub use config::Config;
 pub use error::PipelineError;
 pub use pipeline::Pipeline;
-pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
+pub use schema::{SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas, merge_schemas};
 pub use sink::{DeltaSink, TableSink};
 
 // Re-export from blizzard-core

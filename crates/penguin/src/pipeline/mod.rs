@@ -25,8 +25,8 @@ use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{Config, Mergeable, TableConfig, TableKey};
 use crate::error::{DeltaSinkNotInitializedSnafu, PipelineError, StorageSnafu};
 use crate::incoming::{IncomingConfig, IncomingReader};
-use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
+use crate::schema::manager::SchemaManager;
 use crate::sink::DeltaSink;
 
 /// A penguin pipeline unit for committing parquet files to Delta Lake.
@@ -232,42 +232,20 @@ impl Processor {
             return Ok(());
         }
 
-        // Table exists - validate schema evolution
+        // Table exists - use SchemaManager for validation and evolution
         let sink = self
             .delta_sink
             .as_mut()
             .context(DeltaSinkNotInitializedSnafu)?;
-        let evolution_mode = self.table_config.schema_evolution;
 
-        let action = sink.validate_schema(&incoming_schema, evolution_mode)?;
+        let schema_manager = SchemaManager::new(
+            sink.schema().cloned(),
+            self.table_config.schema_evolution,
+            self.table_key.id().to_string(),
+        );
 
-        match &action {
-            EvolutionAction::None => {
-                // Schema is compatible, no changes needed
-            }
-            EvolutionAction::Merge { new_schema } => {
-                let existing_field_count = sink.schema().map_or(0, |s| s.fields().len());
-                let new_field_names: Vec<_> = new_schema
-                    .fields()
-                    .iter()
-                    .skip(existing_field_count)
-                    .map(|f| f.name().as_str())
-                    .collect();
-                info!(
-                    target = %self.table_key,
-                    new_fields = new_field_names.len(),
-                    field_names = ?new_field_names,
-                    "Schema evolution: adding new fields"
-                );
-            }
-            EvolutionAction::Overwrite { new_schema } => {
-                info!(
-                    target = %self.table_key,
-                    fields = new_schema.fields().len(),
-                    "Schema evolution: overwriting schema"
-                );
-            }
-        }
+        // Validate and log the schema evolution action
+        let action = schema_manager.validate_and_log(&incoming_schema)?;
 
         // Apply the evolution action
         sink.evolve_schema(action).await?;
