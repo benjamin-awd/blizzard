@@ -257,7 +257,7 @@ impl ParquetWriter {
     fn generate_filename(partition_values: &HashMap<String, String>) -> String {
         let uuid = Uuid::now_v7();
         if partition_values.is_empty() {
-            format!("{}.parquet", uuid)
+            format!("{uuid}.parquet")
         } else {
             // Build path like "date=2026-01-28/uuid.parquet"
             // Sort keys to ensure deterministic ordering
@@ -268,7 +268,7 @@ impl ParquetWriter {
                 .map(|k| format!("{}={}", k, partition_values[*k]))
                 .collect::<Vec<_>>()
                 .join("/");
-            format!("{}/{}.parquet", prefix, uuid)
+            format!("{prefix}/{uuid}.parquet")
         }
     }
 
@@ -483,7 +483,7 @@ mod tests {
     }
 
     fn test_batch(num_rows: usize) -> RecordBatch {
-        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{}", i)).collect();
+        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
         let values: Vec<i64> = (0..num_rows).map(|i| i as i64).collect();
 
         RecordBatch::try_new(

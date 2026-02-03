@@ -52,8 +52,8 @@ impl fmt::Display for TaskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => write!(f, "task cancelled"),
-            Self::Panicked(msg) => write!(f, "task panicked: {}", msg),
-            Self::Failed(err) => write!(f, "task failed: {}", err),
+            Self::Panicked(msg) => write!(f, "task panicked: {msg}"),
+            Self::Failed(err) => write!(f, "task failed: {err}"),
         }
     }
 }
@@ -153,7 +153,7 @@ mod tests {
 
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err = TaskError::failed(io_err);
-        assert!(format!("{}", err).contains("task failed"));
+        assert!(format!("{err}").contains("task failed"));
     }
 
     #[test]
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_task_debug() {
         let task = Task::new("my-key", "test", async { Ok(TaskOutput::empty()) });
-        let debug = format!("{:?}", task);
+        let debug = format!("{task:?}");
         assert!(debug.contains("my-key"));
         assert!(debug.contains("test"));
     }

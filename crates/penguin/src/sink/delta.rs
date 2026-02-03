@@ -596,7 +596,7 @@ fn create_txn_action(
     .emit();
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&checkpoint_json);
-    let app_id = format!("{}{}", TXN_APP_ID_PREFIX, encoded);
+    let app_id = format!("{TXN_APP_ID_PREFIX}{encoded}");
 
     Ok(Action::Txn(Transaction {
         app_id,
@@ -841,8 +841,7 @@ mod tests {
             Ok(_) => panic!("Expected error for non-existent table"),
             Err(e) => assert!(
                 e.is_table_not_found(),
-                "Expected table not found error, got: {:?}",
-                e
+                "Expected table not found error, got: {e:?}"
             ),
         }
     }

@@ -46,7 +46,7 @@ impl DeadLetterQueue {
 
         // Generate a unique filename for this run
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
-        let filename = format!("failures-{}.ndjson", timestamp);
+        let filename = format!("failures-{timestamp}.ndjson");
 
         info!("DLQ enabled: {}/{}", dlq_path, filename);
 

@@ -346,8 +346,8 @@ pub fn merge_schemas(table: &Schema, incoming: &Schema) -> Result<SchemaRef, Sch
         let (field, from, to) = &comparison.type_changes[0];
         return Err(SchemaError::TypeChangeNotAllowed {
             field: field.clone(),
-            from: format!("{:?}", from),
-            to: format!("{:?}", to),
+            from: format!("{from:?}"),
+            to: format!("{to:?}"),
         });
     }
 
@@ -408,8 +408,8 @@ pub fn validate_schema_evolution(
                     let (field, from, to) = &comparison.type_changes[0];
                     return Err(SchemaError::TypeChangeNotAllowed {
                         field: field.clone(),
-                        from: format!("{:?}", from),
-                        to: format!("{:?}", to),
+                        from: format!("{from:?}"),
+                        to: format!("{to:?}"),
                     });
                 }
                 if let Some(field) = comparison.first_new_required_field() {
@@ -452,22 +452,22 @@ fn format_incompatibility(comparison: &SchemaComparison) -> String {
             .map(|f| f.name())
             .collect();
         if !required.is_empty() {
-            parts.push(format!("new required fields: {:?}", required));
+            parts.push(format!("new required fields: {required:?}"));
         } else {
-            parts.push(format!("new fields: {:?}", names));
+            parts.push(format!("new fields: {names:?}"));
         }
     }
 
     if !comparison.missing_fields.is_empty() {
         let names: Vec<_> = comparison.missing_fields.iter().map(|f| f.name()).collect();
-        parts.push(format!("missing fields: {:?}", names));
+        parts.push(format!("missing fields: {names:?}"));
     }
 
     if !comparison.type_changes.is_empty() {
         let changes: Vec<_> = comparison
             .type_changes
             .iter()
-            .map(|(name, from, to)| format!("{}: {:?} -> {:?}", name, from, to))
+            .map(|(name, from, to)| format!("{name}: {from:?} -> {to:?}"))
             .collect();
         parts.push(format!("type changes: {}", changes.join(", ")));
     }
@@ -735,7 +735,7 @@ mod tests {
             SchemaError::RequiredFieldAddition { field_name } => {
                 assert_eq!(field_name, "required");
             }
-            e => panic!("Expected RequiredFieldAddition error, got: {:?}", e),
+            e => panic!("Expected RequiredFieldAddition error, got: {e:?}"),
         }
     }
 
@@ -751,7 +751,7 @@ mod tests {
             SchemaError::TypeChangeNotAllowed { field, .. } => {
                 assert_eq!(field, "id");
             }
-            e => panic!("Expected TypeChangeNotAllowed error, got: {:?}", e),
+            e => panic!("Expected TypeChangeNotAllowed error, got: {e:?}"),
         }
     }
 
@@ -768,7 +768,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SchemaError::IncompatibleSchema { .. } => {}
-            e => panic!("Expected IncompatibleSchema error, got: {:?}", e),
+            e => panic!("Expected IncompatibleSchema error, got: {e:?}"),
         }
     }
 
@@ -787,7 +787,7 @@ mod tests {
             EvolutionAction::Merge { new_schema } => {
                 assert_eq!(new_schema.fields().len(), 2);
             }
-            action => panic!("Expected Merge action, got: {:?}", action),
+            action => panic!("Expected Merge action, got: {action:?}"),
         }
     }
 
@@ -807,7 +807,7 @@ mod tests {
         assert!(result.is_ok());
         match result.unwrap() {
             EvolutionAction::None => {} // No schema change needed
-            action => panic!("Expected None action, got: {:?}", action),
+            action => panic!("Expected None action, got: {action:?}"),
         }
     }
 
@@ -827,7 +827,7 @@ mod tests {
                 assert_eq!(new_schema.fields().len(), 2);
                 assert_eq!(new_schema.field(0).name(), "completely");
             }
-            action => panic!("Expected Overwrite action, got: {:?}", action),
+            action => panic!("Expected Overwrite action, got: {action:?}"),
         }
     }
 
@@ -843,7 +843,7 @@ mod tests {
         assert!(result.is_ok());
         match result.unwrap() {
             EvolutionAction::None => {}
-            action => panic!("Expected None action, got: {:?}", action),
+            action => panic!("Expected None action, got: {action:?}"),
         }
     }
 
@@ -1102,7 +1102,7 @@ mod tests {
                     &DataType::Timestamp(TimeUnit::Microsecond, None)
                 );
             }
-            other => panic!("Expected List type, got {:?}", other),
+            other => panic!("Expected List type, got {other:?}"),
         }
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
                 );
                 assert_eq!(fields[1].data_type(), &DataType::Int32);
             }
-            other => panic!("Expected Struct type, got {:?}", other),
+            other => panic!("Expected Struct type, got {other:?}"),
         }
     }
 

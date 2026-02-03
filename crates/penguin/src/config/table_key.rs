@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn test_display() {
         let key = TableKey::new("events");
-        assert_eq!(format!("{}", key), "events");
+        assert_eq!(format!("{key}"), "events");
     }
 
     #[test]

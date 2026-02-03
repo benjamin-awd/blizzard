@@ -57,7 +57,7 @@ impl StorageProvider {
         };
 
         let canonical_url = if let Some(key) = &config.key {
-            format!("{}/{}", canonical_url, key)
+            format!("{canonical_url}/{key}")
         } else {
             canonical_url
         };

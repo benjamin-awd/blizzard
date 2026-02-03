@@ -83,8 +83,7 @@ pub fn interpolate(input: &str) -> InterpolationResult {
                     // Check for newline injection
                     if value.contains('\n') || value.contains('\r') {
                         errors.push(format!(
-                            "environment variable '{}' contains newlines, which is not allowed",
-                            var_name
+                            "environment variable '{var_name}' contains newlines, which is not allowed"
                         ));
                         return full_match.to_string();
                     }
@@ -101,7 +100,7 @@ pub fn interpolate(input: &str) -> InterpolationResult {
                     if let Some(default) = default_value {
                         default.to_string()
                     } else {
-                        errors.push(format!("environment variable '{}' is not set", var_name));
+                        errors.push(format!("environment variable '{var_name}' is not set"));
                         full_match.to_string()
                     }
                 }

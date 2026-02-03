@@ -34,12 +34,12 @@ fn extract_bucket_key(url: &str) -> String {
         .or_else(|| url_lower.strip_prefix("s3a://"))
     {
         let bucket = rest.split('/').next().unwrap_or("");
-        return format!("s3://{}", bucket);
+        return format!("s3://{bucket}");
     }
 
     if let Some(rest) = url_lower.strip_prefix("gs://") {
         let bucket = rest.split('/').next().unwrap_or("");
-        return format!("gs://{}", bucket);
+        return format!("gs://{bucket}");
     }
 
     if let Some(rest) = url_lower
@@ -47,7 +47,7 @@ fn extract_bucket_key(url: &str) -> String {
         .or_else(|| url_lower.strip_prefix("abfs://"))
     {
         let container_account = rest.split('/').next().unwrap_or("");
-        return format!("abfs://{}", container_account);
+        return format!("abfs://{container_account}");
     }
 
     if (url_lower.contains(".blob.core.windows.net") || url_lower.contains(".dfs.core.windows.net"))
@@ -58,7 +58,7 @@ fn extract_bucket_key(url: &str) -> String {
         if let Some(container_start) = after_scheme.find(".net/") {
             let after_domain = &after_scheme[container_start + 5..];
             let container = after_domain.split('/').next().unwrap_or("");
-            return format!("az://{}@{}", container, account);
+            return format!("az://{container}@{account}");
         }
     }
 

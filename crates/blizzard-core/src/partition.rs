@@ -92,7 +92,7 @@ impl PartitionExtractor {
 ///
 /// Looks for `key=value` pattern and extracts the value (up to the next `/` or end of string).
 fn extract_value(path: &str, key: &str) -> Option<String> {
-    let pattern = format!("{}=", key);
+    let pattern = format!("{key}=");
     let start = path.find(&pattern)? + pattern.len();
     let rest = &path[start..];
     let end = rest.find('/').unwrap_or(rest.len());

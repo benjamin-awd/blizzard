@@ -92,9 +92,8 @@ pipelines:
     schema:
       fields:
         - name: test_field
-          type: {}
-"#,
-                name
+          type: {name}
+"#
             );
             let config: blizzard::config::Config = serde_yaml::from_str(&yaml).unwrap();
             let (_, pipeline) = config.pipelines().next().unwrap();
@@ -102,8 +101,7 @@ pipelines:
             assert_eq!(
                 schema.field(0).data_type(),
                 &expected_arrow,
-                "Failed for type: {}",
-                name
+                "Failed for type: {name}"
             );
         }
     }
@@ -147,7 +145,60 @@ mod checkpoint_tests {
     }
 }
 
-// ParquetWriter tests are in blizzard/src/parquet/writer.rs
+mod parquet_tests {
+    use blizzard::config::ParquetCompression;
+    use blizzard::parquet::{ParquetWriter, ParquetWriterConfig};
+    use deltalake::arrow::array::{Int64Array, StringArray};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, true),
+        ]))
+    }
+
+    fn create_test_batch(num_rows: usize) -> RecordBatch {
+        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
+        let values: Vec<i64> = (0..num_rows).map(|i| i as i64 * 10).collect();
+
+        RecordBatch::try_new(
+            test_schema(),
+            vec![
+                Arc::new(StringArray::from(ids)),
+                Arc::new(Int64Array::from(values)),
+            ],
+        )
+        .unwrap()
+    }
+
+    // test_parquet_writer_basic is in blizzard/src/parquet/writer.rs
+
+    #[test]
+    fn test_parquet_writer_multiple_batches() {
+        let schema = test_schema();
+        let config = ParquetWriterConfig::default();
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
+
+        for _ in 0..5 {
+            let batch = create_test_batch(100);
+            writer.write_batch(&batch).unwrap();
+        }
+
+        assert!(writer.current_file_size() > 0);
+    }
+
+    #[test]
+    fn test_parquet_writer_config() {
+        let config = ParquetWriterConfig::default()
+            .with_file_size_mb(64)
+            .with_compression(ParquetCompression::Zstd);
+
+        assert_eq!(config.target_file_size, 64 * 1024 * 1024);
+    }
+}
 
 mod sink_tests {
     use blizzard::parquet::FinishedFile;

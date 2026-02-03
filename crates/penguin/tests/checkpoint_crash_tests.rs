@@ -126,7 +126,7 @@ async fn test_concurrent_coordinator_access() {
             for i in 0..100 {
                 let file_id = task_id * 100 + i;
                 coordinator
-                    .mark_file_finished(&format!("file{}.ndjson.gz", file_id))
+                    .mark_file_finished(&format!("file{file_id}.ndjson.gz"))
                     .await;
                 coordinator.update_delta_version(file_id as i64).await;
             }
@@ -321,7 +321,7 @@ async fn test_schema_evolution_merge_mode() {
             assert_eq!(new_schema.fields().len(), 3);
             assert_eq!(new_schema.field(2).name(), "email");
         }
-        _ => panic!("Expected Merge action, got {:?}", action),
+        _ => panic!("Expected Merge action, got {action:?}"),
     }
 
     // Apply the evolution
@@ -378,8 +378,7 @@ async fn test_schema_evolution_strict_mode_rejects() {
     let err = result.unwrap_err();
     assert!(
         matches!(err, penguin::error::SchemaError::IncompatibleSchema { .. }),
-        "Expected IncompatibleSchema error, got: {:?}",
-        err
+        "Expected IncompatibleSchema error, got: {err:?}"
     );
 }
 
@@ -428,7 +427,7 @@ async fn test_schema_evolution_overwrites() {
             assert_eq!(new_schema.fields().len(), 3);
             assert_eq!(new_schema.field(0).name(), "user_id");
         }
-        _ => panic!("Expected Overwrite action, got {:?}", action),
+        _ => panic!("Expected Overwrite action, got {action:?}"),
     }
 
     // Apply the overwrite
@@ -481,8 +480,7 @@ async fn test_schema_evolution_rejects_required_fields() {
             err,
             penguin::error::SchemaError::RequiredFieldAddition { .. }
         ),
-        "Expected RequiredFieldAddition error, got: {:?}",
-        err
+        "Expected RequiredFieldAddition error, got: {err:?}"
     );
 }
 
@@ -520,7 +518,6 @@ async fn test_schema_evolution_allows_type_widening() {
     // Type widening doesn't require schema change - data is compatible
     assert!(
         matches!(action, EvolutionAction::None),
-        "Expected None action for compatible type widening, got {:?}",
-        action
+        "Expected None action for compatible type widening, got {action:?}"
     );
 }

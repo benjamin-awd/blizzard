@@ -262,7 +262,7 @@ async fn list_files_in_partition(
     let prefix = if partition.ends_with('/') {
         partition.to_string()
     } else {
-        format!("{}/", partition)
+        format!("{partition}/")
     };
 
     let mut stream = storage.list_with_prefix(&prefix).await?;

@@ -161,7 +161,7 @@ mod tests {
     }
 
     fn test_batch(num_rows: usize) -> RecordBatch {
-        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{}", i)).collect();
+        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
         let values: Vec<i64> = (0..num_rows).map(|i| i as i64).collect();
 
         RecordBatch::try_new(

@@ -107,9 +107,9 @@ impl Resource {
 impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Directory(path) => write!(f, "directory:{}", path),
-            Self::Port(port) => write!(f, "port:{}", port),
-            Self::File(path) => write!(f, "file:{}", path),
+            Self::Directory(path) => write!(f, "directory:{path}"),
+            Self::Port(port) => write!(f, "port:{port}"),
+            Self::File(path) => write!(f, "file:{path}"),
         }
     }
 }

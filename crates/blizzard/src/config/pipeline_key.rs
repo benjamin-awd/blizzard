@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn test_display() {
         let key = PipelineKey::new("orderbooks");
-        assert_eq!(format!("{}", key), "orderbooks");
+        assert_eq!(format!("{key}"), "orderbooks");
     }
 
     #[test]

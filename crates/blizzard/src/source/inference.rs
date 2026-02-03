@@ -241,7 +241,7 @@ mod tests {
             DataType::Struct(fields) => {
                 assert_eq!(fields.len(), 2);
             }
-            other => panic!("Expected Struct type, got {:?}", other),
+            other => panic!("Expected Struct type, got {other:?}"),
         }
     }
 
@@ -341,7 +341,7 @@ mod tests {
                     &DataType::Timestamp(TimeUnit::Microsecond, None)
                 );
             }
-            other => panic!("Expected Struct, got {:?}", other),
+            other => panic!("Expected Struct, got {other:?}"),
         }
     }
 }

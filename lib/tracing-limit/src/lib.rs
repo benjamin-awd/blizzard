@@ -180,10 +180,10 @@ impl tracing_core::field::Visit for LimitVisitor {
 
     fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn fmt::Debug) {
         match field.name() {
-            "component_id" => self.component_id = Some(format!("{:?}", value)),
+            "component_id" => self.component_id = Some(format!("{value:?}")),
             "message" => {
                 // Debug formatting adds quotes around strings; strip them
-                let formatted = format!("{:?}", value);
+                let formatted = format!("{value:?}");
                 self.message = Some(
                     formatted
                         .strip_prefix('"')
@@ -379,10 +379,7 @@ where
             RateLimitAction::EmitSummary { suppressed } => {
                 // Log summary of suppressed events with the message content
                 let message = limit_visitor.message.as_deref().unwrap_or("<no message>");
-                eprintln!(
-                    "  Internal log [{}] {} messages were rate limited.",
-                    message, suppressed
-                );
+                eprintln!("  Internal log [{message}] {suppressed} messages were rate limited.");
 
                 // Then emit the new event
                 self.inner.on_event(event, ctx);

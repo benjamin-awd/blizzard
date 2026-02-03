@@ -259,8 +259,7 @@ impl Config {
         for (resource, keys) in conflicts {
             let keys_list: Vec<_> = keys.iter().collect();
             errors.push(format!(
-                "Resource conflict: {} claimed by {:?}",
-                resource, keys_list
+                "Resource conflict: {resource} claimed by {keys_list:?}"
             ));
         }
 
@@ -444,13 +443,11 @@ tables:
         let msg = err.to_string();
         assert!(
             msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {}",
-            msg
+            "Expected resource conflict error, got: {msg}"
         );
         assert!(
             msg.contains("gs://bucket/delta/same"),
-            "Expected table URI in error, got: {}",
-            msg
+            "Expected table URI in error, got: {msg}"
         );
     }
 
@@ -509,8 +506,7 @@ tables:
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -527,8 +523,7 @@ unknown_key: value
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -547,20 +542,11 @@ tables:
         assert!(result.is_err(), "Should have validation errors");
         let err = result.unwrap_err().to_string();
         // Should contain errors for both 'a' and 'b' tables
-        assert!(
-            err.contains("Table 'a'"),
-            "Should mention table 'a': {}",
-            err
-        );
-        assert!(
-            err.contains("Table 'b'"),
-            "Should mention table 'b': {}",
-            err
-        );
+        assert!(err.contains("Table 'a'"), "Should mention table 'a': {err}");
+        assert!(err.contains("Table 'b'"), "Should mention table 'b': {err}");
         assert!(
             err.contains("table_uri is empty"),
-            "Should mention empty table_uri: {}",
-            err
+            "Should mention empty table_uri: {err}"
         );
     }
 }

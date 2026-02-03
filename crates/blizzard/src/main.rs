@@ -24,7 +24,7 @@ async fn main() -> ExitCode {
     let config = match Config::from_paths(&paths) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to load config: {}", e);
+            eprintln!("Failed to load config: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -53,7 +53,7 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Pipeline failed: {}", e);
+            eprintln!("Pipeline failed: {e}");
             ExitCode::FAILURE
         }
     }

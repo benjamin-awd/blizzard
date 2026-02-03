@@ -38,7 +38,7 @@ impl StorageProvider {
 
         let mut canonical_url = format!("https://{}.storage.googleapis.com", config.bucket);
         if let Some(key) = &config.key {
-            canonical_url = format!("{}/{}", canonical_url, key);
+            canonical_url = format!("{canonical_url}/{key}");
         }
 
         let gcs_store = Arc::new(builder.build().context(GcsConfigSnafu)?);

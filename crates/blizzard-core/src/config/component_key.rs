@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn test_display() {
         let key = ComponentKey::new("my-component");
-        assert_eq!(format!("{}", key), "my-component");
+        assert_eq!(format!("{key}"), "my-component");
     }
 
     #[test]

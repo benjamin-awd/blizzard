@@ -477,8 +477,7 @@ impl Config {
         for (resource, keys) in conflicts {
             let keys_list: Vec<_> = keys.iter().collect();
             errors.push(format!(
-                "Resource conflict: {} claimed by {:?}",
-                resource, keys_list
+                "Resource conflict: {resource} claimed by {keys_list:?}"
             ));
         }
 
@@ -796,13 +795,11 @@ pipelines:
         let msg = err.to_string();
         assert!(
             msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {}",
-            msg
+            "Expected resource conflict error, got: {msg}"
         );
         assert!(
             msg.contains("gs://bucket/raw/same"),
-            "Expected source dir in error, got: {}",
-            msg
+            "Expected source dir in error, got: {msg}"
         );
     }
 
@@ -835,13 +832,11 @@ pipelines:
         let msg = err.to_string();
         assert!(
             msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {}",
-            msg
+            "Expected resource conflict error, got: {msg}"
         );
         assert!(
             msg.contains("gs://bucket/delta/same"),
-            "Expected table dir in error, got: {}",
-            msg
+            "Expected table dir in error, got: {msg}"
         );
     }
 
@@ -961,8 +956,7 @@ pipelines:
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("cannot specify both"),
-            "Error should mention the conflict: {}",
-            err
+            "Error should mention the conflict: {err}"
         );
     }
 
@@ -1035,8 +1029,7 @@ pipelines:
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -1058,8 +1051,7 @@ pipelines:
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -1081,8 +1073,7 @@ pipelines:
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -1107,8 +1098,7 @@ unknown_top_level: value
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("unknown field"),
-            "Error should mention unknown field: {}",
-            err
+            "Error should mention unknown field: {err}"
         );
     }
 
@@ -1138,18 +1128,15 @@ pipelines:
         // and pipeline 'b' (empty path)
         assert!(
             err.contains("Pipeline 'a'"),
-            "Should mention pipeline 'a': {}",
-            err
+            "Should mention pipeline 'a': {err}"
         );
         assert!(
             err.contains("Pipeline 'b'"),
-            "Should mention pipeline 'b': {}",
-            err
+            "Should mention pipeline 'b': {err}"
         );
         assert!(
             err.contains("source.path is empty"),
-            "Should mention empty source path: {}",
-            err
+            "Should mention empty source path: {err}"
         );
     }
 
@@ -1182,13 +1169,11 @@ pipelines:
         // Pipeline 'b' has empty schema
         assert!(
             err.contains("Pipeline 'a'") && err.contains("cannot specify both"),
-            "Should mention pipeline 'a' schema conflict: {}",
-            err
+            "Should mention pipeline 'a' schema conflict: {err}"
         );
         assert!(
             err.contains("Pipeline 'b'") && err.contains("empty schema"),
-            "Should mention pipeline 'b' empty schema: {}",
-            err
+            "Should mention pipeline 'b' empty schema: {err}"
         );
     }
 
