@@ -367,53 +367,8 @@ impl Mergeable for Config {
     fn parse_yaml(contents: &str) -> Result<Self, ConfigError> {
         serde_yaml::from_str(contents).map_err(|source| ConfigError::YamlParse { source })
     }
-}
 
-impl Config {
-    /// Load configuration from multiple paths (files or directories).
-    pub fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
-        let config: Self = load_from_paths(paths)?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// Load configuration from a file.
-    pub fn from_file(path: &str) -> Result<Self, ConfigError> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile { source })?;
-        Self::parse(&contents)
-    }
-
-    /// Parse configuration from a YAML string.
-    pub fn parse(contents: &str) -> Result<Self, ConfigError> {
-        // Interpolate environment variables
-        let result = interpolate(contents);
-        if !result.is_ok() {
-            return Err(ConfigError::EnvInterpolation {
-                message: result.errors.join("\n"),
-            });
-        }
-
-        // Parse YAML
-        let config: Config = serde_yaml::from_str(&result.text)
-            .map_err(|source| ConfigError::YamlParse { source })?;
-
-        // Validate
-        config.validate()?;
-
-        Ok(config)
-    }
-
-    /// Validate the configuration.
-    ///
-    /// Checks:
-    /// - All pipelines have non-empty source path and table_uri
-    /// - All pipelines have either explicit schema fields or `schema: { infer: true }`
-    /// - No resource conflicts (e.g., two pipelines using the same source directory)
-    ///
-    /// Collects all validation errors and returns them together, rather than
-    /// stopping at the first error.
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
         // Check for empty paths and schema
@@ -465,6 +420,15 @@ impl Config {
         } else {
             Err(ConfigError::MultipleErrors { errors })
         }
+    }
+}
+
+impl Config {
+    /// Load configuration from a file.
+    pub fn from_file(path: &str) -> Result<Self, ConfigError> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile { source })?;
+        Self::parse(&contents)
     }
 
     /// Iterate over all pipelines with their keys.

@@ -21,6 +21,28 @@ pub trait Mergeable: Sized + Default {
     fn metrics_mut(&mut self) -> &mut MetricsConfig;
     fn parse_yaml(contents: &str) -> Result<Self, ConfigError>;
 
+    /// Validate the configuration.
+    fn validate(&self) -> Result<(), ConfigError>;
+
+    /// Parse configuration from a YAML string with env interpolation and validation.
+    fn parse(contents: &str) -> Result<Self, ConfigError> {
+        // Interpolate environment variables
+        let result = interpolate(contents);
+        if !result.is_ok() {
+            return Err(ConfigError::EnvInterpolation {
+                message: result.errors.join("\n"),
+            });
+        }
+
+        // Parse YAML
+        let config = Self::parse_yaml(&result.text)?;
+
+        // Validate
+        config.validate()?;
+
+        Ok(config)
+    }
+
     fn merge(&mut self, mut other: Self) -> Result<(), ConfigError> {
         let duplicates: Vec<String> = other
             .components_mut()
