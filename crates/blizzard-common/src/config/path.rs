@@ -19,6 +19,17 @@ impl ConfigPath {
     pub fn dir(path: impl Into<PathBuf>) -> Self {
         Self::Dir(path.into())
     }
+
+    /// Combine config file paths and config directory paths into a single list.
+    ///
+    /// Files are added first, then directories, preserving the order within each group.
+    pub fn from_cli_args(config_files: &[PathBuf], config_dirs: &[PathBuf]) -> Vec<Self> {
+        config_files
+            .iter()
+            .map(ConfigPath::file)
+            .chain(config_dirs.iter().map(ConfigPath::dir))
+            .collect()
+    }
 }
 
 /// Check if a path has a YAML extension.

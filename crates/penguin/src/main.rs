@@ -25,11 +25,7 @@ struct Args {
 
 impl Args {
     fn config_paths(&self) -> Vec<ConfigPath> {
-        self.config
-            .iter()
-            .map(ConfigPath::file)
-            .chain(self.config_dirs.iter().map(ConfigPath::dir))
-            .collect()
+        ConfigPath::from_cli_args(&self.config, &self.config_dirs)
     }
 }
 
