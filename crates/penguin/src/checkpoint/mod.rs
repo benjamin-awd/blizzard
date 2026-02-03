@@ -10,11 +10,15 @@
 //! with format: `blizzard:{base64_encoded_checkpoint_json}`
 
 pub mod state;
+mod traits;
 
 pub use state::CheckpointState;
+pub use traits::CheckpointManager;
 
 use std::sync::Arc;
 use std::time::Instant;
+
+use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -253,6 +257,57 @@ impl CheckpointCoordinator {
             }
         }
         count
+    }
+}
+
+#[async_trait]
+impl CheckpointManager for CheckpointCoordinator {
+    async fn capture_state(&self) -> CheckpointState {
+        CheckpointCoordinator::capture_state(self).await
+    }
+
+    async fn restore_from_state(&self, checkpoint: CheckpointState) {
+        CheckpointCoordinator::restore_from_state(self, checkpoint).await
+    }
+
+    async fn watermark(&self) -> Option<String> {
+        CheckpointCoordinator::watermark(self).await
+    }
+
+    async fn update_watermark(&self, watermark: String) {
+        CheckpointCoordinator::update_watermark(self, watermark).await
+    }
+
+    async fn mark_file_finished(&self, path: &str) {
+        CheckpointCoordinator::mark_file_finished(self, path).await
+    }
+
+    async fn update_table_version(&self, version: i64) {
+        self.update_delta_version(version).await
+    }
+
+    async fn mark_checkpoint_committed(&self) {
+        CheckpointCoordinator::mark_checkpoint_committed(self).await
+    }
+
+    async fn restore_from_table_log(
+        &self,
+        sink: &mut dyn TableSink,
+    ) -> Result<bool, DeltaError> {
+        CheckpointCoordinator::restore_from_table_log(self, sink).await
+    }
+
+    async fn commit_files(
+        &self,
+        sink: &mut dyn TableSink,
+        files: &[FinishedFile],
+        checkpoint_interval: usize,
+    ) -> usize {
+        CheckpointCoordinator::commit_files(self, sink, files, checkpoint_interval).await
+    }
+
+    fn table_name(&self) -> &str {
+        &self.table
     }
 }
 
