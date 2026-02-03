@@ -13,17 +13,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use snafu::ResultExt;
-use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
-    Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider, StorageProviderRef,
-    random_jitter,
+    Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef,
+    random_jitter, run_pipelines,
 };
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
-use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
+use crate::error::{PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
 
@@ -104,42 +103,23 @@ impl Pipeline for BlizzardPipeline {
     }
 }
 
-/// Create pipelines from configuration.
-fn create_pipelines(config: &Config, context: PipelineContext) -> Vec<BlizzardPipeline> {
-    config
-        .pipelines
-        .iter()
-        .map(|(key, cfg)| BlizzardPipeline {
-            key: key.clone(),
-            config: cfg.clone(),
-            context: context.clone(),
-        })
-        .collect()
-}
-
 /// Run the pipeline with the given configuration.
 ///
 /// Spawns independent tasks for each configured pipeline, with shared shutdown
 /// handling and optional global concurrency limits.
 pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
-    // Initialize metrics once (shared across all pipelines)
-    let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
-    blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
-
-    // Create shared context and pipelines
-    let shutdown = CancellationToken::new();
-    let context = PipelineContext::new(
-        config.global.total_concurrency,
-        config.global.connection_pooling,
-        config.global.poll_jitter_secs,
-        shutdown.clone(),
-    );
-    let pipelines = create_pipelines(&config, context);
-
-    // Create and run the pipeline runner
-    let runner = PipelineRunner::new(pipelines, shutdown, config.global.poll_jitter_secs, "pipeline");
-    runner.spawn_shutdown_handler();
-    runner.run().await;
+    run_pipelines(&config.metrics.address, &config.global, "pipeline", |context| {
+        config
+            .pipelines
+            .iter()
+            .map(|(key, cfg)| BlizzardPipeline {
+                key: key.clone(),
+                config: cfg.clone(),
+                context: context.clone(),
+            })
+            .collect()
+    })
+    .await?;
 
     Ok(())
 }

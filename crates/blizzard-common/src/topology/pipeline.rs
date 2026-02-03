@@ -9,11 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
+use snafu::ResultExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::config::GlobalConfig;
+use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineSetupError};
 use crate::resource::StoragePoolRef;
 use crate::signal::shutdown_signal;
 use crate::StoragePool;
@@ -103,6 +106,7 @@ impl<P: Pipeline> PipelineRunner<P> {
     }
 
     /// Run all pipelines to completion.
+    #[allow(clippy::type_complexity)]
     pub async fn run(self) {
         let mut handles: JoinSet<(P::Key, Result<(), P::Error>)> = JoinSet::new();
         let typetag = self.typetag;
@@ -154,6 +158,54 @@ impl<P: Pipeline> PipelineRunner<P> {
 
         info!("All {}s complete", typetag);
     }
+}
+
+/// Run pipelines with shared setup logic.
+///
+/// This helper handles common pipeline orchestration:
+/// 1. Parse and initialize metrics endpoint
+/// 2. Create shutdown token and pipeline context
+/// 3. Create pipelines via the provided closure
+/// 4. Run all pipelines with graceful shutdown handling
+///
+/// # Arguments
+///
+/// * `metrics_address` - The address to bind the metrics server to (e.g., "0.0.0.0:9090")
+/// * `global` - Global configuration with concurrency and pooling settings
+/// * `typetag` - A label for logging (e.g., "pipeline" or "table")
+/// * `create_pipelines` - A closure that creates pipelines given the pipeline context
+pub async fn run_pipelines<P, F>(
+    metrics_address: &str,
+    global: &GlobalConfig,
+    typetag: &'static str,
+    create_pipelines: F,
+) -> Result<(), PipelineSetupError>
+where
+    P: Pipeline,
+    F: FnOnce(PipelineContext) -> Vec<P>,
+{
+    // Initialize metrics
+    let addr = metrics_address.parse().context(AddressParseSnafu)?;
+    crate::init_metrics(addr).context(MetricsSnafu)?;
+
+    // Create shared context
+    let shutdown = CancellationToken::new();
+    let context = PipelineContext::new(
+        global.total_concurrency,
+        global.connection_pooling,
+        global.poll_jitter_secs,
+        shutdown.clone(),
+    );
+
+    // Create pipelines
+    let pipelines = create_pipelines(context);
+
+    // Run pipelines
+    let runner = PipelineRunner::new(pipelines, shutdown, global.poll_jitter_secs, typetag);
+    runner.spawn_shutdown_handler();
+    runner.run().await;
+
+    Ok(())
 }
 
 /// Generate a random jitter duration up to the specified maximum seconds.

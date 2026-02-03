@@ -10,13 +10,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_common::{
-    FinishedFile, Pipeline, PipelineContext, PipelineRunner, StoragePoolRef, StorageProvider,
-    random_jitter,
+    FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider,
+    random_jitter, run_pipelines,
 };
 
 use crate::emit;
@@ -24,9 +23,7 @@ use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, Re
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{Config, TableConfig, TableKey};
-use crate::error::{
-    AddressParseSnafu, DeltaSinkNotInitializedSnafu, MetricsSnafu, PipelineError, StorageSnafu,
-};
+use crate::error::{DeltaSinkNotInitializedSnafu, PipelineError, StorageSnafu};
 use crate::incoming::{IncomingConfig, IncomingReader};
 use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
@@ -93,42 +90,23 @@ impl Pipeline for PenguinPipeline {
     }
 }
 
-/// Create pipelines from configuration.
-fn create_pipelines(config: &Config, context: PipelineContext) -> Vec<PenguinPipeline> {
-    config
-        .tables
-        .iter()
-        .map(|(key, cfg)| PenguinPipeline {
-            key: key.clone(),
-            config: cfg.clone(),
-            context: context.clone(),
-        })
-        .collect()
-}
-
 /// Run the pipeline with the given configuration.
 ///
 /// Spawns independent tasks for each configured table, with shared shutdown
 /// handling and optional global concurrency limits.
 pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
-    // Initialize metrics once (shared across all tables)
-    let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
-    blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
-
-    // Create shared context and pipelines
-    let shutdown = CancellationToken::new();
-    let context = PipelineContext::new(
-        config.global.total_concurrency,
-        config.global.connection_pooling,
-        config.global.poll_jitter_secs,
-        shutdown.clone(),
-    );
-    let pipelines = create_pipelines(&config, context);
-
-    // Create and run the pipeline runner
-    let runner = PipelineRunner::new(pipelines, shutdown, config.global.poll_jitter_secs, "table");
-    runner.spawn_shutdown_handler();
-    runner.run().await;
+    run_pipelines(&config.metrics.address, &config.global, "table", |context| {
+        config
+            .tables
+            .iter()
+            .map(|(key, cfg)| PenguinPipeline {
+                key: key.clone(),
+                config: cfg.clone(),
+                context: context.clone(),
+            })
+            .collect()
+    })
+    .await?;
 
     Ok(())
 }

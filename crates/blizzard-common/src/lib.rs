@@ -30,7 +30,7 @@ pub use config::{
     ComponentKey, ErrorHandlingConfig, GlobalConfig, KB, MB, MetricsConfig, ParquetCompression,
     Resource,
 };
-pub use error::{ConfigError, DlqError, MetricsError, StorageError};
+pub use error::{ConfigError, DlqError, MetricsError, PipelineSetupError, StorageError};
 pub use metrics::{
     DEFAULT_METRICS_ADDR, MetricsController, UtilizationTimer, init_global as init_metrics,
     init_test as init_metrics_test,
@@ -42,7 +42,7 @@ pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{
     PiecesBuilder, Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError,
-    TaskOutput, TaskResult, random_jitter,
+    TaskOutput, TaskResult, random_jitter, run_pipelines,
 };
 pub use types::FinishedFile;
 pub use watermark::{

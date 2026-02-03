@@ -151,6 +151,21 @@ pub enum MetricsError {
     NotInitialized,
 }
 
+// ============ Pipeline Setup Errors ============
+
+/// Errors that can occur during pipeline setup (before running).
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum PipelineSetupError {
+    /// Failed to parse metrics address.
+    #[snafu(display("Failed to parse metrics address: {source}"))]
+    AddressParse { source: std::net::AddrParseError },
+
+    /// Failed to initialize metrics.
+    #[snafu(display("Failed to initialize metrics: {source}"))]
+    Metrics { source: MetricsError },
+}
+
 // ============ DLQ Errors ============
 
 /// Errors that can occur during Dead Letter Queue operations.

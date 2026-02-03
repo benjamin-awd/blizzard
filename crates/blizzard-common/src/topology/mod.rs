@@ -20,6 +20,6 @@ mod running;
 mod task;
 
 pub use builder::PiecesBuilder;
-pub use pipeline::{Pipeline, PipelineContext, PipelineRunner, random_jitter};
+pub use pipeline::{Pipeline, PipelineContext, PipelineRunner, random_jitter, run_pipelines};
 pub use running::RunningTopology;
 pub use task::{Task, TaskError, TaskOutput, TaskResult};
