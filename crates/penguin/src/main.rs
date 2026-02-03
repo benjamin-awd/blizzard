@@ -9,9 +9,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use penguin::Config;
 use penguin::config::ConfigPath;
-use penguin::run_pipeline;
+use penguin::{Config, PenguinPipeline, run_pipelines};
 
 /// Penguin - Delta Lake checkpointer
 #[derive(Parser, Debug)]
@@ -83,7 +82,15 @@ async fn main() -> ExitCode {
         info!("  Table: {} ({})", table_key, table_config.table_uri);
     }
 
-    match run_pipeline(config).await {
+    let result = run_pipelines(
+        &config.metrics.address,
+        &config.global,
+        "table",
+        |context| PenguinPipeline::from_config(&config, context),
+    )
+    .await;
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);

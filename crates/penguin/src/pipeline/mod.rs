@@ -13,10 +13,7 @@ use tokio::sync::Semaphore;
 use tracing::info;
 
 use blizzard_common::polling::{IterationResult, PollingProcessor, run_polling_loop};
-use blizzard_common::{
-    FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider,
-    random_jitter, run_pipelines,
-};
+use blizzard_common::{FinishedFile, Pipeline, PipelineContext, StoragePoolRef, StorageProvider, random_jitter};
 
 use crate::emit;
 use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
@@ -37,6 +34,19 @@ pub struct PenguinPipeline {
 }
 
 impl PenguinPipeline {
+    /// Create pipelines from configuration.
+    pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
+        config
+            .tables
+            .iter()
+            .map(|(key, cfg)| Self {
+                key: key.clone(),
+                config: cfg.clone(),
+                context: context.clone(),
+            })
+            .collect()
+    }
+
     /// Run this pipeline's polling loop.
     async fn execute(self) -> Result<(), PipelineError> {
         let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
@@ -88,27 +98,6 @@ impl Pipeline for PenguinPipeline {
     async fn run(self) -> Result<(), Self::Error> {
         self.execute().await
     }
-}
-
-/// Run the pipeline with the given configuration.
-///
-/// Spawns independent tasks for each configured table, with shared shutdown
-/// handling and optional global concurrency limits.
-pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
-    run_pipelines(&config.metrics.address, &config.global, "table", |context| {
-        config
-            .tables
-            .iter()
-            .map(|(key, cfg)| PenguinPipeline {
-                key: key.clone(),
-                config: cfg.clone(),
-                context: context.clone(),
-            })
-            .collect()
-    })
-    .await?;
-
-    Ok(())
 }
 
 /// State prepared for a single processing iteration.

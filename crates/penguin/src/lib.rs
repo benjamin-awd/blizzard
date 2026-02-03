@@ -17,10 +17,11 @@ pub mod sink;
 // Re-export commonly used items
 pub use config::Config;
 pub use error::PipelineError;
-pub use pipeline::run_pipeline;
+pub use pipeline::PenguinPipeline;
 pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
 
 // Re-export from blizzard-common
 pub use blizzard_common::{
-    KB, MB, MetricsConfig, StorageProvider, StorageProviderRef, init_metrics, shutdown_signal,
+    KB, MB, MetricsConfig, PipelineContext, StorageProvider, StorageProviderRef, init_metrics,
+    run_pipelines, shutdown_signal,
 };

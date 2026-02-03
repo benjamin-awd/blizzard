@@ -24,10 +24,10 @@ pub mod storage {
 // Re-export commonly used items
 pub use config::Config;
 pub use error::PipelineError;
-pub use pipeline::run_pipeline;
+pub use pipeline::BlizzardPipeline;
 
 // Re-export from blizzard-common
 pub use blizzard_common::{
-    KB, MB, MetricsConfig, ParquetCompression, StorageProvider, StorageProviderRef, init_metrics,
-    shutdown_signal,
+    KB, MB, MetricsConfig, ParquetCompression, PipelineContext, StorageProvider, StorageProviderRef,
+    init_metrics, run_pipelines, shutdown_signal,
 };

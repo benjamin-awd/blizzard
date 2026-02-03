@@ -9,9 +9,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use blizzard::Config;
 use blizzard::config::ConfigPath;
-use blizzard::run_pipeline;
+use blizzard::{BlizzardPipeline, Config, run_pipelines};
 
 /// Blizzard - NDJSON.gz file loader
 #[derive(Parser, Debug)]
@@ -63,13 +62,9 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    run_pipelines(&paths).await
-}
-
-async fn run_pipelines(paths: &[ConfigPath]) -> ExitCode {
     info!("Loading config from {} source(s)", paths.len());
 
-    let config = match Config::from_paths(paths) {
+    let config = match Config::from_paths(&paths) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to load config: {}", e);
@@ -90,7 +85,15 @@ async fn run_pipelines(paths: &[ConfigPath]) -> ExitCode {
         );
     }
 
-    match run_pipeline(config).await {
+    let result = run_pipelines(
+        &config.metrics.address,
+        &config.global,
+        "pipeline",
+        |context| BlizzardPipeline::from_config(&config, context),
+    )
+    .await;
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);

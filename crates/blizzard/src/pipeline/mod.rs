@@ -18,7 +18,7 @@ use tracing::info;
 use blizzard_common::polling::run_polling_loop;
 use blizzard_common::{
     Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef,
-    random_jitter, run_pipelines,
+    random_jitter,
 };
 
 use crate::config::{Config, PipelineConfig, PipelineKey};
@@ -50,6 +50,19 @@ pub struct BlizzardPipeline {
 }
 
 impl BlizzardPipeline {
+    /// Create pipelines from configuration.
+    pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
+        config
+            .pipelines
+            .iter()
+            .map(|(key, cfg)| Self {
+                key: key.clone(),
+                config: cfg.clone(),
+                context: context.clone(),
+            })
+            .collect()
+    }
+
     /// Run this pipeline's polling loop.
     async fn execute(self) -> Result<(), PipelineError> {
         let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
@@ -101,27 +114,6 @@ impl Pipeline for BlizzardPipeline {
     async fn run(self) -> Result<(), Self::Error> {
         self.execute().await
     }
-}
-
-/// Run the pipeline with the given configuration.
-///
-/// Spawns independent tasks for each configured pipeline, with shared shutdown
-/// handling and optional global concurrency limits.
-pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
-    run_pipelines(&config.metrics.address, &config.global, "pipeline", |context| {
-        config
-            .pipelines
-            .iter()
-            .map(|(key, cfg)| BlizzardPipeline {
-                key: key.clone(),
-                config: cfg.clone(),
-                context: context.clone(),
-            })
-            .collect()
-    })
-    .await?;
-
-    Ok(())
 }
 
 #[cfg(test)]
