@@ -85,13 +85,6 @@ impl UploadTask {
         results
     }
 
-    /// Abort the uploader task.
-    pub fn abort(self) {
-        drop(self.tx);
-        drop(self.rx);
-        self.handle.abort();
-    }
-
     /// Run the uploader task that manages concurrent file uploads.
     async fn run(
         mut file_rx: mpsc::Receiver<FinishedFile>,

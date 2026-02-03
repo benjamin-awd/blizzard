@@ -134,12 +134,6 @@ impl Sink {
 
         Ok(())
     }
-
-    /// Abort the upload task (for shutdown scenarios).
-    #[allow(dead_code)]
-    pub fn abort(self) {
-        self.upload_task.abort();
-    }
 }
 
 #[cfg(test)]
