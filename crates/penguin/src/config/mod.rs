@@ -5,14 +5,18 @@ mod table_key;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::info;
 
+use blizzard_core::AppConfig;
 pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
     ParquetCompression, Resource, interpolate, load_from_paths,
 };
+use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use table_key::TableKey;
 
+use crate::pipeline::Pipeline;
 use crate::schema::SchemaEvolutionMode;
 use blizzard_core::error::ConfigError;
 
@@ -278,6 +282,31 @@ impl Config {
     /// Get the number of tables in the configuration.
     pub fn table_count(&self) -> usize {
         self.tables.len()
+    }
+}
+
+impl AppConfig for Config {
+    type Pipeline = Pipeline;
+
+    const COMPONENT_NAME: &'static str = "table";
+
+    fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
+        let config: Self = load_from_paths(paths)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn create_pipelines(&self, context: PipelineContext) -> Vec<Self::Pipeline> {
+        Pipeline::from_config(self, context)
+    }
+
+    fn log_startup_info(&self) {
+        let table_count = self.table_count();
+        info!("Starting checkpointer with {table_count} table(s)");
+        for (key, cfg) in self.tables() {
+            let uri = &cfg.table_uri;
+            info!("  Table: {key} ({uri})");
+        }
     }
 }
 

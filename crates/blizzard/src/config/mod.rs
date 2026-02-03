@@ -7,16 +7,21 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::info;
 
+use blizzard_core::AppConfig;
 pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
     ParquetCompression, Resource, interpolate, load_from_paths,
 };
 use blizzard_core::storage::DatePrefixGenerator;
+use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use pipeline_key::PipelineKey;
 
 use blizzard_core::error::ConfigError;
+
+use crate::pipeline::Pipeline;
 
 /// Trait for config types that provide storage connection details.
 pub trait StorageSource: Send + Sync {
@@ -499,6 +504,32 @@ impl Config {
     /// Get the number of pipelines in the configuration.
     pub fn pipeline_count(&self) -> usize {
         self.pipelines.len()
+    }
+}
+
+impl AppConfig for Config {
+    type Pipeline = Pipeline;
+
+    const COMPONENT_NAME: &'static str = "pipeline";
+
+    fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
+        let config: Self = load_from_paths(paths)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn create_pipelines(&self, context: PipelineContext) -> Vec<Self::Pipeline> {
+        Pipeline::from_config(self, context)
+    }
+
+    fn log_startup_info(&self) {
+        let pipeline_count = self.pipeline_count();
+        info!("Starting blizzard file loader with {pipeline_count} pipeline(s)");
+        for (key, cfg) in self.pipelines() {
+            let source = &cfg.source.path;
+            let sink = &cfg.sink.table_uri;
+            info!("  Pipeline: {key} ({source} -> {sink})");
+        }
     }
 }
 

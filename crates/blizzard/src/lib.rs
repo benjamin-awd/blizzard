@@ -27,6 +27,7 @@ pub use pipeline::Pipeline;
 
 // Re-export from blizzard-core
 pub use blizzard_core::{
-    CliArgs, KB, MB, MetricsConfig, ParquetCompression, PipelineContext, StorageProvider,
-    StorageProviderRef, init_metrics, init_tracing, run_pipelines, shutdown_signal,
+    Application, CliArgs, KB, MB, MetricsConfig, ParquetCompression, PipelineContext,
+    StorageProvider, StorageProviderRef, init_metrics, init_tracing, run_pipelines,
+    shutdown_signal,
 };

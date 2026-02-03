@@ -22,6 +22,6 @@ pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_s
 
 // Re-export from blizzard-core
 pub use blizzard_core::{
-    CliArgs, KB, MB, MetricsConfig, PipelineContext, StorageProvider, StorageProviderRef,
-    init_metrics, init_tracing, run_pipelines, shutdown_signal,
+    Application, CliArgs, KB, MB, MetricsConfig, PipelineContext, StorageProvider,
+    StorageProviderRef, init_metrics, init_tracing, run_pipelines, shutdown_signal,
 };

@@ -12,7 +12,9 @@
 //! - `signal` - Signal handling for graceful shutdown
 //! - `types` - Common types like `FinishedFile`
 //! - `error` - Common error types
+//! - `app` - Application abstraction for reducing main.rs boilerplate
 
+pub mod app;
 pub mod config;
 pub mod error;
 pub mod metrics;
@@ -27,6 +29,7 @@ pub mod types;
 pub mod watermark;
 
 // Re-export commonly used items
+pub use app::{AppConfig, Application};
 pub use config::{
     CliArgs, ComponentKey, ErrorHandlingConfig, GlobalConfig, KB, MB, MetricsConfig,
     ParquetCompression, Resource,
