@@ -15,12 +15,14 @@ pub mod schema;
 pub mod sink;
 
 // Re-export commonly used items
+pub use checkpoint::{CheckpointCoordinator, CheckpointManager, CheckpointState};
 pub use config::Config;
 pub use error::PipelineError;
-pub use pipeline::Pipeline;
-pub use schema::{SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas, merge_schemas};
-pub use checkpoint::{CheckpointCoordinator, CheckpointManager, CheckpointState};
 pub use incoming::{FileReader, IncomingFile, IncomingReader};
+pub use pipeline::Pipeline;
+pub use schema::{
+    SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas, merge_schemas,
+};
 pub use sink::{DeltaSink, TableSink};
 
 // Re-export from blizzard-core

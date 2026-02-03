@@ -50,10 +50,7 @@ pub trait CheckpointManager: Send + Sync {
     /// This is the primary entry point for cold start recovery.
     ///
     /// Returns `true` if a checkpoint was recovered, `false` otherwise.
-    async fn restore_from_table_log(
-        &self,
-        sink: &mut dyn TableSink,
-    ) -> Result<bool, DeltaError>;
+    async fn restore_from_table_log(&self, sink: &mut dyn TableSink) -> Result<bool, DeltaError>;
 
     /// Commit files to the table with an atomic checkpoint.
     ///

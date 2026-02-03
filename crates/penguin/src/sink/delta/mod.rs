@@ -32,7 +32,9 @@ use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_sc
 
 use actions::{TXN_APP_ID_PREFIX, create_add_action};
 use commit::commit_to_delta_with_checkpoint;
-use table::{arrow_schema_to_delta, ensure_handlers_registered, load_or_create_table, try_open_table};
+use table::{
+    arrow_schema_to_delta, ensure_handlers_registered, load_or_create_table, try_open_table,
+};
 
 /// Maximum number of Delta log versions to scan when recovering checkpoint state.
 ///

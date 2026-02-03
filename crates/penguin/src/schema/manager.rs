@@ -82,7 +82,8 @@ impl SchemaManager {
                 // Schema is compatible, no changes needed
             }
             EvolutionAction::Merge { new_schema } => {
-                let existing_field_count = self.table_schema.as_ref().map_or(0, |s| s.fields().len());
+                let existing_field_count =
+                    self.table_schema.as_ref().map_or(0, |s| s.fields().len());
                 let new_field_names: Vec<_> = new_schema
                     .fields()
                     .iter()
@@ -137,8 +138,11 @@ mod tests {
     #[test]
     fn test_schema_manager_identical_schemas() {
         let schema = Arc::new(make_schema(vec![("id", DataType::Int64, false)]));
-        let manager =
-            SchemaManager::new(Some(schema.clone()), SchemaEvolutionMode::Merge, "test".to_string());
+        let manager = SchemaManager::new(
+            Some(schema.clone()),
+            SchemaEvolutionMode::Merge,
+            "test".to_string(),
+        );
 
         let action = manager.validate(&schema).unwrap();
 
@@ -198,13 +202,12 @@ mod tests {
 
     #[test]
     fn test_schema_manager_set_schema() {
-        let mut manager =
-            SchemaManager::new(None, SchemaEvolutionMode::Merge, "test".to_string());
+        let mut manager = SchemaManager::new(None, SchemaEvolutionMode::Merge, "test".to_string());
 
         assert!(manager.table_schema().is_none());
 
         let schema = Arc::new(make_schema(vec![("id", DataType::Int64, false)]));
-        manager.set_table_schema(schema.clone());
+        manager.set_table_schema(schema);
 
         assert!(manager.table_schema().is_some());
         assert_eq!(manager.table_schema().unwrap().fields().len(), 1);

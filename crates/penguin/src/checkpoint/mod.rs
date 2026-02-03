@@ -267,7 +267,7 @@ impl CheckpointManager for CheckpointCoordinator {
     }
 
     async fn restore_from_state(&self, checkpoint: CheckpointState) {
-        CheckpointCoordinator::restore_from_state(self, checkpoint).await
+        CheckpointCoordinator::restore_from_state(self, checkpoint).await;
     }
 
     async fn watermark(&self) -> Option<String> {
@@ -275,25 +275,22 @@ impl CheckpointManager for CheckpointCoordinator {
     }
 
     async fn update_watermark(&self, watermark: String) {
-        CheckpointCoordinator::update_watermark(self, watermark).await
+        CheckpointCoordinator::update_watermark(self, watermark).await;
     }
 
     async fn mark_file_finished(&self, path: &str) {
-        CheckpointCoordinator::mark_file_finished(self, path).await
+        CheckpointCoordinator::mark_file_finished(self, path).await;
     }
 
     async fn update_table_version(&self, version: i64) {
-        self.update_delta_version(version).await
+        self.update_delta_version(version).await;
     }
 
     async fn mark_checkpoint_committed(&self) {
-        CheckpointCoordinator::mark_checkpoint_committed(self).await
+        CheckpointCoordinator::mark_checkpoint_committed(self).await;
     }
 
-    async fn restore_from_table_log(
-        &self,
-        sink: &mut dyn TableSink,
-    ) -> Result<bool, DeltaError> {
+    async fn restore_from_table_log(&self, sink: &mut dyn TableSink) -> Result<bool, DeltaError> {
         CheckpointCoordinator::restore_from_table_log(self, sink).await
     }
 
