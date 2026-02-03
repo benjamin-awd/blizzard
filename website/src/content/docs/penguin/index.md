@@ -15,6 +15,10 @@ While Blizzard handles the ingestion of source data and writes Parquet files dir
 
 This two-stage architecture provides better fault tolerance—if Penguin crashes, Blizzard can continue writing files, and Penguin will pick up where it left off on restart using watermark-based scanning.
 
+:::caution[Watermark-only tracking]
+Penguin only supports watermark-based tracking, which assumes files are written in lexicographical order and never modified after creation.
+:::
+
 ## Architecture
 
 ```
