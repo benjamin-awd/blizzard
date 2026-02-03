@@ -145,7 +145,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio_util::sync::CancellationToken;
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -178,8 +177,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let shutdown = CancellationToken::new();
-        let upload_task = UploadTask::spawn(storage, shutdown, 4, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 4, "test".to_string());
         let partition_extractor = PartitionExtractor::new(vec!["date".into()]);
         let writer_config = ParquetWriterConfig::default();
 
@@ -213,8 +211,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let shutdown = CancellationToken::new();
-        let upload_task = UploadTask::spawn(storage, shutdown, 4, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 4, "test".to_string());
         let partition_extractor = PartitionExtractor::all();
         let writer_config = ParquetWriterConfig::default();
 

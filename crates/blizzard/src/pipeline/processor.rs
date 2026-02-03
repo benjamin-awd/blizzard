@@ -230,7 +230,6 @@ impl Iteration {
         // Spawn upload task for concurrent uploads
         let upload_task = UploadTask::spawn(
             ctx.destination_storage.clone(),
-            shutdown.clone(),
             config.sink.max_concurrent_uploads,
             key.to_string(),
         );
