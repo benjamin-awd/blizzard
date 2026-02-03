@@ -28,7 +28,7 @@ use crate::staging::TableWriter;
 use super::partition::PartitionExtractor;
 use super::tasks::{Downloader, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
-use super::{PipelineStats, create_storage};
+use super::create_storage;
 
 /// Generate date prefixes for partition filtering based on pipeline config.
 fn generate_date_prefixes(config: &PipelineConfig) -> Option<Vec<String>> {
@@ -62,8 +62,6 @@ pub(super) struct BlizzardProcessor {
     reader: Arc<NdjsonReader>,
     /// Tracks which source files have been processed.
     state_tracker: Box<dyn StateTracker>,
-    /// Statistics for this pipeline's run.
-    pub stats: PipelineStats,
     /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
     /// Extracts partition values from source paths.
@@ -161,7 +159,6 @@ impl BlizzardProcessor {
             schema,
             reader,
             state_tracker,
-            stats: PipelineStats::default(),
             partition_extractor,
             shutdown,
         })
@@ -321,14 +318,12 @@ impl BlizzardProcessor {
                 "Writing parquet files to table"
             );
             self.table_writer.write_files(&finished_files).await?;
-            self.stats.parquet_files_written += finished_files.len();
 
             let bytes: usize = finished_files.iter().map(|f| f.size).sum();
             emit!(BytesWritten {
                 bytes: bytes as u64,
                 target: self.pipeline_key.id().to_string(),
             });
-            self.stats.bytes_written += bytes;
         }
 
         self.failure_tracker.finalize_dlq().await;
@@ -370,8 +365,6 @@ impl BlizzardProcessor {
         }
 
         self.state_tracker.mark_processed(&path);
-        self.stats.files_processed += 1;
-        self.stats.records_processed += total_records;
 
         emit!(FileProcessed {
             status: FileStatus::Success,
@@ -401,7 +394,6 @@ impl BlizzardProcessor {
         let finished = parquet_writer.take_finished_files();
         if !finished.is_empty() {
             self.table_writer.write_files(&finished).await?;
-            self.stats.parquet_files_written += finished.len();
         }
 
         Ok(())

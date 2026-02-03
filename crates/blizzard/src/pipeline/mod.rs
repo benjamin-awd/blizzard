@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use indexmap::IndexMap;
 use rand::Rng;
 use snafu::ResultExt;
 use tokio::sync::Semaphore;
@@ -28,64 +27,6 @@ use crate::config::{Config, PipelineConfig, PipelineKey};
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
-
-// ============================================================================
-// Public types
-// ============================================================================
-
-/// Statistics from a single pipeline run.
-#[derive(Debug, Clone, Default)]
-pub struct PipelineStats {
-    /// Total files processed.
-    pub files_processed: usize,
-    /// Total records processed.
-    pub records_processed: usize,
-    /// Total bytes written to Parquet.
-    pub bytes_written: usize,
-    /// Parquet files written to table.
-    pub parquet_files_written: usize,
-}
-
-/// Statistics from a multi-pipeline run.
-///
-/// Tracks per-pipeline statistics and any errors that occurred during processing.
-#[derive(Debug, Clone, Default)]
-pub struct MultiPipelineStats {
-    /// Per-pipeline statistics for pipelines that ran successfully.
-    pub pipelines: IndexMap<PipelineKey, PipelineStats>,
-    /// Errors that occurred, with the associated pipeline key and error message.
-    pub errors: Vec<(PipelineKey, String)>,
-}
-
-impl MultiPipelineStats {
-    /// Returns true if no errors occurred.
-    pub fn success(&self) -> bool {
-        self.errors.is_empty()
-    }
-
-    /// Returns the total number of files processed across all pipelines.
-    pub fn total_files_processed(&self) -> usize {
-        self.pipelines.values().map(|s| s.files_processed).sum()
-    }
-
-    /// Returns the total number of records processed across all pipelines.
-    pub fn total_records_processed(&self) -> usize {
-        self.pipelines.values().map(|s| s.records_processed).sum()
-    }
-
-    /// Returns the total bytes written across all pipelines.
-    pub fn total_bytes_written(&self) -> usize {
-        self.pipelines.values().map(|s| s.bytes_written).sum()
-    }
-
-    /// Returns the total parquet files written across all pipelines.
-    pub fn total_parquet_files_written(&self) -> usize {
-        self.pipelines
-            .values()
-            .map(|s| s.parquet_files_written)
-            .sum()
-    }
-}
 
 // ============================================================================
 // Helpers
@@ -124,7 +65,7 @@ pub(crate) async fn create_storage(
 ///
 /// Spawns independent tasks for each configured pipeline, with shared shutdown
 /// handling and optional global concurrency limits.
-pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, PipelineError> {
+pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
     // Initialize metrics once (shared across all pipelines)
     let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
     blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
@@ -152,7 +93,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
     let jitter_max_secs = config.global.poll_jitter_secs;
 
     // Spawn independent task per pipeline with jittered start
-    let mut handles: JoinSet<(PipelineKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
+    let mut handles: JoinSet<(PipelineKey, Result<(), PipelineError>)> = JoinSet::new();
 
     for (pipeline_key, pipeline_config) in config.pipelines {
         let shutdown = shutdown.clone();
@@ -178,7 +119,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
                     .is_none()
                 {
                     info!(target = %key, "Shutdown requested during jitter delay");
-                    return (key, Ok(PipelineStats::default()));
+                    return (key, Ok(()));
                 }
             }
 
@@ -198,21 +139,14 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
 
     info!("Spawned {} pipeline tasks", handles.len());
 
-    // Collect results
-    let mut stats = MultiPipelineStats::default();
+    // Wait for all pipelines to complete
     while let Some(result) = handles.join_next().await {
         match result {
-            Ok((key, Ok(pipeline_stats))) => {
-                info!(
-                    target = %key,
-                    files = pipeline_stats.files_processed,
-                    "Pipeline completed successfully"
-                );
-                stats.pipelines.insert(key, pipeline_stats);
+            Ok((key, Ok(()))) => {
+                info!(target = %key, "Pipeline completed");
             }
             Ok((key, Err(e))) => {
                 error!(target = %key, error = %e, "Pipeline failed");
-                stats.errors.push((key, e.to_string()));
             }
             Err(e) => {
                 error!(error = %e, "Pipeline task panicked");
@@ -220,13 +154,9 @@ pub async fn run_pipeline(config: Config) -> Result<MultiPipelineStats, Pipeline
         }
     }
 
-    info!(
-        "All pipelines complete: {} succeeded, {} failed",
-        stats.pipelines.len(),
-        stats.errors.len()
-    );
+    info!("All pipelines complete");
 
-    Ok(stats)
+    Ok(())
 }
 
 // ============================================================================
@@ -242,7 +172,7 @@ async fn run_single_pipeline(
     poll_interval: Duration,
     poll_jitter_secs: u64,
     shutdown: CancellationToken,
-) -> Result<PipelineStats, PipelineError> {
+) -> Result<(), PipelineError> {
     // Add jitter to poll interval for this pipeline
     let effective_interval = poll_interval + random_jitter(poll_jitter_secs);
 
@@ -252,7 +182,7 @@ async fn run_single_pipeline(
 
         _ = shutdown.cancelled() => {
             info!(target = %pipeline_key, "Shutdown requested during initialization");
-            return Ok(PipelineStats::default());
+            return Ok(());
         }
 
         result = BlizzardProcessor::new(
@@ -277,7 +207,7 @@ async fn run_single_pipeline(
     )
     .await?;
 
-    Ok(processor.stats)
+    Ok(())
 }
 
 // ============================================================================

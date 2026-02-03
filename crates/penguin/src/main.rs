@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::{error, info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -84,35 +84,7 @@ async fn main() -> ExitCode {
     }
 
     match run_pipeline(config).await {
-        Ok(stats) => {
-            info!(
-                "Pipeline completed: {} files committed, {} records",
-                stats.total_files_committed(),
-                stats.total_records_committed()
-            );
-
-            // Exit code logic based on failure behavior defined in plan
-            if stats.tables.is_empty() && !stats.errors.is_empty() {
-                // All tables failed to start
-                error!("All {} table(s) failed", stats.errors.len());
-                for (key, err) in &stats.errors {
-                    error!("  {}: {}", key, err);
-                }
-                ExitCode::FAILURE
-            } else if stats.errors.is_empty() {
-                // All tables succeeded
-                info!("All {} table(s) completed successfully", stats.tables.len());
-                ExitCode::SUCCESS
-            } else {
-                // Partial success: some tables worked, some failed
-                let total = stats.tables.len() + stats.errors.len();
-                warn!("{}/{} table(s) failed", stats.errors.len(), total);
-                for (key, err) in &stats.errors {
-                    warn!("  {}: {}", key, err);
-                }
-                ExitCode::from(2) // Distinguish from total failure
-            }
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);
             ExitCode::FAILURE

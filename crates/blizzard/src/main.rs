@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::{error, info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -91,40 +91,7 @@ async fn run_pipelines(paths: &[ConfigPath]) -> ExitCode {
     }
 
     match run_pipeline(config).await {
-        Ok(stats) => {
-            info!(
-                "All pipelines completed: {} files processed, {} records, {} bytes written, {} parquet files",
-                stats.total_files_processed(),
-                stats.total_records_processed(),
-                stats.total_bytes_written(),
-                stats.total_parquet_files_written()
-            );
-
-            // Exit code logic based on failure behavior defined in plan
-            if stats.pipelines.is_empty() && !stats.errors.is_empty() {
-                // All pipelines failed to start
-                error!("All {} pipeline(s) failed", stats.errors.len());
-                for (key, err) in &stats.errors {
-                    error!("  {}: {}", key, err);
-                }
-                ExitCode::FAILURE
-            } else if stats.errors.is_empty() {
-                // All pipelines succeeded
-                info!(
-                    "All {} pipeline(s) completed successfully",
-                    stats.pipelines.len()
-                );
-                ExitCode::SUCCESS
-            } else {
-                // Partial success: some pipelines worked, some failed
-                let total = stats.pipelines.len() + stats.errors.len();
-                warn!("{}/{} pipeline(s) failed", stats.errors.len(), total);
-                for (key, err) in &stats.errors {
-                    warn!("  {}: {}", key, err);
-                }
-                ExitCode::from(2) // Distinguish from total failure
-            }
-        }
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Pipeline failed: {}", e);
             ExitCode::FAILURE

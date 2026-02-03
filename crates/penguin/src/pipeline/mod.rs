@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use indexmap::IndexMap;
 use rand::Rng;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
@@ -33,49 +32,12 @@ use crate::schema::evolution::EvolutionAction;
 use crate::schema::infer_schema_from_first_file;
 use crate::sink::DeltaSink;
 
-/// Statistics from a single table's pipeline run.
-#[derive(Debug, Clone, Default)]
-pub struct PipelineStats {
-    /// Total files committed.
-    pub files_committed: usize,
-    /// Total records committed.
-    pub records_committed: usize,
-}
-
-/// Statistics from a multi-table pipeline run.
-///
-/// Tracks per-table statistics and any errors that occurred during processing.
-#[derive(Debug, Clone, Default)]
-pub struct MultiTableStats {
-    /// Per-table statistics for tables that ran successfully.
-    pub tables: IndexMap<TableKey, PipelineStats>,
-    /// Errors that occurred, with the associated table key and error message.
-    pub errors: Vec<(TableKey, String)>,
-}
-
-impl MultiTableStats {
-    /// Returns true if no errors occurred.
-    pub fn success(&self) -> bool {
-        self.errors.is_empty()
-    }
-
-    /// Returns the total number of files committed across all tables.
-    pub fn total_files_committed(&self) -> usize {
-        self.tables.values().map(|s| s.files_committed).sum()
-    }
-
-    /// Returns the total number of records committed across all tables.
-    pub fn total_records_committed(&self) -> usize {
-        self.tables.values().map(|s| s.records_committed).sum()
-    }
-}
-
 /// Run the pipeline with the given configuration.
 ///
 /// Spawns independent tasks for each configured table, with shared shutdown
 /// handling and optional global concurrency limits.
 ///
-pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineError> {
+pub async fn run_pipeline(config: Config) -> Result<(), PipelineError> {
     // 1. Initialize metrics once (shared across all tables)
     let addr = config.metrics.address.parse().context(AddressParseSnafu)?;
     blizzard_common::init_metrics(addr).context(MetricsSnafu)?;
@@ -105,7 +67,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
     let jitter_max_secs = config.global.poll_jitter_secs;
 
     // 6. Spawn independent task per table with jittered start
-    let mut handles: JoinSet<(TableKey, Result<PipelineStats, PipelineError>)> = JoinSet::new();
+    let mut handles: JoinSet<(TableKey, Result<(), PipelineError>)> = JoinSet::new();
 
     for (table_key, table_config) in config.tables {
         let shutdown = shutdown.clone();
@@ -135,7 +97,7 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
                     .is_none()
                 {
                     info!(target = %key, "Shutdown requested during jitter delay");
-                    return (key, Ok(PipelineStats::default()));
+                    return (key, Ok(()));
                 }
             }
 
@@ -155,32 +117,24 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
 
     info!("Spawned {} table tasks", handles.len());
 
-    // 5. Collect results
-    let mut stats = MultiTableStats::default();
+    // Wait for all tables to complete
     while let Some(result) = handles.join_next().await {
         match result {
-            Ok((key, Ok(table_stats))) => {
-                info!(target = %key, files = table_stats.files_committed, "Table completed successfully");
-                stats.tables.insert(key, table_stats);
+            Ok((key, Ok(()))) => {
+                info!(target = %key, "Table completed");
             }
             Ok((key, Err(e))) => {
                 error!(target = %key, error = %e, "Table failed");
-                stats.errors.push((key, e.to_string()));
             }
             Err(e) => {
                 error!(error = %e, "Table task panicked");
-                // JoinError doesn't give us the table key, so we can't attribute it
             }
         }
     }
 
-    info!(
-        "Pipeline complete: {} tables succeeded, {} failed",
-        stats.tables.len(),
-        stats.errors.len()
-    );
+    info!("All tables complete");
 
-    Ok(stats)
+    Ok(())
 }
 
 /// Run a single table's polling loop.
@@ -194,7 +148,7 @@ async fn run_single_table(
     poll_interval: Duration,
     poll_jitter_secs: u64,
     shutdown: CancellationToken,
-) -> Result<PipelineStats, PipelineError> {
+) -> Result<(), PipelineError> {
     // Add jitter to poll interval for this table to spread polling load
     let effective_interval = if poll_jitter_secs > 0 {
         let jitter_ms = rand::rng().random_range(0..poll_jitter_secs * 1000);
@@ -209,7 +163,7 @@ async fn run_single_table(
 
         _ = shutdown.cancelled() => {
             info!(target = %table_key, "Shutdown requested during initialization");
-            return Ok(PipelineStats::default());
+            return Ok(());
         }
 
         result = PenguinProcessor::new(
@@ -229,7 +183,7 @@ async fn run_single_table(
     // Run the polling loop with jittered interval
     run_polling_loop(&mut processor, effective_interval, shutdown, table_key.id()).await?;
 
-    Ok(processor.stats)
+    Ok(())
 }
 
 /// State prepared for a single processing iteration.
@@ -255,8 +209,6 @@ struct PenguinProcessor {
     delta_sink: Option<DeltaSink>,
     /// Coordinator for checkpoint management.
     checkpoint_coordinator: CheckpointCoordinator,
-    /// Statistics for this table's run.
-    stats: PipelineStats,
     /// Optional global semaphore for cross-table concurrency limiting.
     /// Currently stored for future use in concurrent upload limiting.
     #[allow(dead_code)]
@@ -330,7 +282,6 @@ impl PenguinProcessor {
             sink_storage,
             delta_sink,
             checkpoint_coordinator: CheckpointCoordinator::new(table_id),
-            stats: PipelineStats::default(),
             global_semaphore,
         })
     }
@@ -540,11 +491,7 @@ impl PollingProcessor for PenguinProcessor {
                 self.checkpoint_coordinator.update_watermark(path).await;
             }
 
-            // Update stats
-            for file in &files {
-                self.stats.files_committed += 1;
-                self.stats.records_committed += file.record_count;
-            }
+            let records_committed: usize = files.iter().map(|f| f.record_count).sum();
 
             // Emit metrics
             emit!(FilesCommitted {
@@ -553,7 +500,7 @@ impl PollingProcessor for PenguinProcessor {
             });
             emit!(RecordsCommitted {
                 target: self.table_key.id().to_string(),
-                count: self.stats.records_committed as u64,
+                count: records_committed as u64,
             });
             emit!(DeltaTableVersion {
                 target: self.table_key.id().to_string(),
