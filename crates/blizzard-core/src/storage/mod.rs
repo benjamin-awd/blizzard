@@ -41,6 +41,26 @@ pub use s3::S3Config;
 /// A reference-counted storage provider.
 pub type StorageProviderRef = Arc<StorageProvider>;
 
+use crate::resource::StoragePoolRef;
+
+/// Create a storage provider, using the pool if available.
+///
+/// This is a convenience function that handles the common pattern of:
+/// - Using pooled storage if a pool is provided (for connection sharing)
+/// - Creating a standalone provider if no pool is available
+pub async fn get_or_create_storage(
+    pool: &Option<StoragePoolRef>,
+    url: &str,
+    options: HashMap<String, String>,
+) -> Result<StorageProviderRef, StorageError> {
+    match pool {
+        Some(p) => p.get_or_create(url, options).await,
+        None => Ok(Arc::new(
+            StorageProvider::for_url_with_options(url, options).await?,
+        )),
+    }
+}
+
 /// Storage provider that abstracts over different cloud storage backends.
 #[derive(Clone)]
 pub struct StorageProvider {

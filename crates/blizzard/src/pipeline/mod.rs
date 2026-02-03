@@ -10,38 +10,17 @@ mod sink;
 mod tasks;
 mod tracker;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use snafu::ResultExt;
 use tracing::info;
 
 use blizzard_core::polling::run_polling_loop;
-use blizzard_core::{
-    PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
-};
+use blizzard_core::{PipelineContext, random_jitter};
 
-use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey, StorageSource};
-use crate::error::{PipelineError, StorageSnafu};
+use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey};
+use crate::error::PipelineError;
 
 use processor::Processor;
-
-/// Create a storage provider from a config, using the pool if available.
-pub(crate) async fn create_storage(
-    pool: &Option<StoragePoolRef>,
-    source: &impl StorageSource,
-) -> Result<StorageProviderRef, PipelineError> {
-    let url = source.url();
-    let options = source.storage_options().clone();
-    match pool {
-        Some(p) => p.get_or_create(url, options).await.context(StorageSnafu),
-        None => Ok(Arc::new(
-            StorageProvider::for_url_with_options(url, options)
-                .await
-                .context(StorageSnafu)?,
-        )),
-    }
-}
 
 /// A blizzard pipeline unit for processing NDJSON files to Parquet.
 pub struct Pipeline {

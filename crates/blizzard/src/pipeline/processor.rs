@@ -9,10 +9,12 @@ use deltalake::arrow::datatypes::SchemaRef;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use blizzard_core::polling::{IterationResult, PollingProcessor};
-use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
+use snafu::ResultExt;
 
-use super::create_storage;
+use blizzard_core::polling::{IterationResult, PollingProcessor};
+use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage};
+
+use crate::error::StorageSnafu;
 use super::download::Downloader;
 use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
@@ -168,15 +170,33 @@ impl Processor {
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
         // Create source storage provider - use pooled if available
-        let source_storage = create_storage(&storage_pool, &config.source).await?;
+        let source_storage = get_or_create_storage(
+            &storage_pool,
+            &config.source.path,
+            config.source.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
         // Create destination storage provider for uploads
-        let destination_storage = create_storage(&storage_pool, &config.sink).await?;
+        let destination_storage = get_or_create_storage(
+            &storage_pool,
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
         // Create state tracker based on configuration
         let state_tracker: Box<dyn StateTracker> = if config.source.use_watermark {
             // Checkpoint manager needs its own storage provider (not pooled)
-            let checkpoint_storage = create_storage(&None, &config.sink).await?;
+            let checkpoint_storage = get_or_create_storage(
+                &None,
+                &config.sink.table_uri,
+                config.sink.storage_options.clone(),
+            )
+            .await
+            .context(StorageSnafu)?;
             let checkpoint_manager =
                 CheckpointManager::new(checkpoint_storage, key.id().to_string());
             Box::new(WatermarkTracker::new(checkpoint_manager))

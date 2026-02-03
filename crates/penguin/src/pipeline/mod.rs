@@ -14,7 +14,8 @@ use tracing::info;
 
 use blizzard_core::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_core::{
-    FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, random_jitter,
+    FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, get_or_create_storage,
+    random_jitter,
 };
 
 use crate::emit;
@@ -129,23 +130,13 @@ impl Processor {
         storage_pool: Option<StoragePoolRef>,
     ) -> Result<Self, PipelineError> {
         // Create sink storage provider - use pooled if available
-        let sink_storage = if let Some(pool) = &storage_pool {
-            pool.get_or_create(
-                &table_config.table_uri,
-                table_config.storage_options.clone(),
-            )
-            .await
-            .context(StorageSnafu)?
-        } else {
-            Arc::new(
-                StorageProvider::for_url_with_options(
-                    &table_config.table_uri,
-                    table_config.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu)?,
-            )
-        };
+        let sink_storage = get_or_create_storage(
+            &storage_pool,
+            &table_config.table_uri,
+            table_config.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu)?;
 
         // Create file reader for discovering uncommitted parquet files
         let file_reader = IncomingReader::new(

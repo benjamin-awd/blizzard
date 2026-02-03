@@ -24,14 +24,6 @@ use blizzard_core::error::ConfigError;
 
 use crate::pipeline::Pipeline;
 
-/// Trait for config types that provide storage connection details.
-pub trait StorageSource: Send + Sync {
-    /// The URL/path for this storage location.
-    fn url(&self) -> &str;
-    /// Storage options (credentials, region, etc.).
-    fn storage_options(&self) -> &HashMap<String, String>;
-}
-
 /// Configuration for the input source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,15 +71,6 @@ fn default_max_concurrent_files() -> usize {
 
 fn default_poll_interval() -> u64 {
     60
-}
-
-impl StorageSource for SourceConfig {
-    fn url(&self) -> &str {
-        &self.path
-    }
-    fn storage_options(&self) -> &HashMap<String, String> {
-        &self.storage_options
-    }
 }
 
 impl SourceConfig {
@@ -139,15 +122,6 @@ pub struct SinkConfig {
 
 fn default_max_concurrent_uploads() -> usize {
     4
-}
-
-impl StorageSource for SinkConfig {
-    fn url(&self) -> &str {
-        &self.table_uri
-    }
-    fn storage_options(&self) -> &HashMap<String, String> {
-        &self.storage_options
-    }
 }
 
 fn default_file_size_mb() -> usize {

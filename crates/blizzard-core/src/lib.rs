@@ -43,7 +43,7 @@ pub use partition::PartitionExtractor;
 pub use polling::{IterationResult, PollingProcessor, run_polling_loop};
 pub use resource::{StoragePool, StoragePoolRef};
 pub use signal::shutdown_signal;
-pub use storage::{StorageProvider, StorageProviderRef};
+pub use storage::{StorageProvider, StorageProviderRef, get_or_create_storage};
 pub use topology::{
     Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError, TaskOutput,
     TaskResult, random_jitter, run_pipelines,
