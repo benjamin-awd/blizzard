@@ -95,11 +95,11 @@ pub async fn run_pipeline(config: Config) -> Result<MultiTableStats, PipelineErr
         .map(|n| Arc::new(Semaphore::new(n)));
 
     // 4. Create shared storage pool if connection pooling is enabled
-    let storage_pool = if config.global.connection_pooling {
-        Some(Arc::new(StoragePool::new()))
-    } else {
-        None
-    };
+    let storage_pool = config
+        .global
+        .connection_pooling
+        .then(|| Arc::new(StoragePool::new()));
+
 
     // 5. Get jitter settings
     let jitter_max_secs = config.global.poll_jitter_secs;
