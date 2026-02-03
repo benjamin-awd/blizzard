@@ -104,6 +104,41 @@ impl Resource {
     }
 }
 
+impl Resource {
+    /// Append formatted error messages for resource conflicts to an error list.
+    ///
+    /// This is a helper for config validation that formats conflicts from
+    /// [`Resource::conflicts`] into human-readable error strings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use blizzard_core::config::Resource;
+    ///
+    /// let mut errors = Vec::new();
+    /// let components = vec![
+    ///     ("table_a", vec![Resource::directory("gs://bucket/staging")]),
+    ///     ("table_b", vec![Resource::directory("gs://bucket/staging")]),
+    /// ];
+    /// let conflicts = Resource::conflicts(components);
+    /// Resource::extend_errors(&mut errors, conflicts);
+    ///
+    /// assert_eq!(errors.len(), 1);
+    /// assert!(errors[0].contains("Resource conflict"));
+    /// ```
+    pub fn extend_errors<K: fmt::Debug>(
+        errors: &mut Vec<String>,
+        conflicts: HashMap<Resource, HashSet<K>>,
+    ) {
+        for (resource, keys) in conflicts {
+            let keys_list: Vec<_> = keys.iter().collect();
+            errors.push(format!(
+                "Resource conflict: {resource} claimed by {keys_list:?}"
+            ));
+        }
+    }
+}
+
 impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

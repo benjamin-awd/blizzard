@@ -186,13 +186,7 @@ impl Mergeable for Config {
                 .iter()
                 .map(|(key, config)| (key.id().to_string(), config.resources())),
         );
-
-        for (resource, keys) in conflicts {
-            let keys_list: Vec<_> = keys.iter().collect();
-            errors.push(format!(
-                "Resource conflict: {resource} claimed by {keys_list:?}"
-            ));
-        }
+        Resource::extend_errors(&mut errors, conflicts);
 
         if errors.is_empty() {
             Ok(())
