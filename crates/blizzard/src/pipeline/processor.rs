@@ -57,7 +57,7 @@ impl Iteration {
         ctx: &ProcessorContext,
         config: &PipelineConfig,
         shutdown: CancellationToken,
-        pipeline_key: &str,
+        key: &str,
     ) -> Result<Self, PipelineError> {
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(config.sink.file_size_mb)
@@ -69,7 +69,7 @@ impl Iteration {
             writer_config,
             ctx.storage_writer.clone(),
             ctx.partition_extractor.clone(),
-            pipeline_key.to_string(),
+            key.to_string(),
         )?;
 
         let download_task = DownloadTask::spawn(
@@ -77,12 +77,11 @@ impl Iteration {
             ctx.source_storage.clone(),
             shutdown,
             config.source.max_concurrent_files,
-            pipeline_key.to_string(),
+            key.to_string(),
         );
 
         let max_in_flight = config.source.max_concurrent_files * 2;
-        let downloader =
-            Downloader::new(ctx.reader.clone(), max_in_flight, pipeline_key.to_string());
+        let downloader = Downloader::new(ctx.reader.clone(), max_in_flight, key.to_string());
 
         Ok(Self {
             writer,
@@ -119,9 +118,9 @@ impl Iteration {
 /// Each pipeline runs its own `Processor` instance.
 pub(super) struct Processor {
     /// Identifier for this pipeline (used in logging and metrics).
-    pipeline_key: PipelineKey,
+    key: PipelineKey,
     /// Configuration for this specific pipeline.
-    pipeline_config: PipelineConfig,
+    config: PipelineConfig,
     /// Runtime dependencies for reading and writing.
     ctx: ProcessorContext,
     /// Tracks which source files have been processed.
@@ -134,63 +133,61 @@ pub(super) struct Processor {
 
 impl Processor {
     pub async fn new(
-        pipeline_key: PipelineKey,
-        pipeline_config: PipelineConfig,
+        key: PipelineKey,
+        config: PipelineConfig,
         storage_pool: Option<StoragePoolRef>,
         shutdown: CancellationToken,
     ) -> Result<Self, PipelineError> {
         // Create source storage provider - use pooled if available
-        let source_storage = create_storage(&storage_pool, &pipeline_config.source).await?;
+        let source_storage = create_storage(&storage_pool, &config.source).await?;
 
         // Create storage writer (writes parquet to destination)
         let storage_writer = StorageWriter::new(
-            &pipeline_config.sink.table_uri,
-            pipeline_config.sink.storage_options.clone(),
-            pipeline_key.id().to_string(),
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
+            key.id().to_string(),
         )
         .await?;
 
         // Create state tracker based on configuration
-        let state_tracker: Box<dyn StateTracker> = if pipeline_config.source.use_watermark {
+        let state_tracker: Box<dyn StateTracker> = if config.source.use_watermark {
             // Checkpoint manager needs its own storage provider (not pooled)
-            let checkpoint_storage = create_storage(&None, &pipeline_config.sink).await?;
+            let checkpoint_storage = create_storage(&None, &config.sink).await?;
             let checkpoint_manager =
-                CheckpointManager::new(checkpoint_storage, pipeline_key.id().to_string());
+                CheckpointManager::new(checkpoint_storage, key.id().to_string());
             Box::new(WatermarkTracker::new(checkpoint_manager))
         } else {
             Box::new(HashMapTracker::new())
         };
 
         // Get schema - either from explicit config or by inference
-        let schema = if pipeline_config.schema.should_infer() {
-            let prefixes = pipeline_config.source.date_prefixes();
+        let schema = if config.schema.should_infer() {
+            let prefixes = config.source.date_prefixes();
             infer_schema_from_source(
                 &source_storage,
-                pipeline_config.source.compression,
+                config.source.compression,
                 prefixes.as_deref(),
-                pipeline_key.as_ref(),
+                key.as_ref(),
             )
             .await?
         } else {
-            pipeline_config.schema.to_arrow_schema()
+            config.schema.to_arrow_schema()
         };
 
         // Create NDJSON reader
-        let reader_config = NdjsonReaderConfig::new(
-            pipeline_config.source.batch_size,
-            pipeline_config.source.compression,
-        );
+        let reader_config =
+            NdjsonReaderConfig::new(config.source.batch_size, config.source.compression);
         let reader = Arc::new(NdjsonReader::new(
             schema.clone(),
             reader_config,
-            pipeline_key.id().to_string(),
+            key.id().to_string(),
         ));
 
         // Set up DLQ if configured
-        let dlq = DeadLetterQueue::from_config(&pipeline_config.error_handling).await?;
+        let dlq = DeadLetterQueue::from_config(&config.error_handling).await?;
 
         // Create partition extractor from config
-        let partition_columns = pipeline_config
+        let partition_columns = config
             .sink
             .partition_by
             .as_ref()
@@ -209,12 +206,12 @@ impl Processor {
 
         Ok(Self {
             failure_tracker: FailureTracker::new(
-                pipeline_config.error_handling.max_failures,
+                config.error_handling.max_failures,
                 dlq.map(Arc::new),
-                pipeline_key.id().to_string(),
+                key.id().to_string(),
             ),
-            pipeline_key,
-            pipeline_config,
+            key,
+            config,
             ctx,
             state_tracker,
             shutdown,
@@ -228,13 +225,13 @@ impl PollingProcessor for Processor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        let prefixes = self.pipeline_config.source.date_prefixes();
+        let prefixes = self.config.source.date_prefixes();
 
         if cold_start {
             match self.state_tracker.init().await? {
-                Some(msg) => info!(target = %self.pipeline_key, "{}", msg),
+                Some(msg) => info!(target = %self.key, "{}", msg),
                 None => info!(
-                    target = %self.pipeline_key,
+                    target = %self.key,
                     mode = self.state_tracker.mode_name(),
                     "Cold start - beginning fresh processing"
                 ),
@@ -246,7 +243,7 @@ impl PollingProcessor for Processor {
             .list_pending(
                 &self.ctx.source_storage,
                 prefixes.as_deref(),
-                self.pipeline_key.as_ref(),
+                self.key.as_ref(),
             )
             .await?;
 
@@ -254,7 +251,7 @@ impl PollingProcessor for Processor {
             return Ok(None);
         }
 
-        info!(target = %self.pipeline_key, files = pending_files.len(), "Found files to process");
+        info!(target = %self.key, files = pending_files.len(), "Found files to process");
 
         Ok(Some(pending_files))
     }
@@ -263,9 +260,9 @@ impl PollingProcessor for Processor {
         let iteration = Iteration::new(
             state,
             &self.ctx,
-            &self.pipeline_config,
+            &self.config,
             self.shutdown.clone(),
-            self.pipeline_key.id(),
+            self.key.id(),
         )?;
 
         let (result, writer) = iteration
@@ -290,13 +287,13 @@ impl Processor {
 
         if let Err(e) = self.state_tracker.save().await {
             warn!(
-                target = %self.pipeline_key,
+                target = %self.key,
                 error = %e,
                 "Failed to save state"
             );
         } else {
             debug!(
-                target = %self.pipeline_key,
+                target = %self.key,
                 mode = self.state_tracker.mode_name(),
                 "Saved state"
             );
