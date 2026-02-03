@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_prefixes};
 
+use super::compression::CompressionCodecExt;
 use crate::config::CompressionFormat;
 use crate::error::InferenceError;
 
@@ -104,35 +105,10 @@ pub fn infer_schema_from_bytes(
 
 /// Decompress bytes based on compression format.
 fn decompress(bytes: &Bytes, compression: CompressionFormat) -> Result<Vec<u8>, InferenceError> {
-    match compression {
-        CompressionFormat::Gzip => {
-            use std::io::Read;
-            let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
-            let mut buf = Vec::new();
-            decoder
-                .read_to_end(&mut buf)
-                .map_err(|e| InferenceError::Decompression {
-                    message: e.to_string(),
-                })?;
-            Ok(buf)
-        }
-        CompressionFormat::Zstd => {
-            use std::io::Read;
-            let mut decoder = zstd::stream::Decoder::new(&bytes[..]).map_err(|e| {
-                InferenceError::Decompression {
-                    message: e.to_string(),
-                }
-            })?;
-            let mut buf = Vec::new();
-            decoder
-                .read_to_end(&mut buf)
-                .map_err(|e| InferenceError::Decompression {
-                    message: e.to_string(),
-                })?;
-            Ok(buf)
-        }
-        CompressionFormat::None => Ok(bytes.to_vec()),
-    }
+    let codec = compression.codec();
+    codec
+        .decompress_bytes(bytes)
+        .map_err(|e| InferenceError::Decompression { message: e.message })
 }
 
 /// Coerce schema to be Delta Lake compatible.

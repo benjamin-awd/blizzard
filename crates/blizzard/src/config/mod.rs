@@ -94,6 +94,21 @@ pub enum CompressionFormat {
     None,
 }
 
+impl CompressionFormat {
+    /// Get the compression codec for this format.
+    ///
+    /// Returns a boxed codec that implements the [`CompressionCodec`] trait,
+    /// allowing compression handling to be abstracted away from callers.
+    pub fn codec(&self) -> Box<dyn crate::source::CompressionCodec> {
+        use crate::source::{GzipCodec, NoopCodec, ZstdCodec};
+        match self {
+            CompressionFormat::Gzip => Box::new(GzipCodec),
+            CompressionFormat::Zstd => Box::new(ZstdCodec),
+            CompressionFormat::None => Box::new(NoopCodec),
+        }
+    }
+}
+
 /// Configuration for the sink Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

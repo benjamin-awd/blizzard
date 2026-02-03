@@ -3,11 +3,15 @@
 //! Provides a unified interface for listing and reading compressed NDJSON files
 //! from various storage backends.
 
+mod compression;
 mod inference;
 mod listing;
 mod reader;
 mod traits;
 
+pub use compression::{
+    CompressionCodec, CompressionCodecExt, DecompressionError, GzipCodec, NoopCodec, ZstdCodec,
+};
 pub use inference::infer_schema_from_source;
 pub use listing::list_ndjson_files_above_watermark;
 pub use reader::{NdjsonReader, NdjsonReaderConfig};

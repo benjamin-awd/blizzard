@@ -6,14 +6,12 @@
 use bytes::Bytes;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::arrow::json::ReaderBuilder;
-use snafu::prelude::*;
-use std::io::{BufRead, BufReader, Cursor};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::debug;
 
 use crate::config::CompressionFormat;
-use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError, ZstdDecompressionSnafu};
+use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError};
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
@@ -76,19 +74,15 @@ impl NdjsonReader {
         let start = Instant::now();
         let compressed_len = compressed.len();
 
-        // Create a streaming reader based on compression format.
+        // Create a streaming reader using the compression codec.
         // This avoids loading the entire decompressed file into memory.
-        let reader: Box<dyn BufRead> = match self.config.compression {
-            CompressionFormat::Gzip => Box::new(BufReader::new(flate2::read::GzDecoder::new(
-                &compressed[..],
-            ))),
-            CompressionFormat::Zstd => Box::new(BufReader::new(
-                zstd::stream::Decoder::new(&compressed[..]).context(ZstdDecompressionSnafu {
-                    path: path.to_string(),
-                })?,
-            )),
-            CompressionFormat::None => Box::new(Cursor::new(compressed)),
-        };
+        let codec = self.config.compression.codec();
+        let reader = codec
+            .create_reader(&compressed)
+            .map_err(|e| ReaderError::ZstdDecompression {
+                path: path.to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e.message),
+            })?;
 
         // Build streaming JSON reader that processes data as it's decompressed
         let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
