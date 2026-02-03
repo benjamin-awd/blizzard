@@ -135,8 +135,10 @@ If Blizzard crashes repeatedly, orphaned Parquet files may accumulate. These can
 Configure Penguin's poll interval based on latency requirements:
 
 ```yaml
-source:
-  poll_interval_secs: 10  # Check for new files every 10 seconds
+tables:
+  events:
+    table_uri: "s3://bucket/events"
+    poll_interval_secs: 10  # Check for new files every 10 seconds
 ```
 
 Lower intervals reduce commit latency but increase API calls.

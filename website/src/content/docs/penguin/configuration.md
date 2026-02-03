@@ -9,11 +9,17 @@ This page provides the complete configuration reference for Penguin. For an over
 
 ### Table Configuration
 
+Penguin supports multiple tables via the `tables` map. Each table is identified by a unique key.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `table_uri` | string | **required** | URI of the Delta Lake table. Penguin scans for uncommitted parquet files in this directory. |
 | `poll_interval_secs` | integer | `10` | Interval in seconds between polling for new files |
-| `partition_by` | array | `[]` | Columns to partition the Delta table by |
+| `partition_by` | object | - | Partition configuration with strftime-style prefix template |
+| `partition_by.prefix_template` | string | - | strftime-style template (e.g., `"date=%Y-%m-%d/hour=%H"`) |
+| `partition_filter` | object | - | Partition filter for cold start when no watermark exists |
+| `partition_filter.prefix_template` | string | - | strftime-style template for date-based filtering |
+| `partition_filter.lookback` | integer | `0` | Number of units to look back (days or hours depending on template) |
 | `delta_checkpoint_interval` | integer | `10` | Number of commits between Delta checkpoints |
 | `schema_evolution` | string | `"merge"` | Schema evolution mode: `strict`, `merge`, or `overwrite`. See [Schema Evolution](./schema-evolution/) |
 | `max_concurrent_uploads` | integer | `4` | Maximum concurrent file uploads |
@@ -21,6 +27,12 @@ This page provides the complete configuration reference for Penguin. For an over
 | `part_size_mb` | integer | `10` | Part size for multipart uploads in MB |
 | `min_multipart_size_mb` | integer | `100` | Minimum file size to trigger multipart upload |
 | `storage_options` | map | `{}` | Cloud provider credentials and options |
+
+### Global Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `total_concurrency` | integer | - | Limit total concurrent operations across all tables |
 
 ### Metrics Configuration
 
@@ -32,38 +44,79 @@ This page provides the complete configuration reference for Penguin. For an over
 ## Full Configuration Example
 
 ```yaml
-# Source: Delta Lake table to commit to
-source:
-  table_uri: "s3://my-bucket/delta-tables/events"
-  poll_interval_secs: 10
-  partition_by:
-    - date
-    - region
-  delta_checkpoint_interval: 10
-  schema_evolution: merge  # Allow adding new nullable columns
-  max_concurrent_uploads: 4
-  max_concurrent_parts: 8
-  part_size_mb: 10
-  min_multipart_size_mb: 100
-  storage_options:
-    AWS_REGION: "us-east-1"
+# Tables: Named Delta Lake tables to commit to
+tables:
+  events:
+    table_uri: "s3://my-bucket/delta-tables/events"
+    poll_interval_secs: 10
+    partition_by:
+      prefix_template: "date=%Y-%m-%d/region=%s"
+    partition_filter:
+      prefix_template: "date=%Y-%m-%d"
+      lookback: 7  # Scan last 7 days on cold start
+    delta_checkpoint_interval: 10
+    schema_evolution: merge
+    storage_options:
+      AWS_REGION: "us-east-1"
+
+  users:
+    table_uri: "s3://my-bucket/delta-tables/users"
+    poll_interval_secs: 60
+    storage_options:
+      AWS_REGION: "us-east-1"
+
+# Global: Shared settings
+global:
+  total_concurrency: 8
 
 # Metrics: Prometheus endpoint
 metrics:
   enabled: true
-  address: "0.0.0.0:9091"  # Use different port than Blizzard
+  address: "0.0.0.0:9091"
 ```
+
+## Partition Configuration
+
+### partition_by
+
+The `partition_by` option uses strftime-style templates to define how output files are partitioned:
+
+```yaml
+tables:
+  events:
+    table_uri: "s3://bucket/events"
+    partition_by:
+      prefix_template: "date=%Y-%m-%d/hour=%H"
+```
+
+Partition columns are automatically extracted from the template. For example, `"date=%Y-%m-%d/hour=%H"` creates partitions with columns `date` and `hour`.
+
+### partition_filter
+
+The `partition_filter` option enables efficient date-based listing during cold starts (when no watermark exists yet):
+
+```yaml
+tables:
+  events:
+    table_uri: "s3://bucket/events"
+    partition_filter:
+      prefix_template: "date=%Y-%m-%d"
+      lookback: 7  # Scan last 7 days
+```
+
+This avoids scanning the entire table directory on first startup by limiting the scan to recent partitions.
 
 ## Environment Variable Interpolation
 
 Like Blizzard, Penguin supports environment variable interpolation:
 
 ```yaml
-source:
-  table_uri: "${DELTA_TABLE_URI}"
-  storage_options:
-    AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
-    AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+tables:
+  events:
+    table_uri: "${DELTA_TABLE_URI}"
+    storage_options:
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
 ```
 
 Syntax:

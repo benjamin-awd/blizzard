@@ -20,9 +20,10 @@ Penguin provides three schema evolution modes, configured via the `schema_evolut
 Merge mode is the safe default that allows your schema to evolve without breaking existing data:
 
 ```yaml
-source:
-  table_uri: "s3://my-bucket/delta-tables/events"
-  schema_evolution: merge  # This is the default
+tables:
+  events:
+    table_uri: "s3://my-bucket/delta-tables/events"
+    schema_evolution: merge  # This is the default
 ```
 
 In merge mode:
@@ -38,9 +39,10 @@ In merge mode:
 Strict mode rejects any schema changes, useful when you need to guarantee schema stability:
 
 ```yaml
-source:
-  table_uri: "s3://my-bucket/delta-tables/events"
-  schema_evolution: strict
+tables:
+  events:
+    table_uri: "s3://my-bucket/delta-tables/events"
+    schema_evolution: strict
 ```
 
 Use this when:
@@ -53,9 +55,10 @@ Use this when:
 Overwrite mode replaces the schema entirely with the incoming schema:
 
 ```yaml
-source:
-  table_uri: "s3://my-bucket/delta-tables/events"
-  schema_evolution: overwrite  # Use with caution!
+tables:
+  events:
+    table_uri: "s3://my-bucket/delta-tables/events"
+    schema_evolution: overwrite  # Use with caution!
 ```
 
 :::caution

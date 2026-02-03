@@ -66,7 +66,28 @@ Syntax:
 | `compression` | string | `gzip` | Compression format: `gzip`, `zstd`, `none` |
 | `batch_size` | integer | `8192` | Records per Arrow batch |
 | `max_concurrent_files` | integer | `4` | Concurrent file downloads |
+| `poll_interval_secs` | integer | `60` | Polling interval for watermark mode |
+| `use_watermark` | boolean | `false` | Enable watermark-based polling |
+| `partition_filter` | object | none | Partition filter for efficient listing (see below) |
 | `storage_options` | map | `{}` | Cloud provider credentials and options |
+
+### Partition Filter
+
+When using watermark mode with partitioned data, `partition_filter` enables efficient date-based listing:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `prefix_template` | string | **required** | strftime-style template (e.g., `"date=%Y-%m-%d"`) |
+| `lookback` | integer | `0` | Number of time units to look back |
+
+```yaml
+source:
+  path: "gs://bucket/raw"
+  use_watermark: true
+  partition_filter:
+    prefix_template: "date=%Y-%m-%d"
+    lookback: 2  # Scan last 2 days
+```
 
 ### Source Storage Options
 
@@ -110,11 +131,29 @@ storage_options:
 | `inactivity_timeout_secs` | integer | none | Roll file after inactivity |
 | `rollover_timeout_secs` | integer | none | Max file open duration |
 | `compression` | string | `snappy` | Parquet compression codec |
+| `partition_by` | object | none | Partition configuration (see below) |
 | `part_size_mb` | integer | `32` | Multipart upload part size |
 | `min_multipart_size_mb` | integer | `5` | Minimum size for multipart |
 | `max_concurrent_uploads` | integer | `4` | Concurrent file uploads |
 | `max_concurrent_parts` | integer | `8` | Concurrent parts per upload |
 | `storage_options` | map | `{}` | Cloud provider credentials |
+
+### Partition By
+
+Configures how output Parquet files are partitioned using a strftime-style prefix template:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix_template` | string | strftime-style template (e.g., `"date=%Y-%m-%d/hour=%H"`) |
+
+Partition columns are automatically extracted from the template. For example, `"date=%Y-%m-%d/hour=%H"` creates directory structure `date=2024-01-01/hour=12/` with partition columns `date` and `hour`.
+
+```yaml
+sink:
+  path: "gs://bucket/delta/events"
+  partition_by:
+    prefix_template: "date=%Y-%m-%d"
+```
 
 ### Parquet Compression Codecs
 
@@ -218,6 +257,11 @@ source:
   compression: gzip
   batch_size: 8192
   max_concurrent_files: 4
+  use_watermark: true
+  poll_interval_secs: 60
+  partition_filter:
+    prefix_template: "date=%Y-%m-%d"
+    lookback: 2
   storage_options:
     AWS_REGION: "us-east-1"
 
@@ -229,6 +273,8 @@ sink:
   compression: snappy
   inactivity_timeout_secs: 60
   rollover_timeout_secs: 300
+  partition_by:
+    prefix_template: "date=%Y-%m-%d"
   max_concurrent_uploads: 4
   part_size_mb: 32
   min_multipart_size_mb: 5

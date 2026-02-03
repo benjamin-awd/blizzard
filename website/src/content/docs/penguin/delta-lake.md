@@ -64,8 +64,9 @@ Penguin performs the following steps to commit files to Delta Lake:
 Penguin periodically scans the table directory for uncommitted files:
 
 ```yaml
-source:
-  poll_interval_secs: 10  # Check every 10 seconds (default)
+tables:
+  events:
+    poll_interval_secs: 10  # Check every 10 seconds (default)
 ```
 
 ### Delta Checkpoints
@@ -73,8 +74,9 @@ source:
 Delta Lake creates checkpoint files to speed up log replay:
 
 ```yaml
-source:
-  delta_checkpoint_interval: 10  # Checkpoint every 10 commits (default)
+tables:
+  events:
+    delta_checkpoint_interval: 10  # Checkpoint every 10 commits (default)
 ```
 
 ## Schema Evolution
@@ -82,8 +84,9 @@ source:
 Penguin automatically handles schema changes in incoming Parquet files. By default, it uses **merge mode** which allows adding new nullable columns while rejecting incompatible changes.
 
 ```yaml
-source:
-  schema_evolution: merge  # strict, merge (default), or overwrite
+tables:
+  events:
+    schema_evolution: merge  # strict, merge (default), or overwrite
 ```
 
 For details on how schema evolution works and the available modes, see [Schema Evolution](./schema-evolution/).
@@ -93,16 +96,19 @@ For details on how schema evolution works and the available modes, see [Schema E
 ### Basic Configuration
 
 ```yaml
-source:
-  table_uri: "s3://my-bucket/delta-tables/events"
-  poll_interval_secs: 10
-  partition_by:
-    - date
-    - region
-  delta_checkpoint_interval: 10
-  schema_evolution: merge
-  storage_options:
-    AWS_REGION: "us-east-1"
+tables:
+  events:
+    table_uri: "s3://my-bucket/delta-tables/events"
+    poll_interval_secs: 10
+    partition_by:
+      prefix_template: "date=%Y-%m-%d/region=%s"
+    partition_filter:
+      prefix_template: "date=%Y-%m-%d"
+      lookback: 7  # Scan last 7 days on cold start
+    delta_checkpoint_interval: 10
+    schema_evolution: merge
+    storage_options:
+      AWS_REGION: "us-east-1"
 
 metrics:
   enabled: true
