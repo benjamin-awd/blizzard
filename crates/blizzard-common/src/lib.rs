@@ -22,6 +22,7 @@ pub mod resource;
 pub mod signal;
 pub mod storage;
 pub mod topology;
+pub mod tracing;
 pub mod types;
 pub mod watermark;
 
@@ -44,6 +45,7 @@ pub use topology::{
     PiecesBuilder, Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError,
     TaskOutput, TaskResult, random_jitter, run_pipelines,
 };
+pub use tracing::init_tracing;
 pub use types::FinishedFile;
 pub use watermark::{
     FileListingConfig, generate_prefixes, list_files_above_watermark, list_files_cold_start,

@@ -26,6 +26,8 @@ snafu = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-limit = { workspace = true }
 
 # URL parsing
 url = { workspace = true }

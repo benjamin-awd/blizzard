@@ -29,5 +29,5 @@ pub use pipeline::BlizzardPipeline;
 // Re-export from blizzard-common
 pub use blizzard_common::{
     KB, MB, MetricsConfig, ParquetCompression, PipelineContext, StorageProvider,
-    StorageProviderRef, init_metrics, run_pipelines, shutdown_signal,
+    StorageProviderRef, init_metrics, init_tracing, run_pipelines, shutdown_signal,
 };
