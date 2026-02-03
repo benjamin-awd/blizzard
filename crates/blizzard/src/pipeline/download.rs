@@ -16,7 +16,7 @@ use blizzard_core::metrics::events::{
 };
 use blizzard_core::polling::IterationResult;
 
-use super::sink_writer::SinkWriter;
+use super::sink::Sink;
 use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::StateTracker;
 use crate::dlq::FailureTracker;
@@ -49,7 +49,7 @@ impl Downloader {
     pub async fn run(
         &self,
         mut download_task: DownloadTask,
-        sink_writer: &mut SinkWriter,
+        sink: &mut Sink,
         state_tracker: &mut dyn StateTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
@@ -78,7 +78,7 @@ impl Downloader {
                 Some(result) = processing.next(), if !processing.is_empty() => {
                     self.handle_processed_file(
                         result,
-                        sink_writer,
+                        sink,
                         state_tracker,
                         failure_tracker,
                     ).await?;
@@ -112,13 +112,13 @@ impl Downloader {
     async fn handle_processed_file(
         &self,
         result: Result<ProcessedFile, PipelineError>,
-        sink_writer: &mut SinkWriter,
+        sink: &mut Sink,
         state_tracker: &mut dyn StateTracker,
         failure_tracker: &mut FailureTracker,
     ) -> Result<(), PipelineError> {
         match result {
             Ok(ProcessedFile { path, batches }) => {
-                sink_writer.write_file_batches(&path, batches).await?;
+                sink.write_file_batches(&path, batches).await?;
                 state_tracker.mark_processed(&path);
                 emit!(FileProcessed {
                     status: FileStatus::Success,

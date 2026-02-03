@@ -1,4 +1,4 @@
-//! High-level sink writer that combines batch writing with async uploads.
+//! High-level sink that combines batch writing with async uploads.
 
 use std::path::Path;
 
@@ -11,20 +11,20 @@ use blizzard_core::{PartitionExtractor, emit};
 
 use super::tasks::UploadTask;
 use crate::error::PipelineError;
-use crate::sink::{ParquetWriter, ParquetWriterConfig};
+use crate::parquet::{ParquetWriter, ParquetWriterConfig};
 
-/// High-level writer that handles the full output path: serialization and storage.
+/// High-level sink that handles the full output path: serialization and storage.
 ///
 /// Combines batch writing (ParquetWriter), partition extraction, and async
 /// upload (UploadTask) into a single interface.
-pub(super) struct SinkWriter {
+pub(super) struct Sink {
     batch_writer: ParquetWriter,
     upload_task: UploadTask,
     partition_extractor: PartitionExtractor,
     pipeline_id: String,
 }
 
-impl SinkWriter {
+impl Sink {
     /// Create a new sink writer.
     pub fn new(
         schema: SchemaRef,
@@ -189,7 +189,7 @@ mod tests {
         let partition_extractor = PartitionExtractor::new(vec!["date".into()]);
         let writer_config = ParquetWriterConfig::default();
 
-        let mut writer = SinkWriter::new(
+        let mut writer = Sink::new(
             test_schema(),
             writer_config,
             upload_task,
@@ -224,7 +224,7 @@ mod tests {
         let partition_extractor = PartitionExtractor::all();
         let writer_config = ParquetWriterConfig::default();
 
-        let mut writer = SinkWriter::new(
+        let mut writer = Sink::new(
             test_schema(),
             writer_config,
             upload_task,

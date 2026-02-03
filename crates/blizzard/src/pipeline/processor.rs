@@ -14,14 +14,14 @@ use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
 
 use super::create_storage;
 use super::download::Downloader;
-use super::sink_writer::SinkWriter;
+use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::PipelineError;
-use crate::sink::ParquetWriterConfig;
+use crate::parquet::ParquetWriterConfig;
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
 /// Resolve the Arrow schema from explicit config or by inference from source files.
@@ -66,7 +66,7 @@ pub(super) struct ProcessorContext {
 /// Created fresh for each iteration, isolating per-iteration components
 /// (writer, downloader, download task) from the long-lived processor state.
 struct Iteration {
-    writer: SinkWriter,
+    sink: Sink,
     downloader: Downloader,
     download_task: DownloadTask,
 }
@@ -93,7 +93,7 @@ impl Iteration {
             key.to_string(),
         );
 
-        let writer = SinkWriter::new(
+        let sink = Sink::new(
             ctx.schema.clone(),
             writer_config,
             upload_task,
@@ -113,7 +113,7 @@ impl Iteration {
         let downloader = Downloader::new(ctx.reader.clone(), max_in_flight, key.to_string());
 
         Ok(Self {
-            writer,
+            sink,
             downloader,
             download_task,
         })
@@ -125,20 +125,20 @@ impl Iteration {
         state_tracker: &mut dyn StateTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
-    ) -> Result<(IterationResult, SinkWriter), PipelineError> {
+    ) -> Result<(IterationResult, Sink), PipelineError> {
         let result = self
             .downloader
             .run(
                 self.download_task,
-                &mut self.writer,
+                &mut self.sink,
                 state_tracker,
                 failure_tracker,
                 shutdown,
             )
             .await;
 
-        // Return the writer so the processor can finalize it
-        Ok((result?, self.writer))
+        // Return the sink so the processor can finalize it
+        Ok((result?, self.sink))
     }
 }
 
@@ -278,7 +278,7 @@ impl PollingProcessor for Processor {
             self.key.id(),
         )?;
 
-        let (result, writer) = iteration
+        let (result, sink) = iteration
             .run(
                 self.state_tracker.as_mut(),
                 &mut self.failure_tracker,
@@ -286,8 +286,8 @@ impl PollingProcessor for Processor {
             )
             .await?;
 
-        // Finalize iteration: flush writer, DLQ, and save state
-        writer.finalize().await?;
+        // Finalize iteration: flush sink, DLQ, and save state
+        sink.finalize().await?;
         self.failure_tracker.finalize_dlq().await;
 
         if let Err(e) = self.state_tracker.save().await {

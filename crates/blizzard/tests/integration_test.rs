@@ -221,7 +221,7 @@ mod checkpoint_tests {
 mod parquet_tests {
     use super::*;
     use blizzard::config::ParquetCompression;
-    use blizzard::sink::{ParquetWriter, ParquetWriterConfig};
+    use blizzard::parquet::{ParquetWriter, ParquetWriterConfig};
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -281,7 +281,7 @@ mod parquet_tests {
 }
 
 mod sink_tests {
-    use blizzard::sink::FinishedFile;
+    use blizzard::parquet::FinishedFile;
 
     #[test]
     fn test_finished_file() {

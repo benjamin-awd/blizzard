@@ -11,8 +11,8 @@ pub mod checkpoint;
 pub mod config;
 pub mod dlq;
 pub mod error;
+pub mod parquet;
 pub mod pipeline;
-pub mod sink;
 pub mod source;
 
 /// Re-export storage module from blizzard-core for convenience
