@@ -10,7 +10,8 @@ use tracing::info;
 use blizzard_core::AppConfig;
 pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
-    ParquetCompression, Resource, interpolate, load_from_paths,
+    ParquetCompression, PartitionByConfig, PartitionFilterConfig, Resource, interpolate,
+    load_from_paths,
 };
 use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
@@ -22,36 +23,6 @@ use blizzard_core::error::ConfigError;
 
 fn default_poll_interval() -> u64 {
     10
-}
-
-/// Configuration for a partition filter used during cold start.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PartitionFilterConfig {
-    /// strftime-style prefix template (e.g., "date=%Y-%m-%d").
-    pub prefix_template: String,
-    /// Number of units to look back (days or hours depending on template).
-    #[serde(default)]
-    pub lookback: u32,
-}
-
-/// Configuration for partitioning output files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PartitionByConfig {
-    /// strftime-style prefix template (e.g., "date=%Y-%m-%d/hour=%H").
-    pub prefix_template: String,
-}
-
-impl PartitionByConfig {
-    /// Extract partition column names from the template.
-    /// e.g., "date=%Y-%m-%d/hour=%H" -> ["date", "hour"]
-    pub fn partition_columns(&self) -> Vec<String> {
-        self.prefix_template
-            .split('/')
-            .filter_map(|segment| segment.find('=').map(|idx| segment[..idx].to_string()))
-            .collect()
-    }
 }
 
 /// Configuration for a Delta table.
