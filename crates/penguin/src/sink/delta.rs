@@ -9,6 +9,7 @@
 //! The checkpoint state is embedded in the `Txn.app_id` field as base64-encoded JSON,
 //! and committed atomically with Add actions in a single Delta commit.
 
+use async_trait::async_trait;
 use base64::Engine;
 use deltalake::DeltaTable;
 use deltalake::arrow::datatypes::{Schema, SchemaRef};
@@ -16,12 +17,15 @@ use deltalake::kernel::Action;
 use deltalake::operations::create::CreateBuilder;
 use deltalake::protocol::SaveMode;
 use object_store::path::Path;
+use std::collections::HashSet;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use url::Url;
 
 use blizzard_core::FinishedFile;
 use blizzard_core::storage::{BackendConfig, StorageProvider};
+
+use super::TableSink;
 
 use crate::metrics::events::{CheckpointStateSize, DeltaCommitCompleted, InternalEvent};
 
@@ -685,6 +689,61 @@ async fn commit_to_delta_with_checkpoint(
     .emit();
 
     Ok(version)
+}
+
+#[async_trait]
+impl TableSink for DeltaSink {
+    async fn commit_files_with_checkpoint(
+        &mut self,
+        files: &[FinishedFile],
+        checkpoint: &CheckpointState,
+    ) -> Result<Option<i64>, DeltaError> {
+        DeltaSink::commit_files_with_checkpoint(self, files, checkpoint).await
+    }
+
+    fn version(&self) -> i64 {
+        DeltaSink::version(self)
+    }
+
+    fn checkpoint_version(&self) -> i64 {
+        DeltaSink::checkpoint_version(self)
+    }
+
+    fn schema(&self) -> Option<&SchemaRef> {
+        DeltaSink::schema(self)
+    }
+
+    fn get_committed_paths(&self) -> HashSet<String> {
+        DeltaSink::get_committed_paths(self)
+    }
+
+    async fn recover_checkpoint_from_log(
+        &mut self,
+    ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
+        DeltaSink::recover_checkpoint_from_log(self).await
+    }
+
+    fn validate_schema(
+        &self,
+        incoming: &Schema,
+        mode: SchemaEvolutionMode,
+    ) -> Result<EvolutionAction, crate::error::SchemaError> {
+        DeltaSink::validate_schema(self, incoming, mode)
+    }
+
+    async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
+        DeltaSink::evolve_schema(self, action).await
+    }
+
+    async fn create_checkpoint(&self) -> Result<(), DeltaError> {
+        deltalake::checkpoints::create_checkpoint(self.table(), None)
+            .await
+            .map_err(|source| DeltaError::DeltaOperation { source })
+    }
+
+    fn table_name(&self) -> &str {
+        &self.table_name
+    }
 }
 
 #[cfg(test)]

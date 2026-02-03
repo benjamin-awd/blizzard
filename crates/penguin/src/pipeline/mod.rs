@@ -282,16 +282,16 @@ impl PollingProcessor for Processor {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        // On cold start, recover checkpoint from Delta log if table exists
+        // On cold start, recover checkpoint from table log if table exists
         // We do this first to get the watermark before listing files
         if cold_start && let Some(delta_sink) = self.delta_sink.as_mut() {
-            info!(target = %self.table_key, "Cold start - recovering checkpoint from Delta log");
+            info!(target = %self.table_key, "Cold start - recovering checkpoint from table log");
             match self
                 .checkpoint_coordinator
-                .restore_from_delta_log(delta_sink)
+                .restore_from_table_log(delta_sink)
                 .await
             {
-                Ok(true) => info!(target = %self.table_key, "Recovered checkpoint from Delta log"),
+                Ok(true) => info!(target = %self.table_key, "Recovered checkpoint from table log"),
                 Ok(false) => info!(target = %self.table_key, "No checkpoint found, starting fresh"),
                 Err(e) => {
                     tracing::warn!(target = %self.table_key, error = %e, "Failed to recover checkpoint, starting fresh");

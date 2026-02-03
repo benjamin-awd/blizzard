@@ -19,6 +19,7 @@ pub use config::Config;
 pub use error::PipelineError;
 pub use pipeline::Pipeline;
 pub use schema::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
+pub use sink::{DeltaSink, TableSink};
 
 // Re-export from blizzard-core
 pub use blizzard_core::{

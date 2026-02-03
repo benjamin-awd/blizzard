@@ -23,7 +23,7 @@ use blizzard_core::metrics::events::{CheckpointAge, SourceStateFiles};
 use blizzard_core::types::SourceState;
 
 use crate::error::DeltaError;
-use crate::sink::DeltaSink;
+use crate::sink::TableSink;
 
 /// Macro for emitting metrics events.
 macro_rules! emit {
@@ -141,17 +141,17 @@ impl CheckpointCoordinator {
         state.watermark = Some(watermark);
     }
 
-    /// Restore checkpoint state from the Delta transaction log.
+    /// Restore checkpoint state from the table's transaction log.
     ///
     /// This is the primary entry point for cold start recovery. It scans the
-    /// Delta log for embedded checkpoint state and restores it to the coordinator.
+    /// table's transaction log for embedded checkpoint state and restores it to the coordinator.
     ///
     /// Returns `true` if a checkpoint was recovered, `false` otherwise.
-    pub async fn restore_from_delta_log(
+    pub async fn restore_from_table_log(
         &self,
-        delta_sink: &mut DeltaSink,
+        sink: &mut dyn TableSink,
     ) -> Result<bool, DeltaError> {
-        if let Some((checkpoint, version)) = delta_sink.recover_checkpoint_from_log().await? {
+        if let Some((checkpoint, version)) = sink.recover_checkpoint_from_log().await? {
             info!(
                 target = %self.table,
                 "Recovered checkpoint v{} from Delta log, delta_version: {}, files tracked: {}",
@@ -167,16 +167,16 @@ impl CheckpointCoordinator {
         }
     }
 
-    /// Maybe create a Delta Lake checkpoint file based on the commit interval.
+    /// Maybe create a table checkpoint file based on the commit interval.
     ///
-    /// Delta checkpoints are Parquet files that summarize the state of the table,
-    /// allowing readers to skip reading all JSON log files. This dramatically
+    /// Table checkpoints are files that summarize the state of the table,
+    /// allowing readers to skip reading all log files. This dramatically
     /// improves read performance for tables with many commits.
     ///
     /// # Arguments
-    /// * `delta_sink` - The Delta sink to create the checkpoint for
+    /// * `sink` - The table sink to create the checkpoint for
     /// * `interval` - Number of commits between checkpoints. Set to 0 to disable.
-    async fn maybe_create_delta_checkpoint(&self, delta_sink: &DeltaSink, interval: usize) {
+    async fn maybe_create_table_checkpoint(&self, sink: &dyn TableSink, interval: usize) {
         if interval == 0 {
             return;
         }
@@ -185,38 +185,38 @@ impl CheckpointCoordinator {
         *counter += 1;
 
         if *counter >= interval {
-            match deltalake::checkpoints::create_checkpoint(delta_sink.table(), None).await {
+            match sink.create_checkpoint().await {
                 Ok(()) => {
                     info!(
                         target = %self.table,
-                        "Created Delta checkpoint at version {}",
-                        delta_sink.version()
+                        "Created table checkpoint at version {}",
+                        sink.version()
                     );
                     *counter = 0;
                 }
                 Err(e) => {
-                    warn!(target = %self.table, "Failed to create Delta checkpoint: {}", e);
+                    warn!(target = %self.table, "Failed to create table checkpoint: {}", e);
                     // Don't reset counter on failure - will retry on next commit
                 }
             }
         }
     }
 
-    /// Commit files to Delta Lake with an atomic checkpoint.
+    /// Commit files to the table with an atomic checkpoint.
     ///
     /// This centralizes the checkpoint commit logic:
     /// 1. Captures the current checkpoint state
     /// 2. Commits files with the checkpoint atomically
-    /// 3. Updates the coordinator with the new delta version
+    /// 3. Updates the coordinator with the new table version
     /// 4. Marks the checkpoint as committed (resets timer)
-    /// 5. Maybe creates a Delta checkpoint file (based on interval)
+    /// 5. Maybe creates a table checkpoint file (based on interval)
     ///
     /// Returns the number of files committed (0 if files list was empty).
     pub async fn commit_files(
         &self,
-        delta_sink: &mut DeltaSink,
+        sink: &mut dyn TableSink,
         files: &[FinishedFile],
-        delta_checkpoint_interval: usize,
+        checkpoint_interval: usize,
     ) -> usize {
         if files.is_empty() {
             return 0;
@@ -228,28 +228,28 @@ impl CheckpointCoordinator {
         let checkpoint_state = self.capture_state().await;
 
         // Commit with atomic checkpoint
-        match delta_sink
+        match sink
             .commit_files_with_checkpoint(files, &checkpoint_state)
             .await
         {
             Ok(Some(version)) => {
                 info!(
                     target = %self.table,
-                    "Committed {} files with checkpoint to Delta Lake, version {}",
+                    "Committed {} files with checkpoint to table, version {}",
                     count, version
                 );
-                // Update coordinator with new delta version and mark checkpoint committed
+                // Update coordinator with new table version and mark checkpoint committed
                 self.update_delta_version(version).await;
                 self.mark_checkpoint_committed().await;
-                // Maybe create Delta checkpoint file
-                self.maybe_create_delta_checkpoint(delta_sink, delta_checkpoint_interval)
+                // Maybe create table checkpoint file
+                self.maybe_create_table_checkpoint(sink, checkpoint_interval)
                     .await;
             }
             Ok(None) => {
                 debug!(target = %self.table, "No commit needed (duplicate files)");
             }
             Err(e) => {
-                tracing::error!(target = %self.table, "Failed to commit {} files to Delta: {}", count, e);
+                tracing::error!(target = %self.table, "Failed to commit {} files to table: {}", count, e);
             }
         }
         count
