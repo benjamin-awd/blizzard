@@ -1,4 +1,4 @@
-//! High-level sink writer that combines batch writing with storage persistence.
+//! High-level sink writer that combines batch writing with async uploads.
 
 use std::path::Path;
 
@@ -9,17 +9,17 @@ use tracing::{debug, info};
 use blizzard_core::metrics::events::{BatchesProcessed, BytesWritten, RecordsProcessed};
 use blizzard_core::{PartitionExtractor, emit};
 
-use super::storage::StorageWriter;
-use super::{ParquetWriter, ParquetWriterConfig};
+use super::tasks::UploadTask;
 use crate::error::PipelineError;
+use crate::sink::{ParquetWriter, ParquetWriterConfig};
 
 /// High-level writer that handles the full output path: serialization and storage.
 ///
-/// Combines batch writing (ParquetWriter), partition extraction, and storage
-/// persistence (StorageWriter) into a single interface.
-pub struct SinkWriter {
+/// Combines batch writing (ParquetWriter), partition extraction, and async
+/// upload (UploadTask) into a single interface.
+pub(super) struct SinkWriter {
     batch_writer: ParquetWriter,
-    storage_writer: StorageWriter,
+    upload_task: UploadTask,
     partition_extractor: PartitionExtractor,
     pipeline_id: String,
 }
@@ -29,7 +29,7 @@ impl SinkWriter {
     pub fn new(
         schema: SchemaRef,
         writer_config: ParquetWriterConfig,
-        storage_writer: StorageWriter,
+        upload_task: UploadTask,
         partition_extractor: PartitionExtractor,
         pipeline_id: String,
     ) -> Result<Self, PipelineError> {
@@ -37,7 +37,7 @@ impl SinkWriter {
 
         Ok(Self {
             batch_writer,
-            storage_writer,
+            upload_task,
             partition_extractor,
             pipeline_id,
         })
@@ -83,46 +83,75 @@ impl SinkWriter {
             "Processed file"
         );
 
-        // Persist any rolled files
+        // Queue any rolled files for upload (non-blocking)
         let finished = self.batch_writer.take_finished_files();
-        if !finished.is_empty() {
-            self.storage_writer.write_files(&finished).await?;
+        for file in finished {
+            self.upload_task.send(file).await?;
         }
 
         Ok(total_records)
     }
 
-    /// Finalize the writer and persist all remaining files.
+    /// Finalize the writer and wait for all uploads to complete.
     pub async fn finalize(self) -> Result<(), PipelineError> {
         let finished_files = self.batch_writer.close()?;
 
-        if !finished_files.is_empty() {
+        let final_file_count = finished_files.len();
+        let final_bytes: usize = finished_files.iter().map(|f| f.size).sum();
+
+        // Queue remaining files for upload
+        for file in finished_files {
+            self.upload_task.send(file).await?;
+        }
+
+        // Wait for all uploads to complete and collect results
+        let results = self.upload_task.finalize().await;
+
+        // Check for any upload errors
+        let mut total_bytes = 0usize;
+        for result in results {
+            let uploaded = result?;
+            total_bytes += uploaded.size;
+        }
+
+        // Add bytes from final files
+        total_bytes += final_bytes;
+
+        if final_file_count > 0 {
             info!(
                 target = %self.pipeline_id,
-                files = finished_files.len(),
-                "Writing parquet files to storage"
+                files = final_file_count,
+                "Finished writing parquet files to storage"
             );
-            self.storage_writer.write_files(&finished_files).await?;
+        }
 
-            let bytes: usize = finished_files.iter().map(|f| f.size).sum();
+        if total_bytes > 0 {
             emit!(BytesWritten {
-                bytes: bytes as u64,
+                bytes: total_bytes as u64,
                 target: self.pipeline_id.clone(),
             });
         }
 
         Ok(())
     }
+
+    /// Abort the upload task (for shutdown scenarios).
+    #[allow(dead_code)]
+    pub fn abort(self) {
+        self.upload_task.abort();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blizzard_core::StorageProvider;
     use deltalake::arrow::array::{Int64Array, StringArray};
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -150,16 +179,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dest_uri = temp_dir.path().to_str().unwrap();
 
-        let storage_writer = StorageWriter::new(dest_uri, HashMap::new(), "test".to_string())
-            .await
-            .unwrap();
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(dest_uri, HashMap::new())
+                .await
+                .unwrap(),
+        );
+        let shutdown = CancellationToken::new();
+        let upload_task = UploadTask::spawn(storage, shutdown, 4, "test".to_string());
         let partition_extractor = PartitionExtractor::new(vec!["date".into()]);
         let writer_config = ParquetWriterConfig::default();
 
         let mut writer = SinkWriter::new(
             test_schema(),
             writer_config,
-            storage_writer,
+            upload_task,
             partition_extractor,
             "test".to_string(),
         )
@@ -181,16 +214,20 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let dest_uri = temp_dir.path().to_str().unwrap();
 
-        let storage_writer = StorageWriter::new(dest_uri, HashMap::new(), "test".to_string())
-            .await
-            .unwrap();
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(dest_uri, HashMap::new())
+                .await
+                .unwrap(),
+        );
+        let shutdown = CancellationToken::new();
+        let upload_task = UploadTask::spawn(storage, shutdown, 4, "test".to_string());
         let partition_extractor = PartitionExtractor::all();
         let writer_config = ParquetWriterConfig::default();
 
         let mut writer = SinkWriter::new(
             test_schema(),
             writer_config,
-            storage_writer,
+            upload_task,
             partition_extractor,
             "test".to_string(),
         )

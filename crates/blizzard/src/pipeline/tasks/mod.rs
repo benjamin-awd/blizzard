@@ -4,6 +4,7 @@
 //! concurrently while the main loop processes files.
 
 mod download;
+mod upload;
 
 use deltalake::arrow::array::RecordBatch;
 use snafu::ResultExt;
@@ -15,6 +16,7 @@ use crate::error::{PipelineError, ReaderSnafu, TaskJoinSnafu};
 use crate::source::{FileReader, NdjsonReader};
 
 pub(super) use download::{DownloadTask, DownloadedFile};
+pub(super) use upload::UploadTask;
 
 /// Result of processing a downloaded file.
 pub(super) struct ProcessedFile {

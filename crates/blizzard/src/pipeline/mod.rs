@@ -6,6 +6,7 @@
 
 mod download;
 mod processor;
+mod sink_writer;
 mod tasks;
 mod tracker;
 

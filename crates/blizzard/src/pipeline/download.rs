@@ -16,11 +16,11 @@ use blizzard_core::metrics::events::{
 };
 use blizzard_core::polling::IterationResult;
 
+use super::sink_writer::SinkWriter;
 use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
 use super::tracker::StateTracker;
 use crate::dlq::FailureTracker;
 use crate::error::PipelineError;
-use crate::sink::SinkWriter;
 use crate::source::NdjsonReader;
 
 /// Orchestrates the download -> parse -> write pipeline.

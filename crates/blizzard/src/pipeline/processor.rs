@@ -14,13 +14,14 @@ use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef};
 
 use super::create_storage;
 use super::download::Downloader;
-use super::tasks::DownloadTask;
+use super::sink_writer::SinkWriter;
+use super::tasks::{DownloadTask, UploadTask};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::PipelineError;
-use crate::sink::{ParquetWriterConfig, SinkWriter, StorageWriter};
+use crate::sink::ParquetWriterConfig;
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
 /// Resolve the Arrow schema from explicit config or by inference from source files.
@@ -50,12 +51,12 @@ async fn resolve_schema(
 pub(super) struct ProcessorContext {
     /// Storage provider for reading source files.
     pub source_storage: StorageProviderRef,
+    /// Storage provider for writing destination files.
+    pub destination_storage: StorageProviderRef,
     /// Arrow schema (from config or inferred).
     pub schema: SchemaRef,
     /// NDJSON reader with schema validation.
     pub reader: Arc<NdjsonReader>,
-    /// Storage writer for persisting parquet files (cloned per iteration).
-    pub storage_writer: StorageWriter,
     /// Extracts partition values from source paths.
     pub partition_extractor: PartitionExtractor,
 }
@@ -84,10 +85,18 @@ impl Iteration {
             .with_row_group_size_bytes(config.sink.row_group_size_bytes)
             .with_compression(config.sink.compression);
 
+        // Spawn upload task for concurrent uploads
+        let upload_task = UploadTask::spawn(
+            ctx.destination_storage.clone(),
+            shutdown.clone(),
+            config.sink.max_concurrent_uploads,
+            key.to_string(),
+        );
+
         let writer = SinkWriter::new(
             ctx.schema.clone(),
             writer_config,
-            ctx.storage_writer.clone(),
+            upload_task,
             ctx.partition_extractor.clone(),
             key.to_string(),
         )?;
@@ -161,13 +170,8 @@ impl Processor {
         // Create source storage provider - use pooled if available
         let source_storage = create_storage(&storage_pool, &config.source).await?;
 
-        // Create storage writer (writes parquet to destination)
-        let storage_writer = StorageWriter::new(
-            &config.sink.table_uri,
-            config.sink.storage_options.clone(),
-            key.id().to_string(),
-        )
-        .await?;
+        // Create destination storage provider for uploads
+        let destination_storage = create_storage(&storage_pool, &config.sink).await?;
 
         // Create state tracker based on configuration
         let state_tracker: Box<dyn StateTracker> = if config.source.use_watermark {
@@ -207,9 +211,9 @@ impl Processor {
         // Build the processor context
         let ctx = ProcessorContext {
             source_storage,
+            destination_storage,
             schema,
             reader,
-            storage_writer,
             partition_extractor,
         };
 

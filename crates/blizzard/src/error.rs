@@ -86,6 +86,10 @@ pub enum TableWriteError {
     /// Failed to write file to table.
     #[snafu(display("Failed to write file to table: {source}"))]
     Write { source: StorageError },
+
+    /// Upload channel closed unexpectedly.
+    #[snafu(display("Upload channel closed unexpectedly"))]
+    UploadChannelClosed,
 }
 
 /// Top-level pipeline errors.

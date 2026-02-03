@@ -156,6 +156,13 @@ pub struct SinkConfig {
     /// Storage options for table storage (credentials, region, etc.).
     #[serde(default)]
     pub storage_options: HashMap<String, String>,
+    /// Maximum concurrent upload operations.
+    #[serde(default = "default_max_concurrent_uploads")]
+    pub max_concurrent_uploads: usize,
+}
+
+fn default_max_concurrent_uploads() -> usize {
+    4
 }
 
 impl StorageSource for SinkConfig {
