@@ -72,6 +72,9 @@ pub trait Pipeline: Send + 'static {
     fn run(self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// Result type for a single pipeline execution.
+type PipelineResult<K, E> = (K, Result<(), E>);
+
 /// Orchestrates multiple pipeline executions with shared shutdown handling.
 pub struct PipelineRunner<P: Pipeline> {
     pipelines: Vec<P>,
@@ -106,9 +109,8 @@ impl<P: Pipeline> PipelineRunner<P> {
     }
 
     /// Run all pipelines to completion.
-    #[allow(clippy::type_complexity)]
     pub async fn run(self) {
-        let mut handles: JoinSet<(P::Key, Result<(), P::Error>)> = JoinSet::new();
+        let mut handles: JoinSet<PipelineResult<P::Key, P::Error>> = JoinSet::new();
         let typetag = self.typetag;
 
         for pipeline in self.pipelines {

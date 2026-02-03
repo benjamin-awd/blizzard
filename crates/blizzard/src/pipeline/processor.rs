@@ -12,9 +12,10 @@ use tracing::{debug, info, warn};
 use snafu::ResultExt;
 
 use blizzard_core::polling::{IterationResult, PollingProcessor};
-use blizzard_core::{PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage};
+use blizzard_core::{
+    PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
+};
 
-use crate::error::StorageSnafu;
 use super::download::Downloader;
 use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
@@ -23,6 +24,7 @@ use crate::checkpoint::CheckpointManager;
 use crate::config::{PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::PipelineError;
+use crate::error::StorageSnafu;
 use crate::parquet::ParquetWriterConfig;
 use crate::source::{NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
