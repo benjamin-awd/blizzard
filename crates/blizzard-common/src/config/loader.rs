@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 
 use crate::config::{ConfigPath, GlobalConfig, MetricsConfig, interpolate, is_yaml_file};
 use crate::error::ConfigError;
+use crate::topology::PipelineContext;
 
 /// Trait for configs that can be merged from multiple files.
 pub trait Mergeable: Sized + Default {
@@ -41,6 +42,18 @@ pub trait Mergeable: Sized + Default {
         self.metrics_mut()
             .merge_from(std::mem::take(other.metrics_mut()));
         Ok(())
+    }
+
+    /// Build pipeline instances from config components.
+    fn build_pipelines<P, F>(&self, context: PipelineContext, builder: F) -> Vec<P>
+    where
+        Self::Component: Clone,
+        F: Fn(Self::Key, Self::Component, PipelineContext) -> P,
+    {
+        self.components()
+            .iter()
+            .map(|(key, cfg)| builder(key.clone(), cfg.clone(), context.clone()))
+            .collect()
     }
 }
 

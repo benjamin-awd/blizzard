@@ -20,7 +20,7 @@ use blizzard_common::{
     Pipeline, PipelineContext, StoragePoolRef, StorageProvider, StorageProviderRef, random_jitter,
 };
 
-use crate::config::{Config, PipelineConfig, PipelineKey};
+use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey};
 use crate::error::{PipelineError, StorageSnafu};
 
 use processor::BlizzardProcessor;
@@ -51,15 +51,11 @@ pub struct BlizzardPipeline {
 impl BlizzardPipeline {
     /// Create pipelines from configuration.
     pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
-        config
-            .pipelines
-            .iter()
-            .map(|(key, cfg)| Self {
-                key: key.clone(),
-                config: cfg.clone(),
-                context: context.clone(),
-            })
-            .collect()
+        config.build_pipelines(context, |key, config, context| Self {
+            key,
+            config,
+            context,
+        })
     }
 
     /// Run this pipeline's polling loop.

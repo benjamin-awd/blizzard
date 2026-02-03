@@ -38,15 +38,11 @@ pub struct PenguinPipeline {
 impl PenguinPipeline {
     /// Create pipelines from configuration.
     pub fn from_config(config: &Config, context: PipelineContext) -> Vec<Self> {
-        config
-            .components()
-            .iter()
-            .map(|(key, cfg)| Self {
-                key: key.clone(),
-                config: cfg.clone(),
-                context: context.clone(),
-            })
-            .collect()
+        config.build_pipelines(context, |key, config, context| Self {
+            key,
+            config,
+            context,
+        })
     }
 
     /// Run this pipeline's polling loop.
