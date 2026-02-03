@@ -42,8 +42,8 @@ pub use resource::{StoragePool, StoragePoolRef};
 pub use signal::shutdown_signal;
 pub use storage::{StorageProvider, StorageProviderRef};
 pub use topology::{
-    PiecesBuilder, Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError,
-    TaskOutput, TaskResult, random_jitter, run_pipelines,
+    Pipeline, PipelineContext, PipelineRunner, RunningTopology, Task, TaskError, TaskOutput,
+    TaskResult, random_jitter, run_pipelines,
 };
 pub use tracing::init_tracing;
 pub use types::FinishedFile;
