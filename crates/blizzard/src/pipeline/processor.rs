@@ -50,6 +50,83 @@ pub(super) struct ProcessorContext {
     pub partition_extractor: PartitionExtractor,
 }
 
+/// Encapsulates the state and logic for a single processing iteration.
+///
+/// Created fresh for each iteration, isolating per-iteration components
+/// (writer, downloader, download task) from the long-lived processor state.
+struct Iteration {
+    writer: SinkWriter,
+    downloader: Downloader,
+    download_task: DownloadTask,
+}
+
+impl Iteration {
+    /// Create a new iteration with all per-iteration components.
+    fn new(
+        pending_files: Vec<String>,
+        ctx: &ProcessorContext,
+        config: &PipelineConfig,
+        shutdown: CancellationToken,
+        pipeline_key: &str,
+    ) -> Result<Self, PipelineError> {
+        let writer_config = ParquetWriterConfig::default()
+            .with_file_size_mb(config.sink.file_size_mb)
+            .with_row_group_size_bytes(config.sink.row_group_size_bytes)
+            .with_compression(config.sink.compression);
+
+        let writer = SinkWriter::new(
+            ctx.schema.clone(),
+            writer_config,
+            ctx.storage_writer.clone(),
+            ctx.partition_extractor.clone(),
+            pipeline_key.to_string(),
+        )?;
+
+        let download_task = DownloadTask::spawn(
+            pending_files,
+            ctx.source_storage.clone(),
+            shutdown,
+            config.source.max_concurrent_files,
+            pipeline_key.to_string(),
+        );
+
+        let max_in_flight = config.source.max_concurrent_files * 2;
+        let downloader = Downloader::new(
+            ctx.reader.clone(),
+            max_in_flight,
+            pipeline_key.to_string(),
+        );
+
+        Ok(Self {
+            writer,
+            downloader,
+            download_task,
+        })
+    }
+
+    /// Run the iteration: download, parse, and write files.
+    async fn run(
+        mut self,
+        state_tracker: &mut dyn StateTracker,
+        failure_tracker: &mut FailureTracker,
+        shutdown: CancellationToken,
+    ) -> Result<(IterationResult, SinkWriter), PipelineError> {
+        let result = self
+            .downloader
+            .run(
+                self.download_task,
+                &mut self.writer,
+                state_tracker,
+                failure_tracker,
+                shutdown,
+            )
+            .await;
+
+        // Return the writer so the processor can finalize it
+        Ok((result?, self.writer))
+    }
+}
+
 /// The blizzard file loader pipeline processor.
 ///
 /// Each pipeline runs its own `BlizzardProcessor` instance.
@@ -196,49 +273,25 @@ impl PollingProcessor for BlizzardProcessor {
     }
 
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let pending_files = state;
-
-        let writer_config = ParquetWriterConfig::default()
-            .with_file_size_mb(self.pipeline_config.sink.file_size_mb)
-            .with_row_group_size_bytes(self.pipeline_config.sink.row_group_size_bytes)
-            .with_compression(self.pipeline_config.sink.compression);
-
-        let mut writer = SinkWriter::new(
-            self.ctx.schema.clone(),
-            writer_config,
-            self.ctx.storage_writer.clone(),
-            self.ctx.partition_extractor.clone(),
-            self.pipeline_key.id().to_string(),
+        let iteration = Iteration::new(
+            state,
+            &self.ctx,
+            &self.pipeline_config,
+            self.shutdown.clone(),
+            self.pipeline_key.id(),
         )?;
 
-        let download_task = DownloadTask::spawn(
-            pending_files,
-            self.ctx.source_storage.clone(),
-            self.shutdown.clone(),
-            self.pipeline_config.source.max_concurrent_files,
-            self.pipeline_key.id().to_string(),
-        );
-
-        let max_in_flight = self.pipeline_config.source.max_concurrent_files * 2;
-        let downloader = Downloader::new(
-            self.ctx.reader.clone(),
-            max_in_flight,
-            self.pipeline_key.id().to_string(),
-        );
-
-        let result = downloader
+        let (result, writer) = iteration
             .run(
-                download_task,
-                &mut writer,
                 self.state_tracker.as_mut(),
                 &mut self.failure_tracker,
                 self.shutdown.clone(),
             )
-            .await;
+            .await?;
 
         self.finalize_iteration(writer).await?;
 
-        result
+        Ok(result)
     }
 }
 
