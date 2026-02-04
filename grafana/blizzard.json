@@ -1005,8 +1005,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(blizzard_bytes_written_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "editorMode": "code",
+          "expr": "sum(rate(blizzard_parquet_bytes_written_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "Written",
+          "range": true,
           "refId": "B"
         }
       ],
@@ -2680,8 +2682,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "editorMode": "code",
           "expr": "sum(rate(blizzard_parquet_bytes_written_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "Parquet Bytes/s",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -2959,8 +2963,8 @@
       {
         "allValue": ".*",
         "current": {
-          "text": "All",
-          "value": "$__all"
+          "text": "bli-public-orderbooks-v1-as-6dc45fdc76-z8bzt",
+          "value": "bli-public-orderbooks-v1-as-6dc45fdc76-z8bzt"
         },
         "datasource": {
           "type": "prometheus",
@@ -3001,5 +3005,5 @@
   "timezone": "browser",
   "title": "[SYS] Blizzard",
   "uid": "blizzard-ingestion",
-  "version": 14
+  "version": 16
 }
