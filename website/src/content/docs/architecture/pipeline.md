@@ -145,6 +145,101 @@ The uploader handles concurrent file uploads:
 - Uses parallel multipart uploads for large files
 - Penguin discovers these files for Delta Lake commits
 
+```d2
+direction: down
+
+input: Parquet File {
+  shape: document
+}
+
+upload_task: UploadTask {
+  futures: FuturesUnordered {
+    label: "FuturesUnordered\n<UploadFuture>"
+  }
+  concurrent: {
+    label: "max_concurrent_uploads\n(default: 4)"
+    style.stroke-dash: 3
+  }
+}
+
+output: Table Directory {
+  shape: cylinder
+}
+
+input -> upload_task.futures: queue
+upload_task.futures -> output: multipart upload
+```
+
+## Detailed Processing Flow
+
+The following diagram shows the internal flow within a single processing iteration, including the biased `tokio::select!` loop priorities and how backpressure propagates through the system.
+
+```d2
+direction: down
+
+iteration: Iteration::run() {
+  label: "Iteration::run()"
+}
+
+download_task: DownloadTask {
+  label: "DownloadTask\n(4 concurrent downloads)"
+}
+
+upload_task: UploadTask {
+  label: "UploadTask\n(4 concurrent uploads)"
+}
+
+iteration -> download_task: spawn
+iteration -> upload_task: spawn
+
+downloader: Downloader::run() {
+  label: "Downloader::run()\nbiased select! loop"
+
+  p1: "1. Shutdown" { style.fill: "#ffcccc" }
+  p2: "2. Process completed" { style.fill: "#ffffcc" }
+  p3: "3. Checkpoint" { style.fill: "#e0e0e0" }
+  p4: "4. Accept downloads" { style.fill: "#ccffcc" }
+
+  p1 -> p2 -> p3 -> p4: priority {style.stroke-dash: 3}
+}
+
+download_task -> downloader: DownloadedFile
+
+blocking: spawn_blocking {
+  label: "spawn_blocking\n(CPU-bound: decompress + parse)"
+  style.fill: "#ffeecc"
+}
+
+downloader.p4 -> blocking: spawn read task
+
+processed: ProcessedFile { shape: document }
+
+blocking -> processed
+processed -> downloader.p2: complete
+
+sink: Sink {
+  label: "Sink::write_file_batches()\nwrite Parquet batches"
+}
+
+downloader.p2 -> sink
+
+upload_chan: {
+  label: "channel\n(capacity: 4)"
+  shape: queue
+}
+
+sink -> upload_chan: Parquet file
+upload_chan -> upload_task
+
+result_chan: {
+  label: "results"
+  shape: queue
+}
+
+upload_task -> result_chan
+result_chan -> sink: drain {style.stroke-dash: 3}
+```
+
 ## Backpressure
 
 Bounded channels between stages provide natural backpressure:
@@ -165,36 +260,6 @@ source:
 sink:
   max_concurrent_uploads: 4   # Parallel file uploads
   max_concurrent_parts: 8     # Parts per multipart upload
-```
-
-## Graceful Shutdown
-
-The pipeline supports graceful shutdown via `CancellationToken`. Shutdown can occur at multiple points in the polling loop:
-
-- **During initialization**: Pipeline exits immediately
-- **During processing**: Current iteration completes, then exits
-- **During poll wait**: Wakes up and exits
-
-Shutdown sequence within a processing iteration:
-
-1. **Signal received**: SIGINT/SIGTERM/SIGQUIT triggers shutdown
-2. **Downloads stop**: No new downloads started
-3. **Processing drains**: Finish in-flight files
-4. **Final flush**: Close Parquet writer, upload remaining files
-5. **Exit**: Report stats and exit
-
-```d2
-direction: down
-
-signal: "SIGINT/SIGTERM received" { shape: oval }
-abort: "DownloadTask.abort()\nStop new downloads"
-drain: "Drain FuturesUnordered\nFinish in-flight parsing"
-close: "BatchWriter.close()\nFlush final Parquet"
-finalize: "UploadTask.finalize()\nWait for uploads"
-save: "StateTracker.save()\nCheckpoint progress"
-exit: "Exit with stats" { shape: oval }
-
-signal -> abort -> drain -> close -> finalize -> save -> exit
 ```
 
 ## Pipeline Statistics
