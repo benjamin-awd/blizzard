@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./scripts/bump-version.sh [major|minor|patch]
 
 BUMP_TYPE="${1:-patch}"
-CARGO_TOML="Cargo.toml"
+CARGO_TOML="crates/blizzard/Cargo.toml"
 
 if [[ ! -f "$CARGO_TOML" ]]; then
     echo "Error: $CARGO_TOML not found" >&2
