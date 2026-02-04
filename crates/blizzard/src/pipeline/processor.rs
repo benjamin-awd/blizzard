@@ -16,7 +16,7 @@ use blizzard_core::{
     PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
 };
 
-use super::download::Downloader;
+use super::download::{Downloader, IncrementalCheckpointConfig};
 use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
@@ -211,6 +211,7 @@ struct Iteration {
     sink: Sink,
     downloader: Downloader,
     download_task: DownloadTask,
+    checkpoint_config: IncrementalCheckpointConfig,
 }
 
 impl Iteration {
@@ -253,10 +254,17 @@ impl Iteration {
         let max_in_flight = config.source.max_concurrent_files * 2;
         let downloader = Downloader::new(ctx.reader.clone(), max_in_flight, key.to_string());
 
+        // Create incremental checkpoint config from source settings
+        let checkpoint_config = IncrementalCheckpointConfig::new(
+            &config.source.checkpoint,
+            config.source.use_watermark,
+        );
+
         Ok(Self {
             sink,
             downloader,
             download_task,
+            checkpoint_config,
         })
     }
 
@@ -275,6 +283,7 @@ impl Iteration {
                 state_tracker,
                 failure_tracker,
                 shutdown,
+                &self.checkpoint_config,
             )
             .await;
 

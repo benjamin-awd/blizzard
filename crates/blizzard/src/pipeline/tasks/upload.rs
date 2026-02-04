@@ -49,11 +49,7 @@ impl UploadTask {
     /// Spawn the uploader task.
     ///
     /// See module-level docs for why this doesn't take a shutdown token.
-    pub fn spawn(
-        storage: StorageProviderRef,
-        max_concurrent: usize,
-        pipeline: String,
-    ) -> Self {
+    pub fn spawn(storage: StorageProviderRef, max_concurrent: usize, pipeline: String) -> Self {
         let (file_tx, file_rx) = mpsc::channel(max_concurrent);
         let (result_tx, result_rx) = mpsc::channel(max_concurrent);
 

@@ -59,6 +59,12 @@ pub struct SourceConfig {
     /// First run performs a full scan; subsequent runs only list files above the watermark.
     #[serde(default)]
     pub use_watermark: bool,
+
+    /// Configuration for incremental checkpoint saves during processing.
+    ///
+    /// Only applies when `use_watermark` is true.
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 fn default_batch_size() -> usize {
@@ -71,6 +77,39 @@ fn default_max_concurrent_files() -> usize {
 
 fn default_poll_interval() -> u64 {
     60
+}
+
+fn default_checkpoint_interval_files() -> usize {
+    100
+}
+
+fn default_checkpoint_interval_secs() -> u64 {
+    30
+}
+
+/// Configuration for incremental checkpoint saves during iteration processing.
+///
+/// Checkpoints are saved periodically to prevent progress loss if blizzard crashes
+/// while processing a large backlog of files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointConfig {
+    /// Number of files to process before saving a checkpoint.
+    #[serde(default = "default_checkpoint_interval_files")]
+    pub interval_files: usize,
+
+    /// Maximum seconds between checkpoint saves.
+    #[serde(default = "default_checkpoint_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            interval_files: default_checkpoint_interval_files(),
+            interval_secs: default_checkpoint_interval_secs(),
+        }
+    }
 }
 
 impl SourceConfig {
@@ -1172,5 +1211,85 @@ pipelines:
             "use_watermark should be true"
         );
         assert!(pipeline.source.partition_filter.is_some());
+    }
+
+    #[test]
+    fn test_checkpoint_config_defaults() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+      use_watermark: true
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert_eq!(
+            pipeline.source.checkpoint.interval_files, 100,
+            "checkpoint.interval_files should default to 100"
+        );
+        assert_eq!(
+            pipeline.source.checkpoint.interval_secs, 30,
+            "checkpoint.interval_secs should default to 30"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_config_custom() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+      use_watermark: true
+      checkpoint:
+        interval_files: 50
+        interval_secs: 15
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert_eq!(pipeline.source.checkpoint.interval_files, 50);
+        assert_eq!(pipeline.source.checkpoint.interval_secs, 15);
+    }
+
+    #[test]
+    fn test_checkpoint_config_partial() {
+        let yaml = r#"
+pipelines:
+  events:
+    source:
+      path: gs://bucket/raw
+      use_watermark: true
+      checkpoint:
+        interval_files: 200
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert_eq!(pipeline.source.checkpoint.interval_files, 200);
+        assert_eq!(
+            pipeline.source.checkpoint.interval_secs, 30,
+            "interval_secs should default to 30 when not specified"
+        );
     }
 }
