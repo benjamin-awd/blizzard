@@ -1953,8 +1953,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (result) (rate(polling_iterations_total{service=\"blizzard\", job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(blizzard_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{result}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -2031,9 +2033,11 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (le) (increase(polling_iteration_duration_seconds_bucket{service=\"blizzard\", job=~\"$job\", pod=~\"$pod\"}[$__rate_interval]))",
+          "editorMode": "code",
+          "expr": "sum by (le) (increase(blizzard_polling_iteration_duration_seconds_bucket{job=~\"$job\", pod=~\"$pod\"}[$__rate_interval]))",
           "format": "heatmap",
           "legendFormat": "{{le}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -2955,8 +2959,8 @@
       {
         "allValue": ".*",
         "current": {
-          "text": "bli-public-orderbooks-v1-as-c8597485c-dv746",
-          "value": "bli-public-orderbooks-v1-as-c8597485c-dv746"
+          "text": "All",
+          "value": "$__all"
         },
         "datasource": {
           "type": "prometheus",
@@ -2979,7 +2983,7 @@
     ]
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {
@@ -2997,5 +3001,5 @@
   "timezone": "browser",
   "title": "[SYS] Blizzard",
   "uid": "blizzard-ingestion",
-  "version": 12
+  "version": 14
 }
