@@ -51,4 +51,7 @@ NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
 sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
 
+# Update Cargo.lock to reflect the version change
+cargo update -p "$PACKAGE" --workspace
+
 echo "$PACKAGE: $CURRENT_VERSION -> $NEW_VERSION"
