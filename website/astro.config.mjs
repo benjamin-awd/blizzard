@@ -26,6 +26,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Topology', slug: 'concepts/topology' },
 						{ label: 'Watermarking', slug: 'concepts/watermarking' },
+						{ label: 'Backfilling', slug: 'concepts/backfilling' },
 						{ label: 'Storage Backends', slug: 'concepts/storage' },
 						{ label: 'Fault Tolerance', slug: 'concepts/fault-tolerance' },
 					],

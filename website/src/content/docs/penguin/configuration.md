@@ -91,6 +91,18 @@ tables:
 
 Partition columns are automatically extracted from the template. For example, `"date=%Y-%m-%d/hour=%H"` creates partitions with columns `date` and `hour`.
 
+#### Adding partition_by to an existing table
+
+Partition columns are only set in the Delta Lake table metadata at table creation time. If you add `partition_by` to a table that already exists:
+
+- **Existing files are not repartitioned** - Data already committed remains in its current location
+- **Table metadata is not modified** - The Delta Lake schema's partition columns are not updated
+- **No automatic backfill** - Penguin does not reorganize or migrate existing data
+
+To properly partition an existing table, you must either:
+1. Create a new table with the partition configuration and migrate data separately
+2. Delete the existing table and let Penguin recreate it with the new partition configuration
+
 ### partition_filter
 
 The `partition_filter` option enables efficient date-based listing during cold starts (when no watermark exists yet):
