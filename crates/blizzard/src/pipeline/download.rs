@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use blizzard_core::emit;
+use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{
     DecompressionQueueDepth, FailureStage, FileProcessed, FileStatus, SourceStateFiles,
 };
@@ -85,6 +86,7 @@ impl Downloader {
     ) -> Result<IterationResult, PipelineError> {
         let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
         let mut files_since_save: usize = 0;
+        let mut util_timer = UtilizationTimer::new("processor");
 
         // Create checkpoint interval timer if enabled
         let mut checkpoint_interval: Option<Interval> = if checkpoint_config.enabled {
@@ -115,6 +117,14 @@ impl Downloader {
                 }
 
                 Some(result) = processing.next(), if !processing.is_empty() => {
+                    util_timer.maybe_update();
+
+                    // Update utilization state: waiting if no active processing
+                    if processing.len() == 1 {
+                        // This was the last one, transitioning to idle
+                        util_timer.start_wait();
+                    }
+
                     self.handle_processed_file(
                         result,
                         sink,
@@ -139,6 +149,10 @@ impl Downloader {
                 result = download_task.rx.recv(), if processing.len() < self.max_in_flight => {
                     match result {
                         Some(Ok(downloaded)) => {
+                            // Transition to working state when we have processing tasks
+                            if processing.is_empty() {
+                                util_timer.stop_wait();
+                            }
                             let future = spawn_read_task(downloaded, self.reader.clone());
                             processing.push(future);
                         }

@@ -415,18 +415,6 @@ impl InternalEvent for SourceStateFiles {
     }
 }
 
-/// Event emitted when the number of files pending Delta commit changes.
-pub struct PendingCommitFiles {
-    pub count: usize,
-}
-
-impl InternalEvent for PendingCommitFiles {
-    fn emit(self) {
-        trace!(count = self.count, "Pending commit files");
-        gauge!("blizzard_pending_commit_files").set(self.count as f64);
-    }
-}
-
 /// Event emitted to track bytes waiting in the upload queue.
 pub struct UploadQueueBytes {
     pub bytes: usize,

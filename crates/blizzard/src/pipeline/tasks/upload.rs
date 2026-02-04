@@ -23,13 +23,15 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use blizzard_core::emit;
-use blizzard_core::metrics::events::{ActiveUploads, ParquetFileWritten};
+use blizzard_core::metrics::UtilizationTimer;
+use blizzard_core::metrics::events::{ActiveUploads, ParquetFileWritten, UploadQueueBytes};
 use blizzard_core::{FinishedFile, StorageProviderRef};
 
 use crate::error::TableWriteError;
 
-/// Future type for upload operations.
-type UploadFuture = Pin<Box<dyn Future<Output = Result<UploadedFile, TableWriteError>> + Send>>;
+/// Future type for upload operations. Returns result and the file size for queue tracking.
+type UploadFuture =
+    Pin<Box<dyn Future<Output = (Result<UploadedFile, TableWriteError>, usize)> + Send>>;
 
 /// Result of a successful file upload.
 pub struct UploadedFile {
@@ -107,18 +109,29 @@ impl UploadTask {
     ) {
         let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
         let mut active_uploads: usize = 0;
+        let mut queue_bytes: usize = 0;
+        let mut util_timer = UtilizationTimer::new("uploader");
 
         loop {
             tokio::select! {
                 biased;
 
                 // Process completed uploads (prioritize to free up slots)
-                Some(result) = uploads.next(), if !uploads.is_empty() => {
+                Some((result, size)) = uploads.next(), if !uploads.is_empty() => {
+                    util_timer.maybe_update();
+
                     active_uploads -= 1;
+                    queue_bytes -= size;
                     emit!(ActiveUploads {
                         count: active_uploads,
                         target: pipeline.clone(),
                     });
+                    emit!(UploadQueueBytes { bytes: queue_bytes });
+
+                    // Update utilization state: waiting if no active uploads
+                    if active_uploads == 0 {
+                        util_timer.start_wait();
+                    }
 
                     match &result {
                         Ok(uploaded) => {
@@ -149,30 +162,41 @@ impl UploadTask {
 
                     let storage = storage.clone();
                     let pipeline_clone = pipeline.clone();
+                    let size = file.size;
 
+                    // Transition to working state when we have uploads
+                    if active_uploads == 0 {
+                        util_timer.stop_wait();
+                    }
                     active_uploads += 1;
+                    queue_bytes += size;
                     emit!(ActiveUploads {
                         count: active_uploads,
                         target: pipeline.clone(),
                     });
+                    emit!(UploadQueueBytes { bytes: queue_bytes });
 
                     debug!(
                         "[upload] Starting {} (active: {}/{})",
                         file.filename, active_uploads, max_concurrent
                     );
 
-                    uploads.push(Box::pin(upload_file(storage, file, pipeline_clone)));
+                    uploads.push(Box::pin(async move {
+                        (upload_file(storage, file, pipeline_clone).await, size)
+                    }));
                 }
             }
         }
 
         // Drain remaining uploads
-        while let Some(result) = uploads.next().await {
+        while let Some((result, size)) = uploads.next().await {
             active_uploads -= 1;
+            queue_bytes -= size;
             emit!(ActiveUploads {
                 count: active_uploads,
                 target: pipeline.clone(),
             });
+            emit!(UploadQueueBytes { bytes: queue_bytes });
 
             match &result {
                 Ok(uploaded) => {
@@ -190,11 +214,12 @@ impl UploadTask {
             let _ = result_tx.send(result).await;
         }
 
-        // Reset gauge on completion
+        // Reset gauges on completion
         emit!(ActiveUploads {
             count: 0,
             target: pipeline.clone(),
         });
+        emit!(UploadQueueBytes { bytes: 0 });
 
         debug!("[upload] All uploads complete");
     }
