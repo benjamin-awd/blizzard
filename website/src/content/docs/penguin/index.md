@@ -55,9 +55,3 @@ Options:
   -V, --version            Print version
 ```
 
-## Next Steps
-
-- [Delta Lake Commits](./delta-lake/) - How Penguin commits files to Delta Lake
-- [Schema Evolution](./schema-evolution/) - Handling schema changes in incoming data
-- [Fault Tolerance](./fault-tolerance/) - Crash recovery and exactly-once semantics
-- [Configuration](./configuration/) - Full configuration reference
