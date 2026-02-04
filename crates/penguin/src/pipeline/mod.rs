@@ -80,6 +80,7 @@ impl Pipeline {
             poll_jitter_secs,
             self.context.shutdown,
             self.key.id(),
+            "penguin",
         )
         .await?;
 

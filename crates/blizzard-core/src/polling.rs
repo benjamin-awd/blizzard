@@ -3,10 +3,12 @@
 //! Provides a reusable polling loop pattern for both blizzard and penguin.
 
 use async_trait::async_trait;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::emit;
+use crate::metrics::events::{IterationCompleted, IterationDuration, IterationResultType};
 use crate::topology::random_jitter;
 
 /// Result of a single processing iteration.
@@ -54,7 +56,8 @@ pub trait PollingProcessor {
 /// 3. Wait for poll_interval (plus random jitter) or shutdown signal
 /// 4. Repeat until shutdown
 ///
-/// The `name` parameter identifies the pipeline/table in log messages.
+/// The `name` parameter identifies the pipeline/table in log messages and metrics.
+/// The `service` parameter identifies the service ("blizzard" or "penguin") for metrics.
 /// The `poll_jitter_secs` parameter adds random jitter (0 to N seconds) on each
 /// iteration to prevent thundering herd when multiple pipelines poll simultaneously.
 pub async fn run_polling_loop<P: PollingProcessor>(
@@ -63,10 +66,12 @@ pub async fn run_polling_loop<P: PollingProcessor>(
     poll_jitter_secs: u64,
     shutdown: CancellationToken,
     name: &str,
+    service: &'static str,
 ) -> Result<(), P::Error> {
     let mut first_iteration = true;
 
     loop {
+        let iteration_start = Instant::now();
         // Race initialization against shutdown signal
         let shutdown_clone = shutdown.clone();
         let state = tokio::select! {
@@ -105,10 +110,20 @@ pub async fn run_polling_loop<P: PollingProcessor>(
             }
         };
 
-        // Exit on shutdown, otherwise wait and poll again
+        // Emit iteration metrics and exit on shutdown
         match result {
             IterationResult::Shutdown => break,
             IterationResult::NoItems => {
+                emit!(IterationCompleted {
+                    service,
+                    result: IterationResultType::NoItems,
+                    target: name.to_string(),
+                });
+                emit!(IterationDuration {
+                    service,
+                    duration: iteration_start.elapsed(),
+                    target: name.to_string(),
+                });
                 debug!(
                     target = name,
                     "No new items, waiting {}s before next poll",
@@ -116,6 +131,16 @@ pub async fn run_polling_loop<P: PollingProcessor>(
                 );
             }
             IterationResult::ProcessedItems => {
+                emit!(IterationCompleted {
+                    service,
+                    result: IterationResultType::Processed,
+                    target: name.to_string(),
+                });
+                emit!(IterationDuration {
+                    service,
+                    duration: iteration_start.elapsed(),
+                    target: name.to_string(),
+                });
                 debug!(
                     target = name,
                     "Iteration complete, waiting {}s before next poll",
