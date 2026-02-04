@@ -28,6 +28,7 @@ export default defineConfig({
 						{ label: 'Topology', slug: 'architecture/topology' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Parquet Writer', slug: 'architecture/sink' },
+						{ label: 'Watermarking', slug: 'architecture/watermarking' },
 						{ label: 'Storage Backends', slug: 'architecture/storage' },
 						{ label: 'Configuration', slug: 'reference/configuration' },
 						{ label: 'Error Handling', slug: 'reference/errors' },
