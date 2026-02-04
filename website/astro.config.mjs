@@ -22,18 +22,22 @@ export default defineConfig({
 					],
 				},
 				{
+					label: '⚙️ Core Concepts',
+					items: [
+						{ label: 'Topology', slug: 'concepts/topology' },
+						{ label: 'Watermarking', slug: 'concepts/watermarking' },
+						{ label: 'Storage Backends', slug: 'concepts/storage' },
+						{ label: 'Fault Tolerance', slug: 'concepts/fault-tolerance' },
+					],
+				},
+				{
 					label: '❄️ Blizzard',
 					items: [
 						{ label: 'Overview', slug: 'architecture/overview' },
-						{ label: 'Topology', slug: 'architecture/topology' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Parquet Writer', slug: 'architecture/sink' },
-						{ label: 'Watermarking', slug: 'architecture/watermarking' },
-						{ label: 'Storage Backends', slug: 'architecture/storage' },
 						{ label: 'Configuration', slug: 'reference/configuration' },
-						{ label: 'Error Handling', slug: 'reference/errors' },
 						{ label: 'Dead Letter Queue', slug: 'reference/dlq' },
-						{ label: 'Metrics', slug: 'reference/metrics' },
 					],
 				},
 				{
@@ -42,7 +46,6 @@ export default defineConfig({
 						{ label: 'Overview', slug: 'penguin' },
 						{ label: 'Delta Lake Commits', slug: 'penguin/delta-lake' },
 						{ label: 'Schema Evolution', slug: 'penguin/schema-evolution' },
-						{ label: 'Fault Tolerance', slug: 'penguin/fault-tolerance' },
 						{ label: 'Configuration', slug: 'penguin/configuration' },
 					],
 				},

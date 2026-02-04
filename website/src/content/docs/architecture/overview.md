@@ -1,5 +1,5 @@
 ---
-title: Blizzard Overview
+title: Overview
 description: How Blizzard's processing pipeline connects source and sink components
 ---
 
@@ -44,7 +44,7 @@ state -> diff: "processed files"
 diff -> pending: "pending files"
 ```
 
-## Processing Stages
+## Process
 
 The pipeline consists of concurrent stages connected by bounded channels:
 

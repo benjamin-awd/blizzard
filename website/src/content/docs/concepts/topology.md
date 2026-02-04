@@ -1,9 +1,9 @@
 ---
 title: Topology
-description: How Blizzard orchestrates multiple concurrent pipelines with shared resources and graceful shutdown
+description: How Blizzard and Penguin orchestrate multiple concurrent pipelines with shared resources and graceful shutdown
 ---
 
-Blizzard's topology layer provides shared orchestration primitives for running multiple pipelines concurrently. It handles resource sharing, jittered starts, and coordinated graceful shutdown across all components.
+The topology layer provides shared orchestration primitives for running multiple pipelines concurrently. It handles resource sharing, jittered starts, and coordinated graceful shutdown across all components.
 
 Both Blizzard and Penguin use this topology framework to manage their multi-pipeline and multi-table operations.
 

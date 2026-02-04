@@ -1,13 +1,13 @@
 ---
 title: Watermarking
-description: Efficient incremental file discovery using high watermarks
+description: Efficient incremental file discovery and tracking using high watermarks
 ---
 
-Blizzard uses watermark-based file tracking to efficiently discover new files without maintaining an unbounded in-memory set of processed files. This enables reliable incremental processing across restarts.
+Watermark-based tracking is a core pattern used throughout the Blizzard/Penguin pipeline. It enables efficient incremental processing without maintaining unbounded in-memory state.
 
-## How It Works
+## What Is a Watermark?
 
-A watermark is the file path of the last processed file. Since file paths are lexicographically sortable, Blizzard can efficiently find new files by listing only files "above" the watermark—files that sort after it alphabetically.
+A watermark is the file path of the last processed file. Since file paths are lexicographically sortable, components can efficiently find new files by listing only files "above" the watermark—files that sort after it alphabetically.
 
 ```
 Current watermark: date=2024-01-28/1706450400-01926abc.parquet
@@ -19,6 +19,18 @@ Files in storage:
   date=2024-01-28/1706450500-01926abd.parquet  ← Above watermark (new file!)
   date=2024-01-29/1706536800-01926b00.parquet  ← Above watermark (new file!)
 ```
+
+## Where Watermarks Are Used
+
+| Component | Purpose | Watermark Tracks |
+|-----------|---------|------------------|
+| **Blizzard** | Source file discovery | Last processed source file (`.ndjson.gz`) |
+| **Penguin** | Commit tracking | Last committed Parquet file to Delta Lake |
+
+Both use the same underlying mechanism but for different purposes:
+
+- **Blizzard** uses watermarks to discover new source files to ingest
+- **Penguin** uses watermarks to discover uncommitted Parquet files to add to Delta Lake
 
 ## Watermark Format
 
@@ -72,16 +84,13 @@ This is why file naming conventions matter—timestamps and UUIDv7 are designed 
 
 ## Efficient Partition Scanning
 
-When listing files above a watermark, Blizzard optimizes by:
+When listing files above a watermark, the system optimizes by:
 
 1. **Parsing the watermark** into partition prefix and filename
 2. **Filtering partitions** to only scan partitions >= the watermark's partition
 3. **Filtering files** within the watermark's partition to those > the watermark filename
 
-This means if your watermark is in `date=2024-01-28/`, Blizzard won't scan `date=2024-01-27/` or earlier partitions at all.
-
-Note: Within the watermark's partition, only the **filename** is compared (not the full path).
-
+This means if your watermark is in `date=2024-01-28/`, earlier partitions like `date=2024-01-27/` are skipped entirely.
 
 ```
 Watermark: date=2024-01-28/file2.parquet
@@ -93,13 +102,15 @@ Partitions:
   date=2024-01-29/  ← Scanned (after watermark partition, all files)
 ```
 
-## Cold Start Behavior
+## Blizzard: Source File Discovery
+
+Blizzard uses watermarks to track which source files have been processed.
+
+### Cold Start Behavior
 
 On first run (no watermark exists), Blizzard must discover existing files. Two modes are available:
 
-### Full Scan
-
-Without a partition filter, Blizzard scans all files recursively:
+**Full Scan** — Without a partition filter, Blizzard scans all files recursively:
 
 ```yaml
 sources:
@@ -109,9 +120,7 @@ sources:
     # No partition_filter - scans everything
 ```
 
-### Filtered Scan
-
-With a partition filter, Blizzard only scans recent partitions:
+**Filtered Scan** — With a partition filter, only recent partitions are scanned:
 
 ```yaml
 sources:
@@ -123,11 +132,9 @@ sources:
       lookback: 7  # Only scan last 7 days
 ```
 
-The `lookback` parameter generates partition prefixes for the last N days. On cold start, only those partitions are scanned—useful when you have years of historical data but only want to process recent files.
+The `lookback` parameter generates partition prefixes for the last N days—useful when you have years of historical data but only want to process recent files.
 
-## Configuration
-
-Enable watermarking in your Blizzard configuration:
+### Configuration
 
 ```yaml
 sources:
@@ -137,6 +144,9 @@ sources:
     partition_filter:
       prefix_template: "date=%Y-%m-%d"
       lookback: 7
+    checkpoint:
+      interval_files: 100   # Checkpoint every 100 files
+      interval_secs: 60     # Or every 60 seconds
 ```
 
 | Field | Description | Default |
@@ -145,17 +155,39 @@ sources:
 | `partition_filter.prefix_template` | strftime template for partition prefixes | - |
 | `partition_filter.lookback` | Days to look back on cold start | - |
 
-## Checkpointing
+## Penguin: Commit Tracking
 
-Blizzard persists the watermark to storage for recovery across restarts. See [Configuration](/blizzard/reference/configuration/) for checkpoint settings:
+Penguin uses watermarks to track which Parquet files have been committed to Delta Lake.
 
-```yaml
-sources:
-  events:
-    checkpoint:
-      interval_files: 100   # Checkpoint every 100 files
-      interval_secs: 60     # Or every 60 seconds
+### High Watermark Protocol
+
+The watermark is persisted in the Delta transaction log using `txn` actions:
+
+```json
+{
+  "txn": {
+    "appId": "penguin-events",
+    "version": 42,
+    "lastUpdated": 1706450400000
+  }
+}
 ```
+
+On each polling cycle, Penguin:
+
+1. Reads the current watermark from the Delta log
+2. Lists Parquet files above the watermark
+3. Commits new files to Delta Lake
+4. Updates the watermark to the highest committed path
+
+### Crash Recovery
+
+If Penguin crashes after committing but before updating the watermark:
+
+- Delta Lake's optimistic concurrency rejects duplicate file additions
+- Penguin safely resumes from the last persisted watermark
+
+See [Fault Tolerance](/blizzard/concepts/fault-tolerance/) for detailed failure scenarios.
 
 ## Requirements
 

@@ -1,5 +1,5 @@
 ---
-title: Penguin Overview
+title: Overview
 description: Penguin is the Delta Lake commit service for the Blizzard pipeline
 ---
 

@@ -19,8 +19,6 @@ Blizzard uses a two-tool architecture for reliable Delta Lake ingestion:
 - **Blizzard** ingests NDJSON files and writes Parquet files directly to the table directory
 - **Penguin** discovers uncommitted files and commits them to Delta Lake
 
-This separation provides fault tolerance—if one component fails, the other continues operating, and recovery is automatic on restart.
-
 ## Features
 
 <CardGrid>

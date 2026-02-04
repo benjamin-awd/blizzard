@@ -3,7 +3,7 @@ title: Penguin Configuration
 description: Complete configuration reference for Penguin, the Delta Lake commit service
 ---
 
-This page provides the complete configuration reference for Penguin. For an overview of how Penguin works, see the [Penguin Overview](./).
+This page provides the complete configuration reference for Penguin.
 
 ## Configuration Reference
 

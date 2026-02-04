@@ -3,7 +3,7 @@ title: Storage Backends
 description: Multi-cloud storage abstraction supporting S3, GCS, Azure Blob, and local filesystem
 ---
 
-Blizzard provides a unified storage abstraction layer that works seamlessly with Amazon S3, Google Cloud Storage, Azure Blob Storage, and local filesystems. This allows the same pipeline configuration to work across different cloud providers.
+Blizzard and Penguin share a unified storage abstraction layer that works seamlessly with Amazon S3, Google Cloud Storage, Azure Blob Storage, and local filesystems. This allows the same pipeline configuration to work across different cloud providers.
 
 ## Supported Backends
 

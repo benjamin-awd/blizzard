@@ -42,7 +42,7 @@ When Blizzard finishes processing a source file:
 
 1. Writes Parquet file to `{table_uri}/{partition}/{uuidv7}.parquet`
 
-File names use UUIDv7 which provides lexicographic ordering by time, enabling efficient watermark-based discovery.
+File names use UUIDv7 which provides lexicographic ordering by time, enabling efficient [watermark-based discovery](/blizzard/concepts/watermarking/).
 
 ### 2. Penguin Commits to Delta Lake
 
