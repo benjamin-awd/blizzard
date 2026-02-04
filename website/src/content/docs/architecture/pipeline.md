@@ -12,162 +12,82 @@ On each iteration:
 2. **Process**: Runs the full download -> process -> upload pipeline for pending files
 3. **Wait**: Sleeps for the configured poll interval before checking for new files
 
+## Prepare
 
-## Architecture Overview
+The prepare phase lists source files and identifies pending work by diffing against tracked state:
 
 ```d2
-source: Source Storage {
-  shape: cylinder
+direction: right
+
+source: Source Storage { shape: cylinder }
+
+list: List Files {
+  label: "List Files\n(async)"
 }
 
-pipeline: Blizzard Pipeline {
-  download: Downloader {
-    label: "Downloader\n(async, I/O bound)"
-  }
-
-  process: Processor {
-    label: "Processor\n(blocking, CPU bound)"
-  }
-
-  upload: Uploader {
-    label: "Uploader\n(async, I/O bound)"
-  }
-
-  download -> process: channel
-  process -> upload: channel
+state: State Tracker {
+  label: "State Tracker\n(processed files)"
+  shape: document
 }
 
-table: Table Directory {
-  shape: cylinder
+diff: Diff {
+  label: "Diff\n(new - processed)"
 }
 
-penguin: Penguin {
-  shape: hexagon
+pending: Pending Files {
+  shape: queue
 }
 
-delta: Delta Lake {
-  shape: cylinder
-}
-
-source -> pipeline.download: NDJSON.gz
-pipeline -> table: Parquet
-table -> penguin -> delta
+source -> list: "list objects"
+list -> diff: "all files"
+state -> diff: "processed files"
+diff -> pending: "pending files"
 ```
 
 ## Processing Stages
 
-The pipeline consists of three concurrent stages connected by bounded channels:
+The pipeline consists of concurrent stages connected by bounded channels:
 
 | Stage | Thread Pool | Work Type | Description |
 |-------|-------------|-----------|-------------|
-| **Downloader** | Tokio async | I/O bound | Concurrent file downloads from cloud storage |
-| **Processor** | Tokio blocking | CPU bound | Decompress and parse NDJSON to Arrow batches |
-| **Uploader** | Tokio async | I/O bound | Concurrent multipart uploads to table directory |
+| **Download** | Tokio async | I/O bound | Concurrent file downloads from cloud storage |
+| **Process** | Tokio blocking | CPU bound | Decompress and parse NDJSON to Arrow batches |
+| **Upload** | Tokio async | I/O bound | Concurrent multipart uploads to table directory |
 
-### Stage 1: Downloader
-
-The `DownloadTask` runs as a background tokio task managing concurrent file downloads:
-
-- Downloads compressed NDJSON files from source storage
-- Uses `FuturesUnordered` to manage concurrent downloads
-- Respects `max_concurrent_files` concurrency limit (default: 4)
-- Sends `DownloadedFile { path, compressed_data }` through a bounded channel
+1. **Download**: `DownloadTask` manages concurrent downloads via `FuturesUnordered`, sending `DownloadedFile` through a bounded channel
+2. **Process**: `spawn_blocking` decompresses (gzip/zstd) and parses NDJSON to Arrow RecordBatches
+3. **Sink**: `ParquetWriter` writes batches, queues rolled files to `UploadTask` via bounded channel, drains results with `try_recv()`
+4. **Upload**: `UploadTask` runs concurrent multipart uploads to the table directory
 
 ```d2
 direction: down
 
-files: Pending Files {
-  label: "Pending Files\n[file1, file2, ...]"
-  shape: document
+source: Source Files { shape: document }
+
+download: DownloadTask {
+  label: "DownloadTask\n(async, 4 concurrent)"
 }
 
-download_task: DownloadTask {
-  futures: FuturesUnordered {
-    label: "FuturesUnordered\n<DownloadFuture>"
-  }
-  concurrent: {
-    label: "max_concurrent_files\n(default: 4)"
-    style.stroke-dash: 3
-  }
+process: spawn_blocking {
+  label: "spawn_blocking\n(decompress + parse)"
 }
 
-channel: {
-  label: "mpsc::channel\n(bounded: max_concurrent_files)"
-  shape: queue
+sink: Sink {
+  writer: ParquetWriter
 }
 
-files -> download_task.futures: spawn download
-download_task.futures -> channel: DownloadedFile
-```
-
-### Stage 2: Processor
-
-The processor runs CPU-intensive work via `tokio::task::spawn_blocking`:
-
-1. **Decompress**: Gzip or Zstd decompression
-2. **Parse**: NDJSON to Arrow RecordBatches using the Arrow JSON decoder
-3. **Return**: `ProcessedFile { path, batches }` to the main loop
-
-The main `Downloader` loop then writes batches to the `Sink`, which handles Parquet writing and rolling.
-
-```d2
-direction: down
-
-input: DownloadedFile {
-  label: "DownloadedFile\n{ path, compressed_data }"
-  shape: document
+upload: UploadTask {
+  label: "UploadTask\n(async, 4 concurrent)"
 }
 
-blocking: spawn_blocking {
-  decompress: Decompress {
-    label: "Decompress\n(gzip/zstd)"
-  }
-  parse: Parse {
-    label: "Parse NDJSON\n(Arrow JSON decoder)"
-  }
-  decompress -> parse
-}
+output: Table Directory { shape: cylinder }
 
-output: ProcessedFile {
-  label: "ProcessedFile\n{ path, batches: Vec<RecordBatch> }"
-  shape: document
-}
-
-input -> blocking.decompress
-blocking.parse -> output
-```
-
-### Stage 3: Uploader
-
-The uploader handles concurrent file uploads:
-
-- Uploads finished Parquet files to table directory
-- Uses parallel multipart uploads for large files
-- Penguin discovers these files for Delta Lake commits
-
-```d2
-direction: down
-
-input: Parquet File {
-  shape: document
-}
-
-upload_task: UploadTask {
-  futures: FuturesUnordered {
-    label: "FuturesUnordered\n<UploadFuture>"
-  }
-  concurrent: {
-    label: "max_concurrent_uploads\n(default: 4)"
-    style.stroke-dash: 3
-  }
-}
-
-output: Table Directory {
-  shape: cylinder
-}
-
-input -> upload_task.futures: queue
-upload_task.futures -> output: multipart upload
+source -> download: "file list"
+download -> process: "DownloadedFile\n(bounded channel)"
+process -> sink.writer: RecordBatches
+sink.writer -> upload: "rolled Parquet\n(bounded channel)"
+upload -> output: multipart upload
+upload -> sink: "drain results" {style.stroke-dash: 3}
 ```
 
 ## Detailed Processing Flow
