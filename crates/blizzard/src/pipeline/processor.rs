@@ -18,7 +18,7 @@ use blizzard_core::{
     PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
 };
 
-use super::download::{Downloader, IncrementalCheckpointConfig};
+use super::download::{Downloader, IncrementalCheckpointConfig, ProcessingContext};
 use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
 use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
@@ -281,13 +281,16 @@ impl Iteration {
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
     ) -> Result<(IterationResult, Sink), PipelineError> {
+        let mut ctx = ProcessingContext {
+            sink: &mut self.sink,
+            state_tracker,
+            failure_tracker,
+        };
         let result = self
             .downloader
             .run(
                 self.download_task,
-                &mut self.sink,
-                state_tracker,
-                failure_tracker,
+                &mut ctx,
                 shutdown,
                 &self.checkpoint_config,
                 self.total_files,

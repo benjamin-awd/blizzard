@@ -50,6 +50,13 @@ impl IncrementalCheckpointConfig {
     }
 }
 
+/// Context holding mutable references needed during download processing.
+pub(super) struct ProcessingContext<'a> {
+    pub sink: &'a mut Sink,
+    pub state_tracker: &'a mut dyn StateTracker,
+    pub failure_tracker: &'a mut FailureTracker,
+}
+
 /// Orchestrates the download -> parse -> write pipeline.
 ///
 /// Manages concurrent downloads and parsing with backpressure,
@@ -79,9 +86,7 @@ impl Downloader {
     pub async fn run(
         &self,
         mut download_task: DownloadTask,
-        sink: &mut Sink,
-        state_tracker: &mut dyn StateTracker,
-        failure_tracker: &mut FailureTracker,
+        ctx: &mut ProcessingContext<'_>,
         shutdown: CancellationToken,
         checkpoint_config: &IncrementalCheckpointConfig,
         total_files: usize,
@@ -112,7 +117,7 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
             emit!(SourceStateFiles {
-                count: state_tracker.tracked_count(),
+                count: ctx.state_tracker.tracked_count(),
                 target: self.pipeline_key.clone(),
             });
 
@@ -133,12 +138,7 @@ impl Downloader {
                         util_timer.start_wait();
                     }
 
-                    self.handle_processed_file(
-                        result,
-                        sink,
-                        state_tracker,
-                        failure_tracker,
-                    ).await?;
+                    self.handle_processed_file(result, ctx).await?;
 
                     // Update pending files count
                     files_processed += 1;
@@ -151,14 +151,14 @@ impl Downloader {
                     if checkpoint_config.enabled {
                         files_since_save += 1;
                         if files_since_save >= checkpoint_config.interval_files {
-                            self.try_incremental_save(state_tracker, &mut files_since_save).await;
+                            self.try_incremental_save(ctx.state_tracker, &mut files_since_save).await;
                         }
                     }
                 }
 
                 // Time-based checkpoint save
                 _ = Self::tick_checkpoint(&mut checkpoint_interval), if checkpoint_config.enabled && files_since_save > 0 => {
-                    self.try_incremental_save(state_tracker, &mut files_since_save).await;
+                    self.try_incremental_save(ctx.state_tracker, &mut files_since_save).await;
                 }
 
                 result = download_task.rx.recv(), if processing.len() < self.max_in_flight => {
@@ -173,7 +173,7 @@ impl Downloader {
                         }
                         Some(Err(e)) => {
                             warn!(target = %self.pipeline_key, error = %e, "Download failed");
-                            failure_tracker
+                            ctx.failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Download)
                                 .await?;
 
@@ -234,14 +234,12 @@ impl Downloader {
     async fn handle_processed_file(
         &self,
         result: Result<ProcessedFile, PipelineError>,
-        sink: &mut Sink,
-        state_tracker: &mut dyn StateTracker,
-        failure_tracker: &mut FailureTracker,
+        ctx: &mut ProcessingContext<'_>,
     ) -> Result<(), PipelineError> {
         match result {
             Ok(ProcessedFile { path, batches }) => {
-                sink.write_file_batches(&path, batches).await?;
-                state_tracker.mark_processed(&path);
+                ctx.sink.write_file_batches(&path, batches).await?;
+                ctx.state_tracker.mark_processed(&path);
                 emit!(FileProcessed {
                     status: FileStatus::Success,
                     target: self.pipeline_key.clone(),
@@ -249,7 +247,7 @@ impl Downloader {
             }
             Err(e) => {
                 warn!(target = %self.pipeline_key, error = %e, "File processing failed");
-                failure_tracker
+                ctx.failure_tracker
                     .record_failure(&e.to_string(), FailureStage::Parse)
                     .await?;
             }
