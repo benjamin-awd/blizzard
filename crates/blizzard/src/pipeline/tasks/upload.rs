@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use blizzard_core::emit;
 use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{
-    ActiveUploads, ParquetFileWritten, UploadQueueBytes, UploadQueueDepth,
+    ActiveUploads, ParquetFileWritten, UploadQueueBytes, UploadQueueDepth, UploadResultsPending,
 };
 use blizzard_core::{FinishedFile, StorageProviderRef};
 
@@ -45,7 +45,7 @@ pub struct UploadedFile {
 /// Handle to the background uploader task.
 pub struct UploadTask {
     tx: mpsc::Sender<FinishedFile>,
-    rx: mpsc::Receiver<Result<UploadedFile, TableWriteError>>,
+    rx: mpsc::UnboundedReceiver<Result<UploadedFile, TableWriteError>>,
     handle: JoinHandle<()>,
 }
 
@@ -55,7 +55,10 @@ impl UploadTask {
     /// See module-level docs for why this doesn't take a shutdown token.
     pub fn spawn(storage: StorageProviderRef, max_concurrent: usize, pipeline: String) -> Self {
         let (file_tx, file_rx) = mpsc::channel(max_concurrent);
-        let (result_tx, result_rx) = mpsc::channel(max_concurrent);
+        // Result channel is unbounded to prevent deadlock: results are only consumed
+        // during finalize(), so a bounded channel would fill up and block the upload
+        // task, which would then block the sink trying to send new files.
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
 
         let handle = tokio::spawn(Self::run(
             file_rx,
@@ -92,6 +95,9 @@ impl UploadTask {
             results.push(result);
         }
 
+        // Reset pending results gauge now that we've drained them
+        emit!(UploadResultsPending { count: 0 });
+
         // Wait for task to complete
         let _ = self.handle.await;
 
@@ -104,7 +110,7 @@ impl UploadTask {
     /// all queued files are uploaded before shutdown. See module-level docs.
     async fn run(
         mut file_rx: mpsc::Receiver<FinishedFile>,
-        result_tx: mpsc::Sender<Result<UploadedFile, TableWriteError>>,
+        result_tx: mpsc::UnboundedSender<Result<UploadedFile, TableWriteError>>,
         storage: StorageProviderRef,
         max_concurrent: usize,
         pipeline: String,
@@ -112,6 +118,7 @@ impl UploadTask {
         let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
         let mut active_uploads: usize = 0;
         let mut queue_bytes: usize = 0;
+        let mut results_pending: usize = 0;
         let mut util_timer = UtilizationTimer::new("uploader");
 
         loop {
@@ -148,11 +155,13 @@ impl UploadTask {
                         }
                     }
 
-                    // Send result to consumer
-                    if result_tx.send(result).await.is_err() {
+                    // Send result to consumer (unbounded, never blocks)
+                    if result_tx.send(result).is_err() {
                         debug!("[upload] Consumer closed, stopping uploads");
                         break;
                     }
+                    results_pending += 1;
+                    emit!(UploadResultsPending { count: results_pending });
                 }
 
                 // Accept new files only when under max_concurrent limit
@@ -201,7 +210,9 @@ impl UploadTask {
                 target: pipeline.clone(),
             });
             emit!(UploadQueueBytes { bytes: queue_bytes });
-            emit!(UploadQueueDepth { count: active_uploads });
+            emit!(UploadQueueDepth {
+                count: active_uploads
+            });
 
             match &result {
                 Ok(uploaded) => {
@@ -216,10 +227,15 @@ impl UploadTask {
             }
 
             // Try to send, but don't fail if receiver is closed
-            let _ = result_tx.send(result).await;
+            if result_tx.send(result).is_ok() {
+                results_pending += 1;
+                emit!(UploadResultsPending {
+                    count: results_pending
+                });
+            }
         }
 
-        // Reset gauges on completion
+        // Reset gauges on completion (except results_pending, reset when finalize drains)
         emit!(ActiveUploads {
             count: 0,
             target: pipeline.clone(),
@@ -227,7 +243,7 @@ impl UploadTask {
         emit!(UploadQueueBytes { bytes: 0 });
         emit!(UploadQueueDepth { count: 0 });
 
-        debug!("[upload] All uploads complete");
+        debug!("[upload] All uploads complete, {results_pending} results pending collection");
     }
 }
 
@@ -355,5 +371,75 @@ mod tests {
         for (i, result) in results.iter().enumerate() {
             assert!(result.is_ok(), "File {i} should succeed");
         }
+    }
+
+    /// Test that result channel backpressure doesn't cause deadlock.
+    ///
+    /// With max_concurrent=1, uploads complete one at a time. If the result
+    /// channel were bounded to max_concurrent, it would fill after 1 upload,
+    /// blocking the upload task and preventing new uploads from starting.
+    /// This would deadlock when the sender tries to queue more files.
+    ///
+    /// The unbounded result channel prevents this: results accumulate without
+    /// blocking, and are drained when finalize() is called.
+    #[tokio::test]
+    async fn test_no_deadlock_when_results_accumulate() {
+        use std::time::Duration;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_uri = temp_dir.path().to_str().unwrap();
+
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(dest_uri, HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        // Use max_concurrent=1 to ensure uploads complete sequentially.
+        // With a bounded result channel of size 1, this would deadlock after
+        // the first upload completes (result channel full, can't start next).
+        let upload_task = UploadTask::spawn(storage, 1, "test".to_string());
+
+        // Send many more files than max_concurrent. Each upload must complete
+        // and queue its result before the next can start.
+        let file_count = 10;
+
+        // Use a timeout to fail fast if deadlock occurs
+        let send_result = tokio::time::timeout(Duration::from_secs(5), async {
+            for i in 0..file_count {
+                upload_task
+                    .send(test_file(&format!("file{i}.parquet")))
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+
+        assert!(
+            send_result.is_ok(),
+            "Sending files should not deadlock (timed out)"
+        );
+
+        // Finalize should drain all accumulated results
+        let finalize_result = tokio::time::timeout(Duration::from_secs(5), async {
+            upload_task.finalize().await
+        })
+        .await;
+
+        assert!(
+            finalize_result.is_ok(),
+            "Finalize should not deadlock (timed out)"
+        );
+
+        let results = finalize_result.unwrap();
+        assert_eq!(
+            results.len(),
+            file_count,
+            "All {file_count} results should be collected"
+        );
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "All uploads should succeed"
+        );
     }
 }
