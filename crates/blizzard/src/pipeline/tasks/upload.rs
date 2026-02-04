@@ -24,7 +24,9 @@ use tracing::{debug, info, warn};
 
 use blizzard_core::emit;
 use blizzard_core::metrics::UtilizationTimer;
-use blizzard_core::metrics::events::{ActiveUploads, ParquetFileWritten, UploadQueueBytes};
+use blizzard_core::metrics::events::{
+    ActiveUploads, ParquetFileWritten, UploadQueueBytes, UploadQueueDepth,
+};
 use blizzard_core::{FinishedFile, StorageProviderRef};
 
 use crate::error::TableWriteError;
@@ -127,6 +129,7 @@ impl UploadTask {
                         target: pipeline.clone(),
                     });
                     emit!(UploadQueueBytes { bytes: queue_bytes });
+                    emit!(UploadQueueDepth { count: active_uploads });
 
                     // Update utilization state: waiting if no active uploads
                     if active_uploads == 0 {
@@ -175,6 +178,7 @@ impl UploadTask {
                         target: pipeline.clone(),
                     });
                     emit!(UploadQueueBytes { bytes: queue_bytes });
+                    emit!(UploadQueueDepth { count: active_uploads });
 
                     debug!(
                         "[upload] Starting {} (active: {}/{})",
@@ -197,6 +201,7 @@ impl UploadTask {
                 target: pipeline.clone(),
             });
             emit!(UploadQueueBytes { bytes: queue_bytes });
+            emit!(UploadQueueDepth { count: active_uploads });
 
             match &result {
                 Ok(uploaded) => {
@@ -220,6 +225,7 @@ impl UploadTask {
             target: pipeline.clone(),
         });
         emit!(UploadQueueBytes { bytes: 0 });
+        emit!(UploadQueueDepth { count: 0 });
 
         debug!("[upload] All uploads complete");
     }

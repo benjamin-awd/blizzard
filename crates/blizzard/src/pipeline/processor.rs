@@ -11,6 +11,8 @@ use tracing::{debug, info, warn};
 
 use snafu::ResultExt;
 
+use blizzard_core::emit;
+use blizzard_core::metrics::events::FilesDiscovered;
 use blizzard_core::polling::{IterationResult, PollingProcessor};
 use blizzard_core::{
     PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
@@ -212,6 +214,7 @@ struct Iteration {
     downloader: Downloader,
     download_task: DownloadTask,
     checkpoint_config: IncrementalCheckpointConfig,
+    total_files: usize,
 }
 
 impl Iteration {
@@ -223,6 +226,8 @@ impl Iteration {
         shutdown: CancellationToken,
         key: &str,
     ) -> Result<Self, PipelineError> {
+        let total_files = pending_files.len();
+
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(config.sink.file_size_mb)
             .with_row_group_size_bytes(config.sink.row_group_size_bytes)
@@ -265,6 +270,7 @@ impl Iteration {
             downloader,
             download_task,
             checkpoint_config,
+            total_files,
         })
     }
 
@@ -284,6 +290,7 @@ impl Iteration {
                 failure_tracker,
                 shutdown,
                 &self.checkpoint_config,
+                self.total_files,
             )
             .await;
 
@@ -359,6 +366,11 @@ impl PollingProcessor for Processor {
         if pending_files.is_empty() {
             return Ok(None);
         }
+
+        emit!(FilesDiscovered {
+            count: pending_files.len() as u64,
+            target: self.key.id().to_string(),
+        });
 
         info!(target = %self.key, files = pending_files.len(), "Found files to process");
 

@@ -15,7 +15,8 @@ use tracing::{debug, info, warn};
 use blizzard_core::emit;
 use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{
-    DecompressionQueueDepth, FailureStage, FileProcessed, FileStatus, SourceStateFiles,
+    DecompressionQueueDepth, FailureStage, FileProcessed, FileStatus, PendingFiles,
+    SourceStateFiles,
 };
 use blizzard_core::polling::IterationResult;
 
@@ -83,10 +84,18 @@ impl Downloader {
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
         checkpoint_config: &IncrementalCheckpointConfig,
+        total_files: usize,
     ) -> Result<IterationResult, PipelineError> {
         let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
         let mut files_since_save: usize = 0;
+        let mut files_processed: usize = 0;
         let mut util_timer = UtilizationTimer::new("processor");
+
+        // Emit initial pending files count
+        emit!(PendingFiles {
+            count: total_files,
+            target: self.pipeline_key.clone(),
+        });
 
         // Create checkpoint interval timer if enabled
         let mut checkpoint_interval: Option<Interval> = if checkpoint_config.enabled {
@@ -131,6 +140,13 @@ impl Downloader {
                         failure_tracker,
                     ).await?;
 
+                    // Update pending files count
+                    files_processed += 1;
+                    emit!(PendingFiles {
+                        count: total_files.saturating_sub(files_processed),
+                        target: self.pipeline_key.clone(),
+                    });
+
                     // Track files for incremental checkpoint
                     if checkpoint_config.enabled {
                         files_since_save += 1;
@@ -160,6 +176,13 @@ impl Downloader {
                             failure_tracker
                                 .record_failure(&e.to_string(), FailureStage::Download)
                                 .await?;
+
+                            // Update pending files count for failed download
+                            files_processed += 1;
+                            emit!(PendingFiles {
+                                count: total_files.saturating_sub(files_processed),
+                                target: self.pipeline_key.clone(),
+                            });
                         }
                         None => {
                             if processing.is_empty() {

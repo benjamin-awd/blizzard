@@ -130,6 +130,37 @@ impl InternalEvent for FileProcessed {
     }
 }
 
+/// Event emitted when files are discovered during source listing.
+pub struct FilesDiscovered {
+    pub count: u64,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for FilesDiscovered {
+    fn emit(self) {
+        trace!(count = self.count, target = %self.target, "Files discovered");
+        counter!("blizzard_files_discovered_total", "target" => self.target).increment(self.count);
+    }
+}
+
+/// Event emitted to track the current number of files pending processing.
+///
+/// This gauge shows files that have been discovered but not yet processed,
+/// providing visibility into the processing backlog.
+pub struct PendingFiles {
+    pub count: usize,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for PendingFiles {
+    fn emit(self) {
+        trace!(count = self.count, target = %self.target, "Pending files");
+        gauge!("blizzard_pending_files", "target" => self.target).set(self.count as f64);
+    }
+}
+
 /// Event emitted when an Arrow RecordBatch is created.
 pub struct BatchesProcessed {
     pub count: u64,
@@ -474,5 +505,84 @@ impl InternalEvent for BufferedRecords {
     fn emit(self) {
         trace!(count = self.count, target = %self.target, "Buffered records");
         gauge!("blizzard_buffered_records", "target" => self.target).set(self.count as f64);
+    }
+}
+
+// ============================================================================
+// Polling iteration events
+// ============================================================================
+
+/// Result type for iteration metrics.
+#[derive(Debug, Clone, Copy)]
+pub enum IterationResultType {
+    Processed,
+    NoItems,
+}
+
+impl IterationResultType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            IterationResultType::Processed => "processed",
+            IterationResultType::NoItems => "no_items",
+        }
+    }
+}
+
+/// Event emitted when a polling iteration completes.
+///
+/// Tracks iteration outcomes across both blizzard and penguin services.
+pub struct IterationCompleted {
+    /// Service identifier ("blizzard" or "penguin").
+    pub service: &'static str,
+    /// Result of the iteration.
+    pub result: IterationResultType,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for IterationCompleted {
+    fn emit(self) {
+        trace!(
+            service = self.service,
+            result = self.result.as_str(),
+            target = %self.target,
+            "Iteration completed"
+        );
+        counter!(
+            "polling_iterations_total",
+            "service" => self.service,
+            "result" => self.result.as_str(),
+            "target" => self.target
+        )
+        .increment(1);
+    }
+}
+
+/// Event emitted to track polling iteration duration.
+///
+/// Measures time spent in prepare + process phases.
+pub struct IterationDuration {
+    /// Service identifier ("blizzard" or "penguin").
+    pub service: &'static str,
+    /// Duration of the iteration.
+    pub duration: Duration,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for IterationDuration {
+    fn emit(self) {
+        trace!(
+            service = self.service,
+            duration_ms = self.duration.as_millis(),
+            target = %self.target,
+            "Iteration duration"
+        );
+        histogram!(
+            "polling_iteration_duration_seconds",
+            "service" => self.service,
+            "target" => self.target
+        )
+        .record(self.duration.as_secs_f64());
     }
 }

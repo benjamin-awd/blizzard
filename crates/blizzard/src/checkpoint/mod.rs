@@ -20,6 +20,8 @@ use object_store::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use blizzard_core::emit;
+use blizzard_core::metrics::events::CheckpointAge;
 use blizzard_core::storage::StorageProvider;
 
 use crate::error::StorageError;
@@ -76,10 +78,22 @@ impl CheckpointManager {
                 let json = String::from_utf8_lossy(&bytes);
                 match serde_json::from_str::<CheckpointState>(&json) {
                     Ok(state) => {
+                        // Emit checkpoint age based on last_update_ts
+                        let age_seconds = if state.last_update_ts > 0 {
+                            let now = chrono::Utc::now().timestamp();
+                            (now - state.last_update_ts).max(0) as f64
+                        } else {
+                            0.0
+                        };
+                        emit!(CheckpointAge {
+                            seconds: age_seconds
+                        });
+
                         info!(
                             target = %self.pipeline_key,
                             watermark = ?state.watermark,
                             last_update_ts = state.last_update_ts,
+                            age_seconds = age_seconds,
                             "Loaded checkpoint"
                         );
                         self.state = state;
@@ -124,6 +138,9 @@ impl CheckpointManager {
 
         // Atomic rename
         self.storage.rename(&temp_path, &final_path).await?;
+
+        // Checkpoint just saved, age is 0
+        emit!(CheckpointAge { seconds: 0.0 });
 
         debug!(
             target = %self.pipeline_key,

@@ -87,7 +87,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(penguin_files_committed_total{job=~\"$job\"}[5m]))",
+          "expr": "sum(rate(penguin_files_committed_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "Files/s",
           "refId": "A"
         }
@@ -148,7 +148,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(penguin_records_committed_total{job=~\"$job\"}[5m]))",
+          "expr": "sum(rate(penguin_records_committed_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "Records/s",
           "refId": "A"
         }
@@ -209,7 +209,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_delta_table_version{job=~\"$job\"}",
+          "expr": "penguin_delta_table_version{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -278,7 +278,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_checkpoint_state_bytes{job=~\"$job\"}",
+          "expr": "penguin_checkpoint_state_bytes{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "Checkpoint Size",
           "refId": "A"
         }
@@ -385,7 +385,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (target) (rate(penguin_files_committed_total{job=~\"$job\"}[5m]))",
+          "expr": "sum by (target) (rate(penguin_files_committed_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -479,7 +479,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (target) (rate(penguin_records_committed_total{job=~\"$job\"}[5m]))",
+          "expr": "sum by (target) (rate(penguin_records_committed_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -580,7 +580,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (le) (increase(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by (le) (increase(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\", pod=~\"$pod\"}[$__rate_interval]))",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -675,7 +675,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\", pod=~\"$pod\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -684,7 +684,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.90, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\"}[5m])))",
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\", pod=~\"$pod\"}[5m])))",
           "legendFormat": "p90",
           "refId": "B"
         },
@@ -693,7 +693,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(penguin_delta_commit_duration_seconds_bucket{job=~\"$job\", pod=~\"$pod\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -799,7 +799,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (action) (rate(penguin_schema_evolutions_total{job=~\"$job\"}[5m]))",
+          "expr": "sum by (action) (rate(penguin_schema_evolutions_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -892,7 +892,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (target) (rate(penguin_schema_evolutions_total{job=~\"$job\"}[5m]))",
+          "expr": "sum by (target) (rate(penguin_schema_evolutions_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -1000,7 +1000,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_delta_table_version{job=~\"$job\"}",
+          "expr": "penguin_delta_table_version{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -1094,7 +1094,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_pending_files{job=~\"$job\"}",
+          "expr": "penguin_pending_files{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -1202,7 +1202,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_checkpoint_state_bytes{job=~\"$job\"}",
+          "expr": "penguin_checkpoint_state_bytes{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "Checkpoint Size",
           "refId": "A"
         }
@@ -1214,9 +1214,7 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "tags": [
-    "penguin",
-    "delta-lake",
-    "streaming"
+    "penguin"
   ],
   "templating": {
     "list": [
@@ -1266,6 +1264,34 @@
         "skipUrlSync": false,
         "sort": 1,
         "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(penguin_files_committed_total{job=~\"$job\", pod=~\"$pod\"}, pod)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Pod",
+        "multi": false,
+        "name": "pod",
+        "options": [],
+        "query": {
+          "query": "label_values(penguin_files_committed_total{job=~\"$job\", pod=~\"$pod\"}, pod)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
@@ -1286,7 +1312,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "Penguin Delta Lake",
+  "title": "[SYS] Penguin",
   "uid": "penguin-delta",
   "version": 1,
   "weekStart": ""
