@@ -2,11 +2,13 @@
 //!
 //! This module provides functions for creating and loading Delta Lake tables.
 
+use std::sync::Arc;
+
 use deltalake::DeltaTable;
-use deltalake::arrow::datatypes::Schema;
+use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::operations::create::CreateBuilder;
 use object_store::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use blizzard_core::storage::{BackendConfig, StorageProvider};
@@ -112,6 +114,32 @@ pub async fn try_open_table(
     Ok(table)
 }
 
+/// Add partition columns to the schema if they don't already exist.
+///
+/// In Hive-style partitioned parquet files, partition columns are stored in
+/// the directory path (e.g., `date=2024-01-28/file.parquet`) rather than in
+/// the parquet file itself. When inferring the schema from the parquet file,
+/// these partition columns are missing. This function adds them as String
+/// fields so that Delta Lake table creation succeeds.
+fn add_partition_columns_to_schema(schema: &Schema, partition_by: &[String]) -> Schema {
+    let existing_fields: std::collections::HashSet<&str> =
+        schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+    let mut fields: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
+
+    for partition_col in partition_by {
+        if !existing_fields.contains(partition_col.as_str()) {
+            debug!(
+                "Adding partition column '{partition_col}' to schema (not present in parquet file)"
+            );
+            // Partition columns are always strings in Hive-style partitioning
+            fields.push(Arc::new(Field::new(partition_col, DataType::Utf8, true)));
+        }
+    }
+
+    Schema::new(fields)
+}
+
 /// Load or create a Delta Lake table with the given schema.
 pub async fn load_or_create_table(
     storage_provider: &StorageProvider,
@@ -143,8 +171,12 @@ pub async fn load_or_create_table(
             // Table doesn't exist, create it
             info!(target = %table_name, "Creating new Delta table at {table_url}");
 
+            // Add partition columns to schema if they don't exist
+            // (Hive-style partitioning stores them in paths, not in parquet files)
+            let schema_with_partitions = add_partition_columns_to_schema(schema, partition_by);
+
             // Convert Arrow schema to Delta schema
-            let delta_schema = arrow_schema_to_delta(schema)?;
+            let delta_schema = arrow_schema_to_delta(&schema_with_partitions)?;
 
             let mut builder = CreateBuilder::new()
                 .with_location(&table_url)
@@ -163,5 +195,74 @@ pub async fn load_or_create_table(
 
             Ok(table)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_partition_columns_to_schema_adds_missing_columns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let partition_by = vec!["date".to_string(), "hour".to_string()];
+        let result = add_partition_columns_to_schema(&schema, &partition_by);
+
+        assert_eq!(result.fields().len(), 4);
+        assert_eq!(result.field(0).name(), "id");
+        assert_eq!(result.field(1).name(), "name");
+        assert_eq!(result.field(2).name(), "date");
+        assert_eq!(result.field(2).data_type(), &DataType::Utf8);
+        assert!(result.field(2).is_nullable());
+        assert_eq!(result.field(3).name(), "hour");
+        assert_eq!(result.field(3).data_type(), &DataType::Utf8);
+        assert!(result.field(3).is_nullable());
+    }
+
+    #[test]
+    fn test_add_partition_columns_to_schema_skips_existing_columns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("date", DataType::Date32, false), // Already exists with different type
+        ]);
+
+        let partition_by = vec!["date".to_string(), "hour".to_string()];
+        let result = add_partition_columns_to_schema(&schema, &partition_by);
+
+        // Only 3 fields - date already existed, hour is added
+        assert_eq!(result.fields().len(), 3);
+        assert_eq!(result.field(0).name(), "id");
+        assert_eq!(result.field(1).name(), "date");
+        assert_eq!(result.field(1).data_type(), &DataType::Date32); // Preserves original type
+        assert_eq!(result.field(2).name(), "hour");
+        assert_eq!(result.field(2).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_add_partition_columns_to_schema_no_partition_columns() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let partition_by: Vec<String> = vec![];
+        let result = add_partition_columns_to_schema(&schema, &partition_by);
+
+        assert_eq!(result.fields().len(), 2);
+    }
+
+    #[test]
+    fn test_add_partition_columns_to_schema_empty_schema() {
+        let schema = Schema::new(Vec::<Field>::new());
+
+        let partition_by = vec!["date".to_string()];
+        let result = add_partition_columns_to_schema(&schema, &partition_by);
+
+        assert_eq!(result.fields().len(), 1);
+        assert_eq!(result.field(0).name(), "date");
     }
 }
