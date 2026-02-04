@@ -275,12 +275,12 @@ impl SchemaConfig {
     }
 }
 
-/// Configuration for a single pipeline (source → sink with schema).
+/// Configuration for a single pipeline (source(s) → sink with schema).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
-    /// Source configuration.
-    pub source: SourceConfig,
+    /// Named source configurations.
+    pub sources: IndexMap<String, SourceConfig>,
     /// Sink configuration.
     pub sink: SinkConfig,
     /// Schema configuration - either explicit fields or `infer: true`.
@@ -291,6 +291,13 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// Get the sources map.
+    pub fn sources(&self) -> &IndexMap<String, SourceConfig> {
+        &self.sources
+    }
+}
+
+impl PipelineConfig {
     /// Returns exclusive resources used by this pipeline configuration.
     ///
     /// Resources are things that cannot be shared between pipelines running in
@@ -298,12 +305,15 @@ impl PipelineConfig {
     /// conflicts like two pipelines reading from the same source directory
     /// or writing to the same table.
     pub fn resources(&self) -> Vec<Resource> {
-        let source_dir = self.source.path.trim_end_matches('/');
-        let table_dir = self.sink.table_uri.trim_end_matches('/');
-        vec![
-            Resource::directory(source_dir),
-            Resource::directory(table_dir),
-        ]
+        let mut resources: Vec<Resource> = self
+            .sources
+            .values()
+            .map(|s| Resource::directory(s.path.trim_end_matches('/')))
+            .collect();
+        resources.push(Resource::directory(
+            self.sink.table_uri.trim_end_matches('/'),
+        ));
+        resources
     }
 }
 
@@ -401,11 +411,24 @@ impl Mergeable for Config {
 
         // Check for empty paths and schema
         for (key, pipeline) in &self.pipelines {
-            if pipeline.source.path.is_empty() {
-                errors.push(format!("Pipeline '{}': source.path is empty", key.id()));
+            let pipeline_id = key.id();
+
+            // Check that at least one source is configured
+            if pipeline.sources.is_empty() {
+                errors.push(format!("Pipeline '{pipeline_id}': no sources configured"));
             }
+
+            // Check each source has a non-empty path
+            for (source_name, source) in &pipeline.sources {
+                if source.path.is_empty() {
+                    errors.push(format!(
+                        "Pipeline '{pipeline_id}': source '{source_name}' has empty path"
+                    ));
+                }
+            }
+
             if pipeline.sink.table_uri.is_empty() {
-                errors.push(format!("Pipeline '{}': sink.table_uri is empty", key.id()));
+                errors.push(format!("Pipeline '{pipeline_id}': sink.table_uri is empty"));
             }
 
             // Validate schema configuration
@@ -414,14 +437,12 @@ impl Mergeable for Config {
 
             if wants_infer && has_fields {
                 errors.push(format!(
-                    "Pipeline '{}': cannot specify both 'infer: true' and 'fields'",
-                    key.id()
+                    "Pipeline '{pipeline_id}': cannot specify both 'infer: true' and 'fields'"
                 ));
             }
             if !wants_infer && !has_fields {
                 errors.push(format!(
-                    "Pipeline '{}': empty schema (specify either 'infer: true' or 'fields')",
-                    key.id()
+                    "Pipeline '{pipeline_id}': empty schema (specify either 'infer: true' or 'fields')"
                 ));
             }
         }
@@ -480,9 +501,18 @@ impl AppConfig for Config {
         let pipeline_count = self.pipeline_count();
         info!("Starting blizzard file loader with {pipeline_count} pipeline(s)");
         for (key, cfg) in self.pipelines() {
-            let source = &cfg.source.path;
             let sink = &cfg.sink.table_uri;
-            info!("  Pipeline: {key} ({source} -> {sink})");
+            if cfg.sources.len() == 1 {
+                let source = cfg.sources.values().next().unwrap();
+                info!("  Pipeline: {key} ({} -> {sink})", source.path);
+            } else {
+                let source_names: Vec<_> = cfg.sources.keys().collect();
+                info!(
+                    "  Pipeline: {key} ({} sources: {:?} -> {sink})",
+                    cfg.sources.len(),
+                    source_names
+                );
+            }
         }
     }
 }
@@ -496,9 +526,10 @@ mod tests {
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw-data
-      compression: gzip
+    sources:
+      default:
+        path: gs://bucket/raw-data
+        compression: gzip
     sink:
       table_uri: gs://bucket/delta/events
       file_size_mb: 128
@@ -512,8 +543,48 @@ pipelines:
 
         let (key, pipeline) = config.pipelines().next().unwrap();
         assert_eq!(key.id(), "events");
-        assert_eq!(pipeline.source.path, "gs://bucket/raw-data");
+        assert_eq!(
+            pipeline.sources.get("default").unwrap().path,
+            "gs://bucket/raw-data"
+        );
         assert_eq!(pipeline.sink.table_uri, "gs://bucket/delta/events");
+    }
+
+    #[test]
+    fn test_multi_source_pipeline_parse() {
+        let yaml = r#"
+pipelines:
+  orderbooks:
+    sources:
+      asia:
+        path: gs://bucket/region=asia-northeast1/orderbooks
+        compression: gzip
+        use_watermark: true
+      europe:
+        path: gs://bucket/region=europe-west1/orderbooks
+        compression: zstd
+        use_watermark: true
+    sink:
+      table_uri: gs://bucket/delta/orderbooks
+    schema:
+      infer: true
+"#;
+        let config = Config::parse(yaml).unwrap();
+        assert_eq!(config.pipeline_count(), 1);
+
+        let (key, pipeline) = config.pipelines().next().unwrap();
+        assert_eq!(key.id(), "orderbooks");
+        assert_eq!(pipeline.sources.len(), 2);
+
+        let asia = pipeline.sources.get("asia").unwrap();
+        assert_eq!(asia.path, "gs://bucket/region=asia-northeast1/orderbooks");
+        assert!(matches!(asia.compression, CompressionFormat::Gzip));
+        assert!(asia.use_watermark);
+
+        let europe = pipeline.sources.get("europe").unwrap();
+        assert_eq!(europe.path, "gs://bucket/region=europe-west1/orderbooks");
+        assert!(matches!(europe.compression, CompressionFormat::Zstd));
+        assert!(europe.use_watermark);
     }
 
     #[test]
@@ -521,9 +592,10 @@ pipelines:
         let yaml = r#"
 pipelines:
   orderbooks:
-    source:
-      path: gs://bucket/orderbooks-raw
-      compression: gzip
+    sources:
+      default:
+        path: gs://bucket/orderbooks-raw
+        compression: gzip
     sink:
       table_uri: gs://bucket/delta/orderbooks
     schema:
@@ -532,8 +604,9 @@ pipelines:
           type: string
 
   trades:
-    source:
-      path: gs://bucket/trades-raw
+    sources:
+      default:
+        path: gs://bucket/trades-raw
     sink:
       table_uri: gs://bucket/delta/trades
     schema:
@@ -553,9 +626,15 @@ global:
 
         // IndexMap preserves insertion order
         assert_eq!(pipelines[0].0.id(), "orderbooks");
-        assert_eq!(pipelines[0].1.source.path, "gs://bucket/orderbooks-raw");
+        assert_eq!(
+            pipelines[0].1.sources.get("default").unwrap().path,
+            "gs://bucket/orderbooks-raw"
+        );
         assert_eq!(pipelines[1].0.id(), "trades");
-        assert_eq!(pipelines[1].1.source.path, "gs://bucket/trades-raw");
+        assert_eq!(
+            pipelines[1].1.sources.get("default").unwrap().path,
+            "gs://bucket/trades-raw"
+        );
     }
 
     #[test]
@@ -563,8 +642,9 @@ global:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: ""
+    sources:
+      default:
+        path: ""
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -576,7 +656,27 @@ pipelines:
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("source.path is empty"));
+        assert!(err.to_string().contains("empty path"));
+    }
+
+    #[test]
+    fn test_no_sources_error() {
+        let yaml = r#"
+pipelines:
+  events:
+    sources: {}
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let result = Config::parse(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("events"));
+        assert!(err.to_string().contains("no sources configured"));
     }
 
     #[test]
@@ -584,8 +684,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: ""
     schema:
@@ -605,8 +706,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -624,8 +726,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -642,8 +745,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -660,8 +764,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -671,11 +776,12 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert_eq!(pipeline.source.batch_size, 8192);
-        assert_eq!(pipeline.source.max_concurrent_files, 4);
-        assert_eq!(pipeline.source.poll_interval_secs, 60);
-        assert!(pipeline.source.partition_filter.is_none());
+        assert_eq!(source.batch_size, 8192);
+        assert_eq!(source.max_concurrent_files, 4);
+        assert_eq!(source.poll_interval_secs, 60);
+        assert!(source.partition_filter.is_none());
     }
 
     #[test]
@@ -683,8 +789,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -705,8 +812,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw-events
+    sources:
+      default:
+        path: gs://bucket/raw-events
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -727,12 +835,38 @@ pipelines:
     }
 
     #[test]
+    fn test_pipeline_config_resources_multi_source() {
+        let yaml = r#"
+pipelines:
+  events:
+    sources:
+      asia:
+        path: gs://bucket/asia/events
+      europe:
+        path: gs://bucket/europe/events
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      infer: true
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        let resources = pipeline.resources();
+        assert_eq!(resources.len(), 3); // 2 sources + 1 sink
+        assert!(resources.contains(&Resource::directory("gs://bucket/asia/events")));
+        assert!(resources.contains(&Resource::directory("gs://bucket/europe/events")));
+        assert!(resources.contains(&Resource::directory("gs://bucket/delta/events")));
+    }
+
+    #[test]
     fn test_pipeline_config_resources_trailing_slash() {
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw-events/
+    sources:
+      default:
+        path: gs://bucket/raw-events/
     sink:
       table_uri: gs://bucket/delta/events/
     schema:
@@ -756,8 +890,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: gs://bucket/raw/same
+    sources:
+      default:
+        path: gs://bucket/raw/same
     sink:
       table_uri: gs://bucket/delta/a
     schema:
@@ -765,8 +900,9 @@ pipelines:
         - name: id
           type: string
   b:
-    source:
-      path: gs://bucket/raw/same
+    sources:
+      default:
+        path: gs://bucket/raw/same
     sink:
       table_uri: gs://bucket/delta/b
     schema:
@@ -793,8 +929,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: gs://bucket/raw/a
+    sources:
+      default:
+        path: gs://bucket/raw/a
     sink:
       table_uri: gs://bucket/delta/same
     schema:
@@ -802,8 +939,9 @@ pipelines:
         - name: id
           type: string
   b:
-    source:
-      path: gs://bucket/raw/b
+    sources:
+      default:
+        path: gs://bucket/raw/b
     sink:
       table_uri: gs://bucket/delta/same
     schema:
@@ -831,8 +969,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: gs://bucket/raw/same
+    sources:
+      default:
+        path: gs://bucket/raw/same
     sink:
       table_uri: gs://bucket/delta/a
     schema:
@@ -840,8 +979,9 @@ pipelines:
         - name: id
           type: string
   b:
-    source:
-      path: gs://bucket/raw/same/
+    sources:
+      default:
+        path: gs://bucket/raw/same/
     sink:
       table_uri: gs://bucket/delta/b
     schema:
@@ -860,8 +1000,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: gs://bucket/raw/a
+    sources:
+      default:
+        path: gs://bucket/raw/a
     sink:
       table_uri: gs://bucket/delta/a
     schema:
@@ -869,8 +1010,9 @@ pipelines:
         - name: id
           type: string
   b:
-    source:
-      path: gs://bucket/raw/b
+    sources:
+      default:
+        path: gs://bucket/raw/b
     sink:
       table_uri: gs://bucket/delta/b
     schema:
@@ -887,8 +1029,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -904,8 +1047,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -923,8 +1067,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -977,8 +1122,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
       partition_by:
@@ -1001,9 +1147,10 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
-      batchsize: 100
+    sources:
+      default:
+        path: gs://bucket/raw
+        batchsize: 100
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1023,8 +1170,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
       filesize: 128
@@ -1045,8 +1193,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1067,8 +1216,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1092,15 +1242,17 @@ unknown_top_level: value
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: ""
+    sources:
+      default:
+        path: ""
     sink:
       table_uri: ""
     schema:
       infer: true
   b:
-    source:
-      path: ""
+    sources:
+      default:
+        path: ""
     sink:
       table_uri: gs://bucket/b
     schema:
@@ -1120,7 +1272,7 @@ pipelines:
             "Should mention pipeline 'b': {err}"
         );
         assert!(
-            err.contains("source.path is empty"),
+            err.contains("empty path"),
             "Should mention empty source path: {err}"
         );
     }
@@ -1130,8 +1282,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   a:
-    source:
-      path: gs://bucket/a
+    sources:
+      default:
+        path: gs://bucket/a
     sink:
       table_uri: gs://bucket/delta/a
     schema:
@@ -1140,8 +1293,9 @@ pipelines:
         - name: id
           type: string
   b:
-    source:
-      path: gs://bucket/b
+    sources:
+      default:
+        path: gs://bucket/b
     sink:
       table_uri: gs://bucket/delta/b
     schema:
@@ -1167,8 +1321,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
+    sources:
+      default:
+        path: gs://bucket/raw
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1178,9 +1333,10 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
         assert!(
-            !pipeline.source.use_watermark,
+            !source.use_watermark,
             "use_watermark should default to false"
         );
     }
@@ -1190,12 +1346,13 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
-      use_watermark: true
-      partition_filter:
-        prefix_template: "date=%Y-%m-%d"
-        lookback: 2
+    sources:
+      default:
+        path: gs://bucket/raw
+        use_watermark: true
+        partition_filter:
+          prefix_template: "date=%Y-%m-%d"
+          lookback: 2
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1205,12 +1362,10 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert!(
-            pipeline.source.use_watermark,
-            "use_watermark should be true"
-        );
-        assert!(pipeline.source.partition_filter.is_some());
+        assert!(source.use_watermark, "use_watermark should be true");
+        assert!(source.partition_filter.is_some());
     }
 
     #[test]
@@ -1218,9 +1373,10 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
-      use_watermark: true
+    sources:
+      default:
+        path: gs://bucket/raw
+        use_watermark: true
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1230,13 +1386,14 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
         assert_eq!(
-            pipeline.source.checkpoint.interval_files, 100,
+            source.checkpoint.interval_files, 100,
             "checkpoint.interval_files should default to 100"
         );
         assert_eq!(
-            pipeline.source.checkpoint.interval_secs, 30,
+            source.checkpoint.interval_secs, 30,
             "checkpoint.interval_secs should default to 30"
         );
     }
@@ -1246,12 +1403,13 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
-      use_watermark: true
-      checkpoint:
-        interval_files: 50
-        interval_secs: 15
+    sources:
+      default:
+        path: gs://bucket/raw
+        use_watermark: true
+        checkpoint:
+          interval_files: 50
+          interval_secs: 15
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1261,9 +1419,10 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert_eq!(pipeline.source.checkpoint.interval_files, 50);
-        assert_eq!(pipeline.source.checkpoint.interval_secs, 15);
+        assert_eq!(source.checkpoint.interval_files, 50);
+        assert_eq!(source.checkpoint.interval_secs, 15);
     }
 
     #[test]
@@ -1271,11 +1430,12 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: gs://bucket/raw
-      use_watermark: true
-      checkpoint:
-        interval_files: 200
+    sources:
+      default:
+        path: gs://bucket/raw
+        use_watermark: true
+        checkpoint:
+          interval_files: 200
     sink:
       table_uri: gs://bucket/delta/events
     schema:
@@ -1285,10 +1445,11 @@ pipelines:
 "#;
         let config = Config::parse(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert_eq!(pipeline.source.checkpoint.interval_files, 200);
+        assert_eq!(source.checkpoint.interval_files, 200);
         assert_eq!(
-            pipeline.source.checkpoint.interval_secs, 30,
+            source.checkpoint.interval_secs, 30,
             "interval_secs should default to 30 when not specified"
         );
     }

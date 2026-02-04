@@ -10,10 +10,11 @@ mod config_tests {
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: "s3://bucket/input/*.ndjson.gz"
-      compression: gzip
-      batch_size: 4096
+    sources:
+      default:
+        path: "s3://bucket/input/*.ndjson.gz"
+        compression: gzip
+        batch_size: 4096
     sink:
       table_uri: "s3://bucket/output/table"
       file_size_mb: 64
@@ -32,9 +33,10 @@ pipelines:
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert_eq!(pipeline.source.path, "s3://bucket/input/*.ndjson.gz");
-        assert_eq!(pipeline.source.batch_size, 4096);
+        assert_eq!(source.path, "s3://bucket/input/*.ndjson.gz");
+        assert_eq!(source.batch_size, 4096);
         assert_eq!(pipeline.sink.file_size_mb, 64);
         assert_eq!(pipeline.schema.fields().len(), 4);
 
@@ -50,8 +52,9 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: "/input/*.ndjson.gz"
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
     sink:
       table_uri: "/output/table"
     schema:
@@ -61,9 +64,10 @@ pipelines:
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
         // Check defaults
-        assert_eq!(pipeline.source.batch_size, 8192);
+        assert_eq!(source.batch_size, 8192);
         assert_eq!(pipeline.sink.file_size_mb, 128);
     }
 
@@ -85,8 +89,9 @@ pipelines:
                 r#"
 pipelines:
   test:
-    source:
-      path: "/input"
+    sources:
+      default:
+        path: "/input"
     sink:
       table_uri: "/output"
     schema:
@@ -391,8 +396,9 @@ mod dlq_tests {
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: "/input/*.ndjson.gz"
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
     sink:
       table_uri: "/output/table"
     schema:
@@ -421,8 +427,9 @@ mod polling_tests {
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: "/input/*.ndjson.gz"
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
     sink:
       table_uri: "/output/table"
     schema:
@@ -432,10 +439,11 @@ pipelines:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
         // Check default poll interval
         assert_eq!(
-            pipeline.source.poll_interval_secs, 60,
+            source.poll_interval_secs, 60,
             "default poll interval should be 60s"
         );
     }
@@ -445,9 +453,10 @@ pipelines:
         let yaml = r#"
 pipelines:
   events:
-    source:
-      path: "s3://bucket/input/*.ndjson.gz"
-      poll_interval_secs: 30
+    sources:
+      default:
+        path: "s3://bucket/input/*.ndjson.gz"
+        poll_interval_secs: 30
     sink:
       table_uri: "s3://bucket/output/table"
     schema:
@@ -457,11 +466,9 @@ pipelines:
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         let (_, pipeline) = config.pipelines().next().unwrap();
+        let source = pipeline.sources.get("default").unwrap();
 
-        assert_eq!(
-            pipeline.source.poll_interval_secs, 30,
-            "poll interval should be 30s"
-        );
+        assert_eq!(source.poll_interval_secs, 30, "poll interval should be 30s");
     }
 }
 

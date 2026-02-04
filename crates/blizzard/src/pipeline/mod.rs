@@ -41,7 +41,15 @@ impl Pipeline {
 
     /// Run this pipeline's polling loop.
     async fn execute(self) -> Result<(), PipelineError> {
-        let poll_interval = Duration::from_secs(self.config.source.poll_interval_secs);
+        // Get poll interval from first source (should be consistent across sources)
+        let poll_interval_secs = self
+            .config
+            .sources
+            .values()
+            .next()
+            .map(|s| s.poll_interval_secs)
+            .unwrap_or(60);
+        let poll_interval = Duration::from_secs(poll_interval_secs);
         let poll_jitter_secs = self.context.poll_jitter_secs;
 
         // Initialize processor, respecting shutdown signal

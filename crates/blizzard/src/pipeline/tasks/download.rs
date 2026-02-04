@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, StreamExt};
+use indexmap::IndexMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
@@ -16,12 +17,18 @@ use blizzard_core::error::StorageError;
 use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{ActiveDownloads, FileDownloadCompleted};
 
+use super::super::tracker::SourcedFile;
+
 /// Future type for download operations.
 type DownloadFuture = Pin<Box<dyn Future<Output = Result<DownloadedFile, StorageError>> + Send>>;
 
 /// Downloaded file ready for processing.
 pub(in crate::pipeline) struct DownloadedFile {
+    /// Name of the source this file came from.
+    pub source_name: String,
+    /// Path to the file within the source.
     pub path: String,
+    /// Raw compressed data.
     pub compressed_data: Bytes,
 }
 
@@ -33,9 +40,16 @@ pub(in crate::pipeline) struct DownloadTask {
 
 impl DownloadTask {
     /// Spawn the downloader task.
+    ///
+    /// # Arguments
+    /// * `pending_files` - Source-tagged files to download
+    /// * `storages` - Per-source storage providers
+    /// * `shutdown` - Cancellation token for graceful shutdown
+    /// * `max_concurrent` - Maximum concurrent downloads
+    /// * `pipeline` - Pipeline identifier for metrics
     pub fn spawn(
-        pending_files: Vec<String>,
-        storage: StorageProviderRef,
+        pending_files: Vec<SourcedFile>,
+        storages: IndexMap<String, StorageProviderRef>,
         shutdown: CancellationToken,
         max_concurrent: usize,
         pipeline: String,
@@ -44,7 +58,7 @@ impl DownloadTask {
 
         let handle = tokio::spawn(Self::run(
             pending_files,
-            storage,
+            storages,
             tx,
             shutdown,
             max_concurrent,
@@ -62,8 +76,8 @@ impl DownloadTask {
 
     /// Run the downloader task that manages concurrent file downloads.
     async fn run(
-        pending_files: Vec<String>,
-        storage: StorageProviderRef,
+        pending_files: Vec<SourcedFile>,
+        storages: IndexMap<String, StorageProviderRef>,
         download_tx: mpsc::Sender<Result<DownloadedFile, StorageError>>,
         shutdown: CancellationToken,
         max_concurrent: usize,
@@ -76,8 +90,17 @@ impl DownloadTask {
         let mut util_timer = UtilizationTimer::new("downloader");
 
         // Start initial downloads
-        for file_path in pending_iter.by_ref().take(max_concurrent) {
-            let storage = storage.clone();
+        for sourced_file in pending_iter.by_ref().take(max_concurrent) {
+            let storage = match storages.get(&sourced_file.source_name) {
+                Some(s) => s.clone(),
+                None => {
+                    warn!(
+                        "[download] No storage for source '{}', skipping {}",
+                        sourced_file.source_name, sourced_file.path
+                    );
+                    continue;
+                }
+            };
             let pipeline_clone = pipeline.clone();
             // First download starts working state
             if active_downloads == 0 {
@@ -89,10 +112,15 @@ impl DownloadTask {
                 target: pipeline.clone(),
             });
             debug!(
-                "[download] Starting {} (active: {})",
-                file_path, active_downloads
+                "[download] Starting {}:{} (active: {})",
+                sourced_file.source_name, sourced_file.path, active_downloads
             );
-            downloads.push(Box::pin(download_file(storage, file_path, pipeline_clone)));
+            downloads.push(Box::pin(download_file(
+                storage,
+                sourced_file.source_name,
+                sourced_file.path,
+                pipeline_clone,
+            )));
         }
 
         // Process downloads and start new ones as they complete
@@ -119,7 +147,8 @@ impl DownloadTask {
             let should_continue = match &result {
                 Ok(downloaded) => {
                     debug!(
-                        "[download] Completed {} ({} bytes)",
+                        "[download] Completed {}:{} ({} bytes)",
+                        downloaded.source_name,
                         downloaded.path,
                         downloaded.compressed_data.len()
                     );
@@ -143,7 +172,16 @@ impl DownloadTask {
 
             // Start next download if available
             if let Some(next_file) = pending_iter.next() {
-                let storage = storage.clone();
+                let storage = match storages.get(&next_file.source_name) {
+                    Some(s) => s.clone(),
+                    None => {
+                        warn!(
+                            "[download] No storage for source '{}', skipping {}",
+                            next_file.source_name, next_file.path
+                        );
+                        continue;
+                    }
+                };
                 let pipeline_clone = pipeline.clone();
                 // Transition to working state when we have downloads
                 if active_downloads == 0 {
@@ -155,10 +193,15 @@ impl DownloadTask {
                     target: pipeline.clone(),
                 });
                 debug!(
-                    "[download] Starting {} (active: {})",
-                    next_file, active_downloads
+                    "[download] Starting {}:{} (active: {})",
+                    next_file.source_name, next_file.path, active_downloads
                 );
-                downloads.push(Box::pin(download_file(storage, next_file, pipeline_clone)));
+                downloads.push(Box::pin(download_file(
+                    storage,
+                    next_file.source_name,
+                    next_file.path,
+                    pipeline_clone,
+                )));
             }
         }
 
@@ -174,6 +217,7 @@ impl DownloadTask {
 /// Download a file's compressed data asynchronously.
 async fn download_file(
     storage: StorageProviderRef,
+    source_name: String,
     path: String,
     pipeline: String,
 ) -> Result<DownloadedFile, StorageError> {
@@ -184,6 +228,7 @@ async fn download_file(
         target: pipeline,
     });
     Ok(DownloadedFile {
+        source_name,
         path,
         compressed_data,
     })

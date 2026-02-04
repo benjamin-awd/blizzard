@@ -26,43 +26,53 @@ use blizzard_core::storage::StorageProvider;
 
 use crate::error::StorageError;
 
-/// Manages checkpoint persistence for a Blizzard pipeline.
+/// Manages checkpoint persistence for a Blizzard pipeline source.
 ///
 /// Handles loading and saving checkpoint state to cloud storage
-/// with atomic write guarantees.
+/// with atomic write guarantees. Checkpoints are stored per-source
+/// at `{table_uri}/_blizzard/{pipeline}_{source}_checkpoint.json`.
 pub struct CheckpointManager {
     /// Storage provider for the table directory.
     storage: Arc<StorageProvider>,
     /// Pipeline identifier (used in checkpoint filename).
     pipeline_key: String,
+    /// Source name within the pipeline (used in checkpoint filename).
+    source_name: String,
     /// Current checkpoint state.
     state: CheckpointState,
 }
 
 impl CheckpointManager {
-    /// Create a new checkpoint manager for the given pipeline.
+    /// Create a new checkpoint manager for the given pipeline source.
     ///
     /// # Arguments
     /// * `storage` - Storage provider for the table directory
     /// * `pipeline_key` - Pipeline identifier (e.g., "events")
-    pub fn new(storage: Arc<StorageProvider>, pipeline_key: String) -> Self {
+    /// * `source_name` - Source name within the pipeline (e.g., "asia", "europe")
+    pub fn new(storage: Arc<StorageProvider>, pipeline_key: String, source_name: String) -> Self {
         Self {
             storage,
             pipeline_key,
+            source_name,
             state: CheckpointState::default(),
         }
     }
 
     /// Get the checkpoint file path.
     fn checkpoint_path(&self) -> Path {
-        Path::from(format!("_blizzard/{}_checkpoint.json", self.pipeline_key))
+        let pipeline_key = &self.pipeline_key;
+        let source_name = &self.source_name;
+        Path::from(format!(
+            "_blizzard/{pipeline_key}_{source_name}_checkpoint.json"
+        ))
     }
 
     /// Get the temporary checkpoint file path.
     fn temp_checkpoint_path(&self) -> Path {
+        let pipeline_key = &self.pipeline_key;
+        let source_name = &self.source_name;
         Path::from(format!(
-            "_blizzard/{}_checkpoint.json.tmp",
-            self.pipeline_key
+            "_blizzard/{pipeline_key}_{source_name}_checkpoint.json.tmp"
         ))
     }
 
@@ -191,7 +201,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = create_test_storage(&temp_dir).await;
 
-        let mut manager = CheckpointManager::new(storage, "test_pipeline".to_string());
+        let mut manager =
+            CheckpointManager::new(storage, "test_pipeline".to_string(), "asia".to_string());
         let loaded = manager.load().await.unwrap();
 
         assert!(!loaded);
@@ -208,12 +219,17 @@ mod tests {
         let storage = create_test_storage(&temp_dir).await;
 
         // Save a checkpoint
-        let mut manager = CheckpointManager::new(storage.clone(), "test_pipeline".to_string());
+        let mut manager = CheckpointManager::new(
+            storage.clone(),
+            "test_pipeline".to_string(),
+            "asia".to_string(),
+        );
         manager.update_watermark("date=2026-01-28/file1.ndjson.gz");
         manager.save().await.unwrap();
 
         // Load it back with a new manager
-        let mut manager2 = CheckpointManager::new(storage, "test_pipeline".to_string());
+        let mut manager2 =
+            CheckpointManager::new(storage, "test_pipeline".to_string(), "asia".to_string());
         let loaded = manager2.load().await.unwrap();
 
         assert!(loaded);
@@ -228,7 +244,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = create_test_storage(&temp_dir).await;
 
-        let mut manager = CheckpointManager::new(storage, "test_pipeline".to_string());
+        let mut manager =
+            CheckpointManager::new(storage, "test_pipeline".to_string(), "europe".to_string());
 
         // First update should succeed
         assert!(manager.update_watermark("date=2026-01-28/file1.ndjson.gz"));
@@ -248,10 +265,33 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = create_test_storage(&temp_dir).await;
 
-        let manager = CheckpointManager::new(storage, "my_events".to_string());
+        let manager = CheckpointManager::new(storage, "my_events".to_string(), "asia".to_string());
         assert_eq!(
             manager.checkpoint_path().to_string(),
-            "_blizzard/my_events_checkpoint.json"
+            "_blizzard/my_events_asia_checkpoint.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_file_path_different_sources() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = create_test_storage(&temp_dir).await;
+
+        let manager_asia = CheckpointManager::new(
+            storage.clone(),
+            "orderbooks".to_string(),
+            "asia".to_string(),
+        );
+        let manager_europe =
+            CheckpointManager::new(storage, "orderbooks".to_string(), "europe".to_string());
+
+        assert_eq!(
+            manager_asia.checkpoint_path().to_string(),
+            "_blizzard/orderbooks_asia_checkpoint.json"
+        );
+        assert_eq!(
+            manager_europe.checkpoint_path().to_string(),
+            "_blizzard/orderbooks_europe_checkpoint.json"
         );
     }
 }

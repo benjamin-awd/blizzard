@@ -1,13 +1,14 @@
 //! Download processing orchestration.
 //!
 //! Coordinates the download -> parse -> write pipeline with backpressure
-//! and failure handling.
+//! and failure handling. Supports multiple sources merging into a single sink.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use indexmap::IndexMap;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -22,7 +23,7 @@ use blizzard_core::polling::IterationResult;
 
 use super::sink::Sink;
 use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
-use super::tracker::StateTracker;
+use super::tracker::MultiSourceTracker;
 use crate::config::CheckpointConfig;
 use crate::dlq::FailureTracker;
 use crate::error::PipelineError;
@@ -53,7 +54,7 @@ impl IncrementalCheckpointConfig {
 /// Context holding mutable references needed during download processing.
 pub(super) struct ProcessingContext<'a> {
     pub sink: &'a mut Sink,
-    pub state_tracker: &'a mut dyn StateTracker,
+    pub multi_tracker: &'a mut MultiSourceTracker,
     pub failure_tracker: &'a mut FailureTracker,
 }
 
@@ -61,16 +62,22 @@ pub(super) struct ProcessingContext<'a> {
 ///
 /// Manages concurrent downloads and parsing with backpressure,
 /// coordinating between the file downloader, reader, and sink writer.
+/// Supports multiple sources with different compression formats.
 pub(super) struct Downloader {
-    reader: Arc<dyn FileReader>,
+    /// Per-source readers (compression may differ between sources).
+    readers: IndexMap<String, Arc<dyn FileReader>>,
     max_in_flight: usize,
     pipeline_key: String,
 }
 
 impl Downloader {
-    pub fn new(reader: Arc<dyn FileReader>, max_in_flight: usize, pipeline_key: String) -> Self {
+    pub fn new(
+        readers: IndexMap<String, Arc<dyn FileReader>>,
+        max_in_flight: usize,
+        pipeline_key: String,
+    ) -> Self {
         Self {
-            reader,
+            readers,
             max_in_flight,
             pipeline_key,
         }
@@ -117,7 +124,7 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
             emit!(SourceStateFiles {
-                count: ctx.state_tracker.tracked_count(),
+                count: ctx.multi_tracker.tracked_count(),
                 target: self.pipeline_key.clone(),
             });
 
@@ -151,14 +158,14 @@ impl Downloader {
                     if checkpoint_config.enabled {
                         files_since_save += 1;
                         if files_since_save >= checkpoint_config.interval_files {
-                            self.try_incremental_save(ctx.state_tracker, &mut files_since_save).await;
+                            self.try_incremental_save(ctx.multi_tracker, &mut files_since_save).await;
                         }
                     }
                 }
 
                 // Time-based checkpoint save
                 _ = Self::tick_checkpoint(&mut checkpoint_interval), if checkpoint_config.enabled && files_since_save > 0 => {
-                    self.try_incremental_save(ctx.state_tracker, &mut files_since_save).await;
+                    self.try_incremental_save(ctx.multi_tracker, &mut files_since_save).await;
                 }
 
                 result = download_task.rx.recv(), if processing.len() < self.max_in_flight => {
@@ -168,7 +175,7 @@ impl Downloader {
                             if processing.is_empty() {
                                 util_timer.stop_wait();
                             }
-                            let future = spawn_read_task(downloaded, self.reader.clone());
+                            let future = spawn_read_task(downloaded, &self.readers);
                             processing.push(future);
                         }
                         Some(Err(e)) => {
@@ -208,10 +215,10 @@ impl Downloader {
     /// Attempt an incremental checkpoint save, logging on failure but not propagating errors.
     async fn try_incremental_save(
         &self,
-        state_tracker: &mut dyn StateTracker,
+        multi_tracker: &mut MultiSourceTracker,
         files_since_save: &mut usize,
     ) {
-        match state_tracker.save().await {
+        match multi_tracker.save_all().await {
             Ok(()) => {
                 debug!(
                     target = %self.pipeline_key,
@@ -237,9 +244,13 @@ impl Downloader {
         ctx: &mut ProcessingContext<'_>,
     ) -> Result<(), PipelineError> {
         match result {
-            Ok(ProcessedFile { path, batches }) => {
+            Ok(ProcessedFile {
+                source_name,
+                path,
+                batches,
+            }) => {
                 ctx.sink.write_file_batches(&path, batches).await?;
-                ctx.state_tracker.mark_processed(&path);
+                ctx.multi_tracker.mark_processed(&source_name, &path);
                 emit!(FileProcessed {
                     status: FileStatus::Success,
                     target: self.pipeline_key.clone(),

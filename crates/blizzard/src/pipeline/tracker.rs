@@ -3,20 +3,24 @@
 //! This module provides two strategies for tracking which files have been processed:
 //! - `WatermarkTracker`: Persists a high-watermark to storage, efficient for sorted file names
 //! - `HashMapTracker`: Keeps processed files in memory, works with any file naming scheme
+//!
+//! For multi-source pipelines, `MultiSourceTracker` aggregates per-source trackers.
 
 use async_trait::async_trait;
 use blizzard_core::StorageProviderRef;
 use blizzard_core::storage::list_ndjson_files_with_prefixes;
 use blizzard_core::types::SourceState;
-use tracing::warn;
+use indexmap::IndexMap;
+use tracing::{info, warn};
 
 use crate::checkpoint::CheckpointManager;
-use crate::error::PipelineError;
+use crate::config::SourceConfig;
+use crate::error::{ConfigError, PipelineError};
 use crate::source::list_ndjson_files_above_watermark;
 
 /// Trait for tracking which source files have been processed.
 #[async_trait]
-pub trait StateTracker: Send {
+pub trait StateTracker: Send + Sync {
     /// Initialize on cold start - load state from storage if available.
     /// Returns a message describing the initialization result for logging.
     async fn init(&mut self) -> Result<Option<String>, PipelineError>;
@@ -160,5 +164,130 @@ impl StateTracker for HashMapTracker {
 
     fn mode_name(&self) -> &'static str {
         "hashmap"
+    }
+}
+
+/// A file with source provenance for multi-source pipelines.
+#[derive(Debug, Clone)]
+pub struct SourcedFile {
+    /// Name of the source this file came from.
+    pub source_name: String,
+    /// Path to the file within the source.
+    pub path: String,
+}
+
+/// Aggregates per-source state trackers for multi-source pipelines.
+///
+/// Each source has its own tracker with independent watermarks/state,
+/// allowing sources to progress at different rates.
+pub struct MultiSourceTracker {
+    /// Per-source trackers, keyed by source name.
+    trackers: IndexMap<String, Box<dyn StateTracker>>,
+    /// Pipeline key for logging.
+    pipeline_key: String,
+}
+
+impl MultiSourceTracker {
+    /// Create a new multi-source tracker with the given per-source trackers.
+    pub fn new(trackers: IndexMap<String, Box<dyn StateTracker>>, pipeline_key: String) -> Self {
+        Self {
+            trackers,
+            pipeline_key,
+        }
+    }
+
+    /// Initialize all source trackers on cold start.
+    pub async fn init_all(&mut self) -> Result<(), PipelineError> {
+        for (source_name, tracker) in &mut self.trackers {
+            match tracker.init().await? {
+                Some(msg) => info!(
+                    target = %self.pipeline_key,
+                    source = %source_name,
+                    "{msg}"
+                ),
+                None => info!(
+                    target = %self.pipeline_key,
+                    source = %source_name,
+                    mode = tracker.mode_name(),
+                    "Cold start - beginning fresh processing"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// List all pending files from all sources.
+    ///
+    /// Returns files tagged with their source name for proper routing during processing.
+    pub async fn list_all_pending(
+        &self,
+        storages: &IndexMap<String, StorageProviderRef>,
+        configs: &IndexMap<String, &SourceConfig>,
+    ) -> Result<Vec<SourcedFile>, PipelineError> {
+        let mut all_pending = Vec::new();
+
+        for (source_name, tracker) in &self.trackers {
+            let storage = storages
+                .get(source_name)
+                .ok_or_else(|| PipelineError::Config {
+                    source: ConfigError::Internal {
+                        message: format!("No storage provider for source '{source_name}'"),
+                    },
+                })?;
+
+            let config = configs
+                .get(source_name)
+                .ok_or_else(|| PipelineError::Config {
+                    source: ConfigError::Internal {
+                        message: format!("No config for source '{source_name}'"),
+                    },
+                })?;
+
+            let prefixes = config.date_prefixes();
+            let pending = tracker
+                .list_pending(storage, prefixes.as_deref(), &self.pipeline_key)
+                .await?;
+
+            all_pending.extend(pending.into_iter().map(|path| SourcedFile {
+                source_name: source_name.clone(),
+                path,
+            }));
+        }
+
+        Ok(all_pending)
+    }
+
+    /// Mark a file as processed in the appropriate source tracker.
+    pub fn mark_processed(&mut self, source_name: &str, path: &str) {
+        if let Some(tracker) = self.trackers.get_mut(source_name) {
+            tracker.mark_processed(path);
+        } else {
+            warn!(
+                target = %self.pipeline_key,
+                source = %source_name,
+                path = %path,
+                "Attempted to mark file processed for unknown source"
+            );
+        }
+    }
+
+    /// Save all source trackers.
+    pub async fn save_all(&self) -> Result<(), PipelineError> {
+        for (source_name, tracker) in &self.trackers {
+            if let Err(e) = tracker.save().await {
+                warn!(
+                    target = %self.pipeline_key,
+                    source = %source_name,
+                    error = %e,
+                    "Failed to save tracker state"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Get total tracked count across all sources.
+    pub fn tracked_count(&self) -> usize {
+        self.trackers.values().map(|t| t.tracked_count()).sum()
     }
 }

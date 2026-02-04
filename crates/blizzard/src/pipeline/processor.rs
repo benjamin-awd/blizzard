@@ -1,11 +1,13 @@
 //! The Processor - core file processing logic.
 //!
 //! Implements the PollingProcessor trait for processing NDJSON files to Parquet.
+//! Supports multiple sources merging into a single sink.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use deltalake::arrow::datatypes::SchemaRef;
+use indexmap::IndexMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -21,12 +23,11 @@ use blizzard_core::{
 use super::download::{Downloader, IncrementalCheckpointConfig, ProcessingContext};
 use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
-use super::tracker::{HashMapTracker, StateTracker, WatermarkTracker};
+use super::tracker::{HashMapTracker, MultiSourceTracker, SourcedFile, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
-use crate::config::{PipelineConfig, PipelineKey};
+use crate::config::{PipelineConfig, PipelineKey, SourceConfig};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
-use crate::error::PipelineError;
-use crate::error::StorageSnafu;
+use crate::error::{ConfigError, PipelineError, StorageSnafu};
 use crate::parquet::ParquetWriterConfig;
 use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
@@ -76,14 +77,18 @@ impl ProcessorBuilder {
             storage_pool,
         } = self;
 
-        // Create source storage provider
-        let source_storage = get_or_create_storage(
-            &storage_pool,
-            &config.source.path,
-            config.source.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu)?;
+        // Create per-source storage providers
+        let mut source_storages = IndexMap::new();
+        for (source_name, source_config) in &config.sources {
+            let storage = get_or_create_storage(
+                &storage_pool,
+                &source_config.path,
+                source_config.storage_options.clone(),
+            )
+            .await
+            .context(StorageSnafu)?;
+            source_storages.insert(source_name.clone(), storage);
+        }
 
         // Create destination storage provider
         let destination_storage = get_or_create_storage(
@@ -94,20 +99,34 @@ impl ProcessorBuilder {
         .await
         .context(StorageSnafu)?;
 
-        // Create state tracker
-        let state_tracker = create_state_tracker(&config, &key).await?;
+        // Create multi-source tracker
+        let multi_tracker = create_multi_source_tracker(&config, &key).await?;
 
-        // Get schema - either from explicit config or by inference
-        let schema = resolve_schema(&config, &source_storage, &key).await?;
+        // Get schema - either from explicit config or by inference from first source
+        let first_source = config
+            .sources
+            .values()
+            .next()
+            .ok_or_else(|| PipelineError::Config {
+                source: ConfigError::Internal {
+                    message: "No sources configured".to_string(),
+                },
+            })?;
+        let first_storage = source_storages.values().next().unwrap();
+        let schema = resolve_schema(&config, first_source, first_storage, &key).await?;
 
-        // Create reader
-        let reader_config =
-            NdjsonReaderConfig::new(config.source.batch_size, config.source.compression);
-        let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
-            schema.clone(),
-            reader_config,
-            key.id().to_string(),
-        ));
+        // Create per-source readers (compression may differ between sources)
+        let mut readers = IndexMap::new();
+        for (source_name, source_config) in &config.sources {
+            let reader_config =
+                NdjsonReaderConfig::new(source_config.batch_size, source_config.compression);
+            let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
+                schema.clone(),
+                reader_config,
+                key.id().to_string(),
+            ));
+            readers.insert(source_name.clone(), reader);
+        }
 
         // Set up DLQ if configured
         let dlq = DeadLetterQueue::from_config(&config.error_handling)
@@ -125,10 +144,10 @@ impl ProcessorBuilder {
 
         // Build the processor context
         let ctx = ProcessorContext {
-            source_storage,
+            source_storages,
             destination_storage,
             schema,
-            reader,
+            readers,
             partition_extractor,
         };
 
@@ -141,44 +160,56 @@ impl ProcessorBuilder {
             key,
             config,
             ctx,
-            state_tracker,
+            multi_tracker,
             shutdown,
         })
     }
 }
 
-/// Create the appropriate state tracker based on configuration.
-async fn create_state_tracker(
+/// Create a multi-source tracker with per-source trackers based on configuration.
+async fn create_multi_source_tracker(
     config: &PipelineConfig,
     key: &PipelineKey,
-) -> Result<Box<dyn StateTracker>, PipelineError> {
-    if config.source.use_watermark {
-        // Checkpoint manager needs its own storage provider (not pooled)
-        let checkpoint_storage = get_or_create_storage(
-            &None,
-            &config.sink.table_uri,
-            config.sink.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu)?;
-        let checkpoint_manager = CheckpointManager::new(checkpoint_storage, key.id().to_string());
-        Ok(Box::new(WatermarkTracker::new(checkpoint_manager)))
-    } else {
-        Ok(Box::new(HashMapTracker::new()))
+) -> Result<MultiSourceTracker, PipelineError> {
+    let mut trackers: IndexMap<String, Box<dyn super::tracker::StateTracker>> = IndexMap::new();
+
+    for (source_name, source_config) in &config.sources {
+        let tracker: Box<dyn super::tracker::StateTracker> = if source_config.use_watermark {
+            // Checkpoint manager needs its own storage provider (not pooled)
+            let checkpoint_storage = get_or_create_storage(
+                &None,
+                &config.sink.table_uri,
+                config.sink.storage_options.clone(),
+            )
+            .await
+            .context(StorageSnafu)?;
+            let checkpoint_manager = CheckpointManager::new(
+                checkpoint_storage,
+                key.id().to_string(),
+                source_name.clone(),
+            );
+            Box::new(WatermarkTracker::new(checkpoint_manager))
+        } else {
+            Box::new(HashMapTracker::new())
+        };
+        trackers.insert(source_name.clone(), tracker);
     }
+
+    Ok(MultiSourceTracker::new(trackers, key.id().to_string()))
 }
 
 /// Resolve the Arrow schema from explicit config or by inference from source files.
 async fn resolve_schema(
     config: &PipelineConfig,
+    source_config: &SourceConfig,
     storage: &StorageProviderRef,
     pipeline_key: &PipelineKey,
 ) -> Result<SchemaRef, PipelineError> {
     if config.schema.should_infer() {
-        let prefixes = config.source.date_prefixes();
+        let prefixes = source_config.date_prefixes();
         Ok(infer_schema_from_source(
             storage,
-            config.source.compression,
+            source_config.compression,
             prefixes.as_deref(),
             pipeline_key.as_ref(),
         )
@@ -193,14 +224,14 @@ async fn resolve_schema(
 /// Groups the components needed for reading source files and writing output,
 /// reducing field count in the main processor struct.
 pub(super) struct ProcessorContext {
-    /// Storage provider for reading source files.
-    pub source_storage: StorageProviderRef,
+    /// Storage providers for reading source files, keyed by source name.
+    pub source_storages: IndexMap<String, StorageProviderRef>,
     /// Storage provider for writing destination files.
     pub destination_storage: StorageProviderRef,
     /// Arrow schema (from config or inferred).
     pub schema: SchemaRef,
-    /// File reader for parsing source files.
-    pub reader: Arc<dyn FileReader>,
+    /// File readers for parsing source files, keyed by source name (compression may differ).
+    pub readers: IndexMap<String, Arc<dyn FileReader>>,
     /// Extracts partition values from source paths.
     pub partition_extractor: PartitionExtractor,
 }
@@ -220,7 +251,7 @@ struct Iteration {
 impl Iteration {
     /// Create a new iteration with all per-iteration components.
     fn new(
-        pending_files: Vec<String>,
+        pending_files: Vec<SourcedFile>,
         ctx: &ProcessorContext,
         config: &PipelineConfig,
         shutdown: CancellationToken,
@@ -248,22 +279,36 @@ impl Iteration {
             key.to_string(),
         )?;
 
+        // Get max_concurrent_files from first source (use consistent value across sources)
+        let max_concurrent_files = config
+            .sources
+            .values()
+            .next()
+            .map(|s| s.max_concurrent_files)
+            .unwrap_or(4);
+
         let download_task = DownloadTask::spawn(
             pending_files,
-            ctx.source_storage.clone(),
+            ctx.source_storages.clone(),
             shutdown,
-            config.source.max_concurrent_files,
+            max_concurrent_files,
             key.to_string(),
         );
 
-        let max_in_flight = config.source.max_concurrent_files * 2;
-        let downloader = Downloader::new(ctx.reader.clone(), max_in_flight, key.to_string());
+        let max_in_flight = max_concurrent_files * 2;
+        let downloader = Downloader::new(ctx.readers.clone(), max_in_flight, key.to_string());
 
-        // Create incremental checkpoint config from source settings
-        let checkpoint_config = IncrementalCheckpointConfig::new(
-            &config.source.checkpoint,
-            config.source.use_watermark,
-        );
+        // Get checkpoint config from first source that uses watermark
+        let checkpoint_config = config
+            .sources
+            .values()
+            .find(|s| s.use_watermark)
+            .map(|s| IncrementalCheckpointConfig::new(&s.checkpoint, true))
+            .unwrap_or_else(|| IncrementalCheckpointConfig {
+                interval_files: 100,
+                interval: std::time::Duration::from_secs(30),
+                enabled: false,
+            });
 
         Ok(Self {
             sink,
@@ -277,13 +322,13 @@ impl Iteration {
     /// Run the iteration: download, parse, and write files.
     async fn run(
         mut self,
-        state_tracker: &mut dyn StateTracker,
+        multi_tracker: &mut MultiSourceTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
     ) -> Result<(IterationResult, Sink), PipelineError> {
         let mut ctx = ProcessingContext {
             sink: &mut self.sink,
-            state_tracker,
+            multi_tracker,
             failure_tracker,
         };
         let result = self
@@ -304,7 +349,8 @@ impl Iteration {
 
 /// The blizzard file loader pipeline processor.
 ///
-/// Each pipeline runs its own `Processor` instance.
+/// Each pipeline runs its own `Processor` instance. Supports multiple
+/// sources merging into a single sink.
 pub(super) struct Processor {
     /// Identifier for this pipeline (used in logging and metrics).
     key: PipelineKey,
@@ -312,8 +358,8 @@ pub(super) struct Processor {
     config: PipelineConfig,
     /// Runtime dependencies for reading and writing.
     ctx: ProcessorContext,
-    /// Tracks which source files have been processed.
-    state_tracker: Box<dyn StateTracker>,
+    /// Tracks which source files have been processed (per-source).
+    multi_tracker: MultiSourceTracker,
     /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
     /// Shutdown signal for graceful termination.
@@ -340,30 +386,25 @@ impl Processor {
 
 #[async_trait]
 impl PollingProcessor for Processor {
-    type State = Vec<String>;
+    type State = Vec<SourcedFile>;
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        let prefixes = self.config.source.date_prefixes();
-
         if cold_start {
-            match self.state_tracker.init().await? {
-                Some(msg) => info!(target = %self.key, "{msg}"),
-                None => info!(
-                    target = %self.key,
-                    mode = self.state_tracker.mode_name(),
-                    "Cold start - beginning fresh processing"
-                ),
-            }
+            self.multi_tracker.init_all().await?;
         }
 
+        // Build config references for list_all_pending
+        let configs: IndexMap<String, &SourceConfig> = self
+            .config
+            .sources
+            .iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+
         let pending_files = self
-            .state_tracker
-            .list_pending(
-                &self.ctx.source_storage,
-                prefixes.as_deref(),
-                self.key.as_ref(),
-            )
+            .multi_tracker
+            .list_all_pending(&self.ctx.source_storages, &configs)
             .await?;
 
         if pending_files.is_empty() {
@@ -391,7 +432,7 @@ impl PollingProcessor for Processor {
 
         let (result, sink) = iteration
             .run(
-                self.state_tracker.as_mut(),
+                &mut self.multi_tracker,
                 &mut self.failure_tracker,
                 self.shutdown.clone(),
             )
@@ -401,10 +442,10 @@ impl PollingProcessor for Processor {
         sink.finalize().await?;
         self.failure_tracker.finalize_dlq().await;
 
-        if let Err(e) = self.state_tracker.save().await {
+        if let Err(e) = self.multi_tracker.save_all().await {
             warn!(target = %self.key, error = %e, "Failed to save state");
         } else {
-            debug!(target = %self.key, mode = self.state_tracker.mode_name(), "Saved state");
+            debug!(target = %self.key, "Saved state");
         }
 
         Ok(result)

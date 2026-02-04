@@ -132,6 +132,10 @@ pub enum ConfigError {
     /// Multiple configuration errors occurred.
     #[snafu(display("Multiple config errors:\n{}", errors.join("\n")))]
     MultipleErrors { errors: Vec<String> },
+
+    /// Generic internal configuration error.
+    #[snafu(display("{message}"))]
+    Internal { message: String },
 }
 
 // ============ Metrics Errors ============
