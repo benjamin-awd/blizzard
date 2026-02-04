@@ -26,9 +26,9 @@ use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
 
 use super::TableSink;
-use crate::metrics::events::{InternalEvent, SchemaEvolved};
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
+use crate::metrics::events::{InternalEvent, SchemaEvolved};
 use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_schema_evolution};
 
 use actions::{TXN_APP_ID_PREFIX, create_add_action};
