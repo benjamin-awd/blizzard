@@ -1732,6 +1732,15 @@
           "expr": "blizzard_buffered_records{job=~\"$job\", pod=~\"$pod\"}",
           "legendFormat": "Buffered Records",
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "blizzard_upload_results_pending{job=~\"$job\", pod=~\"$pod\"}",
+          "legendFormat": "Upload Results Pending",
+          "refId": "E"
         }
       ],
       "title": "Queue Depths",
