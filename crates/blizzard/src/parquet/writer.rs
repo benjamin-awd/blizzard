@@ -23,7 +23,7 @@ use crate::error::{
 };
 use blizzard_core::FinishedFile;
 use blizzard_core::emit;
-use blizzard_core::metrics::events::ParquetWriteCompleted;
+use blizzard_core::metrics::events::{BufferedRecords, ParquetWriteCompleted};
 
 use super::traits::{BatchWriter, BatchWriterError};
 
@@ -353,6 +353,12 @@ impl ParquetWriter {
             self.roll_file()?;
         }
 
+        // Emit buffered records count (records waiting for file size threshold)
+        emit!(BufferedRecords {
+            count: self.stats.records_written,
+            target: self.pipeline.clone(),
+        });
+
         Ok(())
     }
 
@@ -402,9 +408,10 @@ impl ParquetWriter {
     /// Close the current file and get all finished files.
     /// All files include their parquet bytes for uploading to storage.
     pub fn close(mut self) -> Result<Vec<FinishedFile>, ParquetError> {
+        let pipeline = self.pipeline.clone();
+
         if self.stats.records_written > 0 {
             let start = Instant::now();
-            let pipeline = self.pipeline.clone();
             let writer = self.writer.take().context(WriterUnavailableSnafu)?;
             writer.close().context(ParquetWriteSnafu)?;
 
@@ -412,7 +419,7 @@ impl ParquetWriter {
 
             emit!(ParquetWriteCompleted {
                 duration: start.elapsed(),
-                target: pipeline,
+                target: pipeline.clone(),
             });
 
             let finished = FinishedFile {
@@ -425,6 +432,12 @@ impl ParquetWriter {
             };
             self.finished_files.push(finished);
         }
+
+        // Reset buffered records gauge on close
+        emit!(BufferedRecords {
+            count: 0,
+            target: pipeline,
+        });
 
         Ok(self.finished_files)
     }

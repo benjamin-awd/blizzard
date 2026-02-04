@@ -459,3 +459,20 @@ impl InternalEvent for ParquetFileWritten {
             .increment(self.bytes as u64);
     }
 }
+
+/// Event emitted when the number of buffered records changes.
+///
+/// Tracks records waiting in the parquet writer buffer before the file
+/// size policy triggers a roll.
+pub struct BufferedRecords {
+    pub count: usize,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for BufferedRecords {
+    fn emit(self) {
+        trace!(count = self.count, target = %self.target, "Buffered records");
+        gauge!("blizzard_buffered_records", "target" => self.target).set(self.count as f64);
+    }
+}
