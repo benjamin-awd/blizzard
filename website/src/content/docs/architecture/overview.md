@@ -1,5 +1,5 @@
 ---
-title: Pipeline Architecture
+title: Blizzard Overview
 description: How Blizzard's processing pipeline connects source and sink components
 ---
 

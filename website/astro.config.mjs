@@ -24,7 +24,7 @@ export default defineConfig({
 				{
 					label: '❄️ Blizzard',
 					items: [
-						{ label: 'Pipeline Overview', slug: 'architecture/pipeline' },
+						{ label: 'Overview', slug: 'architecture/overview' },
 						{ label: 'Topology', slug: 'architecture/topology' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Parquet Writer', slug: 'architecture/sink' },
