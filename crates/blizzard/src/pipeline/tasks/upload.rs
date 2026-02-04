@@ -1,5 +1,14 @@
 //! Background upload task.
 //!
+//! # Streaming Results Pattern
+//!
+//! This module uses bounded channels in both directions to provide proper backpressure:
+//! - Input channel: bounded to `max_concurrent`, limits queued files
+//! - Result channel: bounded to `max_concurrent`, limits pending results
+//!
+//! Callers must poll `try_recv()` to drain completed upload results during operation.
+//! This prevents the result channel from filling up and blocking the upload task.
+//!
 //! # Graceful Shutdown
 //!
 //! The upload task intentionally does not listen to a shutdown token. This prevents
@@ -45,7 +54,7 @@ pub struct UploadedFile {
 /// Handle to the background uploader task.
 pub struct UploadTask {
     tx: mpsc::Sender<FinishedFile>,
-    rx: mpsc::UnboundedReceiver<Result<UploadedFile, TableWriteError>>,
+    rx: mpsc::Receiver<Result<UploadedFile, TableWriteError>>,
     handle: JoinHandle<()>,
 }
 
@@ -55,10 +64,9 @@ impl UploadTask {
     /// See module-level docs for why this doesn't take a shutdown token.
     pub fn spawn(storage: StorageProviderRef, max_concurrent: usize, pipeline: String) -> Self {
         let (file_tx, file_rx) = mpsc::channel(max_concurrent);
-        // Result channel is unbounded to prevent deadlock: results are only consumed
-        // during finalize(), so a bounded channel would fill up and block the upload
-        // task, which would then block the sink trying to send new files.
-        let (result_tx, result_rx) = mpsc::unbounded_channel();
+        // Result channel is bounded - callers must poll try_recv() to drain results
+        // during operation to prevent blocking the upload task.
+        let (result_tx, result_rx) = mpsc::channel(max_concurrent);
 
         let handle = tokio::spawn(Self::run(
             file_rx,
@@ -83,15 +91,25 @@ impl UploadTask {
             .map_err(|_| TableWriteError::UploadChannelClosed)
     }
 
+    /// Poll for a completed upload result without blocking.
+    ///
+    /// Returns `Some(result)` if a result is available, `None` if the channel is empty.
+    /// Callers should call this in a loop to drain all available results before sending
+    /// new files to prevent the result channel from filling up.
+    pub fn try_recv(&mut self) -> Option<Result<UploadedFile, TableWriteError>> {
+        self.rx.try_recv().ok()
+    }
+
     /// Finalize uploads: close sender, wait for all uploads to complete, collect results.
-    pub async fn finalize(self) -> Vec<Result<UploadedFile, TableWriteError>> {
+    ///
+    /// Returns only the results that haven't been drained via `try_recv()`.
+    pub async fn finalize(mut self) -> Vec<Result<UploadedFile, TableWriteError>> {
         // Drop sender to signal no more files
         drop(self.tx);
 
-        // Collect all results
+        // Collect remaining results
         let mut results = Vec::new();
-        let mut rx = self.rx;
-        while let Some(result) = rx.recv().await {
+        while let Some(result) = self.rx.recv().await {
             results.push(result);
         }
 
@@ -110,7 +128,7 @@ impl UploadTask {
     /// all queued files are uploaded before shutdown. See module-level docs.
     async fn run(
         mut file_rx: mpsc::Receiver<FinishedFile>,
-        result_tx: mpsc::UnboundedSender<Result<UploadedFile, TableWriteError>>,
+        result_tx: mpsc::Sender<Result<UploadedFile, TableWriteError>>,
         storage: StorageProviderRef,
         max_concurrent: usize,
         pipeline: String,
@@ -121,12 +139,22 @@ impl UploadTask {
         let mut results_pending: usize = 0;
         let mut util_timer = UtilizationTimer::new("uploader");
 
+        // Buffer for a result waiting to be sent (when result channel is full)
+        let mut pending_result: Option<Result<UploadedFile, TableWriteError>> = None;
+
         loop {
             tokio::select! {
                 biased;
 
-                // Process completed uploads (prioritize to free up slots)
-                Some((result, size)) = uploads.next(), if !uploads.is_empty() => {
+                // First priority: send any pending result (reserve capacity first, then send)
+                Ok(permit) = result_tx.reserve(), if pending_result.is_some() => {
+                    permit.send(pending_result.take().unwrap());
+                    results_pending += 1;
+                    emit!(UploadResultsPending { count: results_pending });
+                }
+
+                // Second priority: process completed uploads (to free up slots)
+                Some((result, size)) = uploads.next(), if !uploads.is_empty() && pending_result.is_none() => {
                     util_timer.maybe_update();
 
                     active_uploads -= 1;
@@ -155,17 +183,12 @@ impl UploadTask {
                         }
                     }
 
-                    // Send result to consumer (unbounded, never blocks)
-                    if result_tx.send(result).is_err() {
-                        debug!("[upload] Consumer closed, stopping uploads");
-                        break;
-                    }
-                    results_pending += 1;
-                    emit!(UploadResultsPending { count: results_pending });
+                    // Buffer result to send (will be sent in next iteration)
+                    pending_result = Some(result);
                 }
 
-                // Accept new files only when under max_concurrent limit
-                result = file_rx.recv(), if active_uploads < max_concurrent => {
+                // Accept new files only when under max_concurrent limit and no pending result
+                result = file_rx.recv(), if active_uploads < max_concurrent && pending_result.is_none() => {
                     let Some(file) = result else {
                         let remaining = uploads.len();
                         debug!("[upload] Input channel closed, draining {remaining} remaining uploads");
@@ -201,6 +224,16 @@ impl UploadTask {
             }
         }
 
+        // Send any pending result before draining
+        if let Some(result) = pending_result
+            && result_tx.send(result).await.is_ok()
+        {
+            results_pending += 1;
+            emit!(UploadResultsPending {
+                count: results_pending
+            });
+        }
+
         // Drain remaining uploads
         while let Some((result, size)) = uploads.next().await {
             active_uploads -= 1;
@@ -227,7 +260,7 @@ impl UploadTask {
             }
 
             // Try to send, but don't fail if receiver is closed
-            if result_tx.send(result).is_ok() {
+            if result_tx.send(result).await.is_ok() {
                 results_pending += 1;
                 emit!(UploadResultsPending {
                     count: results_pending
@@ -373,17 +406,13 @@ mod tests {
         }
     }
 
-    /// Test that result channel backpressure doesn't cause deadlock.
+    /// Test that streaming results with bounded channels doesn't deadlock.
     ///
-    /// With max_concurrent=1, uploads complete one at a time. If the result
-    /// channel were bounded to max_concurrent, it would fill after 1 upload,
-    /// blocking the upload task and preventing new uploads from starting.
-    /// This would deadlock when the sender tries to queue more files.
-    ///
-    /// The unbounded result channel prevents this: results accumulate without
-    /// blocking, and are drained when finalize() is called.
+    /// The upload task uses a pending_result buffer and biased select to ensure
+    /// results are sent before accepting new files, preventing channel backpressure
+    /// from causing deadlocks.
     #[tokio::test]
-    async fn test_no_deadlock_when_results_accumulate() {
+    async fn test_no_deadlock_with_bounded_channels() {
         use std::time::Duration;
 
         let temp_dir = TempDir::new().unwrap();
@@ -395,18 +424,17 @@ mod tests {
                 .unwrap(),
         );
 
-        // Use max_concurrent=1 to ensure uploads complete sequentially.
-        // With a bounded result channel of size 1, this would deadlock after
-        // the first upload completes (result channel full, can't start next).
-        let upload_task = UploadTask::spawn(storage, 1, "test".to_string());
+        // Use max_concurrent=1 to maximize pressure on the result channel.
+        let mut upload_task = UploadTask::spawn(storage, 1, "test".to_string());
 
-        // Send many more files than max_concurrent. Each upload must complete
-        // and queue its result before the next can start.
         let file_count = 10;
 
         // Use a timeout to fail fast if deadlock occurs
         let send_result = tokio::time::timeout(Duration::from_secs(5), async {
             for i in 0..file_count {
+                // Drain available results before sending (streaming pattern)
+                while upload_task.try_recv().is_some() {}
+
                 upload_task
                     .send(test_file(&format!("file{i}.parquet")))
                     .await
@@ -420,7 +448,7 @@ mod tests {
             "Sending files should not deadlock (timed out)"
         );
 
-        // Finalize should drain all accumulated results
+        // Finalize should drain remaining results
         let finalize_result = tokio::time::timeout(Duration::from_secs(5), async {
             upload_task.finalize().await
         })
@@ -431,15 +459,49 @@ mod tests {
             "Finalize should not deadlock (timed out)"
         );
 
+        // Note: some results may have been drained during sending,
+        // so finalize returns only the remaining ones
         let results = finalize_result.unwrap();
-        assert_eq!(
-            results.len(),
-            file_count,
-            "All {file_count} results should be collected"
-        );
         assert!(
             results.iter().all(|r| r.is_ok()),
             "All uploads should succeed"
         );
+    }
+
+    /// Test that try_recv drains results during operation.
+    #[tokio::test]
+    async fn test_try_recv_drains_results() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_uri = temp_dir.path().to_str().unwrap();
+
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(dest_uri, HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        let mut upload_task = UploadTask::spawn(storage, 4, "test".to_string());
+
+        // Send files
+        for i in 0..4 {
+            upload_task
+                .send(test_file(&format!("file{i}.parquet")))
+                .await
+                .unwrap();
+        }
+
+        // Wait a bit for uploads to complete
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Drain results via try_recv
+        let mut drained = 0;
+        while upload_task.try_recv().is_some() {
+            drained += 1;
+        }
+
+        // Finalize and count remaining
+        let remaining = upload_task.finalize().await;
+
+        assert_eq!(drained + remaining.len(), 4, "Total results should be 4");
     }
 }

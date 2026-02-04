@@ -17,11 +17,16 @@ use crate::parquet::{ParquetWriter, ParquetWriterConfig};
 ///
 /// Combines batch writing (ParquetWriter), partition extraction, and async
 /// upload (UploadTask) into a single interface.
+///
+/// Uses a streaming pattern for uploads: results are drained during operation
+/// via `try_recv()` rather than accumulated until finalize.
 pub(super) struct Sink {
     batch_writer: ParquetWriter,
     upload_task: UploadTask,
     partition_extractor: PartitionExtractor,
     pipeline_id: String,
+    /// Bytes uploaded so far (tracked during streaming)
+    uploaded_bytes: usize,
 }
 
 impl Sink {
@@ -40,7 +45,17 @@ impl Sink {
             upload_task,
             partition_extractor,
             pipeline_id,
+            uploaded_bytes: 0,
         })
+    }
+
+    /// Drain available upload results, tracking bytes and propagating errors.
+    fn drain_upload_results(&mut self) -> Result<(), PipelineError> {
+        while let Some(result) = self.upload_task.try_recv() {
+            let uploaded = result?;
+            self.uploaded_bytes += uploaded.size;
+        }
+        Ok(())
     }
 
     /// Process batches from a source file: extract partitions, write batches, persist rolled files.
@@ -83,7 +98,10 @@ impl Sink {
             "Processed file"
         );
 
-        // Queue any rolled files for upload (non-blocking)
+        // Drain completed uploads to prevent channel backpressure
+        self.drain_upload_results()?;
+
+        // Queue any rolled files for upload
         let finished = self.batch_writer.take_finished_files();
         for file in finished {
             self.upload_task.send(file).await?;
@@ -93,29 +111,26 @@ impl Sink {
     }
 
     /// Finalize the writer and wait for all uploads to complete.
-    pub async fn finalize(self) -> Result<(), PipelineError> {
-        let finished_files = self.batch_writer.close()?;
+    pub async fn finalize(mut self) -> Result<(), PipelineError> {
+        // Drain any pending results before closing
+        self.drain_upload_results()?;
 
+        let finished_files = self.batch_writer.close()?;
         let final_file_count = finished_files.len();
-        let final_bytes: usize = finished_files.iter().map(|f| f.size).sum();
 
         // Queue remaining files for upload
         for file in finished_files {
             self.upload_task.send(file).await?;
         }
 
-        // Wait for all uploads to complete and collect results
+        // Wait for all uploads to complete and collect remaining results
         let results = self.upload_task.finalize().await;
 
-        // Check for any upload errors
-        let mut total_bytes = 0usize;
+        // Check for any upload errors and accumulate bytes
         for result in results {
             let uploaded = result?;
-            total_bytes += uploaded.size;
+            self.uploaded_bytes += uploaded.size;
         }
-
-        // Add bytes from final files
-        total_bytes += final_bytes;
 
         if final_file_count > 0 {
             info!(
@@ -125,9 +140,9 @@ impl Sink {
             );
         }
 
-        if total_bytes > 0 {
+        if self.uploaded_bytes > 0 {
             emit!(BytesWritten {
-                bytes: total_bytes as u64,
+                bytes: self.uploaded_bytes as u64,
                 target: self.pipeline_id.clone(),
             });
         }
