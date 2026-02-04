@@ -120,8 +120,7 @@ impl Downloader {
                     util_timer.maybe_update();
 
                     // Update utilization state: waiting if no active processing
-                    if processing.len() == 1 {
-                        // This was the last one, transitioning to idle
+                    if processing.is_empty() {
                         util_timer.start_wait();
                     }
 
