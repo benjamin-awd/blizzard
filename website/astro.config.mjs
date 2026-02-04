@@ -36,8 +36,8 @@ export default defineConfig({
 						{ label: 'Overview', slug: 'architecture/overview' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Parquet Writer', slug: 'architecture/sink' },
-						{ label: 'Configuration', slug: 'reference/configuration' },
-						{ label: 'Dead Letter Queue', slug: 'reference/dlq' },
+						{ label: 'Configuration', slug: 'architecture/configuration' },
+						{ label: 'Dead Letter Queue', slug: 'architecture/dlq' },
 					],
 				},
 				{
