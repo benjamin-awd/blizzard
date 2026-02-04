@@ -470,6 +470,22 @@ impl InternalEvent for UploadQueueDepth {
     }
 }
 
+/// Event emitted when the number of pending upload results changes.
+///
+/// Tracks results waiting to be collected during finalize(). High values
+/// indicate uploads completing faster than they can be processed, which
+/// could lead to memory growth.
+pub struct UploadResultsPending {
+    pub count: usize,
+}
+
+impl InternalEvent for UploadResultsPending {
+    fn emit(self) {
+        trace!(count = self.count, "Upload results pending");
+        gauge!("blizzard_upload_results_pending").set(self.count as f64);
+    }
+}
+
 // ============================================================================
 // Staging directory events
 // ============================================================================
@@ -549,8 +565,7 @@ impl InternalEvent for IterationCompleted {
             "Iteration completed"
         );
         counter!(
-            "polling_iterations_total",
-            "service" => self.service,
+            format!("{service}_polling_iterations_total", service = self.service),
             "result" => self.result.as_str(),
             "target" => self.target
         )
@@ -579,8 +594,7 @@ impl InternalEvent for IterationDuration {
             "Iteration duration"
         );
         histogram!(
-            "polling_iteration_duration_seconds",
-            "service" => self.service,
+            format!("{service}_polling_iteration_duration_seconds", service = self.service),
             "target" => self.target
         )
         .record(self.duration.as_secs_f64());
