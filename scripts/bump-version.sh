@@ -2,17 +2,29 @@
 set -euo pipefail
 
 # Bump version in Cargo.toml
-# Usage: ./scripts/bump-version.sh [major|minor|patch]
+# Usage: ./scripts/bump-version.sh <package> [major|minor|patch]
 
-BUMP_TYPE="${1:-patch}"
-CARGO_TOML="crates/blizzard/Cargo.toml"
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <package> [major|minor|patch]" >&2
+    echo "Packages: blizzard, penguin" >&2
+    exit 1
+fi
+
+PACKAGE="$1"
+BUMP_TYPE="${2:-patch}"
+CARGO_TOML="crates/${PACKAGE}/Cargo.toml"
 
 if [[ ! -f "$CARGO_TOML" ]]; then
     echo "Error: $CARGO_TOML not found" >&2
     exit 1
 fi
 
-CURRENT_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "blizzard") | .version')
+CURRENT_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r --arg pkg "$PACKAGE" '.packages[] | select(.name == $pkg) | .version')
+
+if [[ -z "$CURRENT_VERSION" ]]; then
+    echo "Error: Could not find version for package '$PACKAGE'" >&2
+    exit 1
+fi
 
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
@@ -30,7 +42,7 @@ case "$BUMP_TYPE" in
         PATCH=$((PATCH + 1))
         ;;
     *)
-        echo "Usage: $0 [major|minor|patch]" >&2
+        echo "Usage: $0 <package> [major|minor|patch]" >&2
         exit 1
         ;;
 esac
@@ -39,4 +51,4 @@ NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
 sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
 
-echo "$CURRENT_VERSION -> $NEW_VERSION"
+echo "$PACKAGE: $CURRENT_VERSION -> $NEW_VERSION"
