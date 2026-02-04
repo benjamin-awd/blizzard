@@ -26,6 +26,7 @@ use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
 
 use super::TableSink;
+use crate::metrics::events::{InternalEvent, SchemaEvolved};
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
 use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode, validate_schema_evolution};
@@ -211,10 +212,15 @@ impl DeltaSink {
     /// For `Merge` and `Overwrite` actions, this updates the table metadata
     /// with the new schema using Delta Lake's native schema evolution.
     pub async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
+        let action_name = match &action {
+            EvolutionAction::None => "none",
+            EvolutionAction::Merge { .. } => "merge",
+            EvolutionAction::Overwrite { .. } => "overwrite",
+        };
+
         match action {
             EvolutionAction::None => {
                 // No change needed
-                Ok(())
             }
             EvolutionAction::Merge { new_schema } => {
                 info!(
@@ -225,7 +231,6 @@ impl DeltaSink {
                 );
                 self.apply_schema_change(&new_schema).await?;
                 self.cached_schema = Some(new_schema);
-                Ok(())
             }
             EvolutionAction::Overwrite { new_schema } => {
                 warn!(
@@ -235,9 +240,16 @@ impl DeltaSink {
                 );
                 self.apply_schema_change(&new_schema).await?;
                 self.cached_schema = Some(new_schema);
-                Ok(())
             }
         }
+
+        SchemaEvolved {
+            target: self.table_name.clone(),
+            action: action_name.to_string(),
+        }
+        .emit();
+
+        Ok(())
     }
 
     /// Apply a schema change to the Delta table.
