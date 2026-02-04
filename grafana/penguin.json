@@ -209,7 +209,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_delta_table_version{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "max by (target) (penguin_delta_table_version{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -278,7 +278,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "penguin_checkpoint_state_bytes{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "max(penguin_checkpoint_state_bytes{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Checkpoint Size",
           "refId": "A"
         }
