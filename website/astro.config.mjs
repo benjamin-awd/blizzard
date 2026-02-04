@@ -34,6 +34,7 @@ export default defineConfig({
 					label: '❄️ Blizzard',
 					items: [
 						{ label: 'Overview', slug: 'architecture/overview' },
+						{ label: 'Scaling', slug: 'architecture/scaling' },
 						{ label: 'Source Processing', slug: 'architecture/source' },
 						{ label: 'Parquet Writer', slug: 'architecture/sink' },
 						{ label: 'Configuration', slug: 'architecture/configuration' },

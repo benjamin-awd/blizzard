@@ -9,7 +9,20 @@ Both Blizzard and Penguin use this topology framework to manage their multi-pipe
 
 ## Architecture Overview
 
+A single configuration spawns one pipeline per table. All pipelines run together and share resources automatically:
+
 ```d2
+direction: down
+
+config: config.yaml {
+  tables: |yaml
+    tables:
+      - users
+      - orders
+      - products
+  |
+}
+
 PipelineRunner: {
   Shared Resources: {
     semaphore: Semaphore {
@@ -27,46 +40,50 @@ PipelineRunner: {
     style.stroke-dash: 3
   }
 
-  pipeline_a: Pipeline A
-  pipeline_b: Pipeline B
-  pipeline_c: Pipeline C
+  pipeline_a: Pipeline (users)
+  pipeline_b: Pipeline (orders)
+  pipeline_c: Pipeline (products)
 
   Shared Resources -> shared
   shared -> pipeline_a
   shared -> pipeline_b
   shared -> pipeline_c
 }
+
+config -> PipelineRunner: "spawns one pipeline\nper table" {
+  style.stroke-dash: 3
+}
 ```
+
+This approach lets you:
+- Run multiple tables from a single config
+- Share connection pools to reduce overhead
+- Apply a global concurrency limit across all pipelines
+- Shut down all pipelines gracefully with one signal
 
 ## Jittered Starts
 
 Pipelines start with random delays to avoid thundering herd problems. Each pipeline waits a random duration (0 to `poll_jitter_secs`) before starting, spreading load on source storage and smoothing resource usage spikes:
 
 ```d2
-direction: right
-timeline: {
-  t0: "t=0s"
-  t1: "t=2s"
-  t2: "t=7s"
+shape: sequence_diagram
+
+users: Pipeline (users)
+orders: Pipeline (orders)
+products: Pipeline (products)
+Storage
+
+users -> Storage: "t=0s: fetch"
+orders -> Storage: "t=3s: fetch"
+products -> Storage: "t=7s: fetch"
+
+Storage: "Load spread across 7s" {
+  style.stroke-dash: 3
 }
 
-Pipeline A: {
-  a_start: "start" {style.fill: "#ccffcc"}
-}
-Pipeline B: {
-  b_delay: "waiting" {style.fill: "#e0e0e0"}
-  b_start: "start" {style.fill: "#ccffcc"}
-  b_delay -> b_start
-}
-Pipeline C: {
-  c_delay: "waiting" {style.fill: "#e0e0e0"}
-  c_start: "start" {style.fill: "#ccffcc"}
-  c_delay -> c_start
-}
-
-timeline.t0 -> Pipeline A.a_start
-timeline.t1 -> Pipeline B.b_start
-timeline.t2 -> Pipeline C.c_start
+users -> Storage: "t=60s: fetch"
+orders -> Storage: "t=63s: fetch"
+products -> Storage: "t=67s: fetch"
 ```
 
 Configuration:
@@ -75,26 +92,6 @@ Configuration:
 global:
   poll_jitter_secs: 10  # Max jitter in seconds (0 to disable)
 ```
-
-## Graceful Shutdown
-
-The topology coordinates shutdown across all components:
-
-```d2
-direction: down
-Shutdown Sequence: {
-  step1: "1. Signal received (SIGINT/SIGTERM/SIGQUIT)"
-  step2: "2. Cancellation triggered"
-  step3: "3. Pipelines in jitter delay: Exit immediately"
-  step4: "4. Running pipelines: Finish current work"
-  step5: "5. All tasks collected and logged"
-  step6: "6. Runner exits"
-
-  step1 -> step2 -> step3 -> step4 -> step5 -> step6
-}
-```
-
-Shutdown respects work in progress - pipelines complete their current iteration before stopping.
 
 ## Concurrency Control
 
@@ -132,8 +129,3 @@ This allows pipelines to reuse authenticated connections to S3, GCS, or Azure, r
 - Pipelines require different authentication credentials
 - Source and destination use incompatible client configurations
 - You need to isolate connection failures between pipelines
-
-## Related Concepts
-
-- [Fault Tolerance](/concepts/fault-tolerance/) - How topology handles failures and retries
-- [Storage](/concepts/storage/) - StoragePool and connection reuse details
