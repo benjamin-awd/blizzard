@@ -279,23 +279,15 @@ impl Iteration {
             key.to_string(),
         )?;
 
-        // Get max_concurrent_files from first source (use consistent value across sources)
-        let max_concurrent_files = config
-            .sources
-            .values()
-            .next()
-            .map(|s| s.max_concurrent_files)
-            .unwrap_or(4);
-
         let download_task = DownloadTask::spawn(
             pending_files,
             ctx.source_storages.clone(),
             shutdown,
-            max_concurrent_files,
+            config.max_concurrent_files,
             key.to_string(),
         );
 
-        let max_in_flight = max_concurrent_files * 2;
+        let max_in_flight = config.max_concurrent_files * 2;
         let downloader = Downloader::new(ctx.readers.clone(), max_in_flight, key.to_string());
 
         // Get checkpoint config from first source that uses watermark

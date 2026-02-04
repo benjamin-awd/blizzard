@@ -36,9 +36,6 @@ pub struct SourceConfig {
     /// Number of records per batch.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    /// Maximum concurrent file downloads.
-    #[serde(default = "default_max_concurrent_files")]
-    pub max_concurrent_files: usize,
     /// Poll interval in seconds.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
@@ -285,6 +282,9 @@ pub struct PipelineConfig {
     pub sink: SinkConfig,
     /// Schema configuration - either explicit fields or `infer: true`.
     pub schema: SchemaConfig,
+    /// Maximum concurrent file downloads across all sources.
+    #[serde(default = "default_max_concurrent_files")]
+    pub max_concurrent_files: usize,
     /// Error handling configuration.
     #[serde(default)]
     pub error_handling: ErrorHandlingConfig,
@@ -779,9 +779,9 @@ pipelines:
         let source = pipeline.sources.get("default").unwrap();
 
         assert_eq!(source.batch_size, 8192);
-        assert_eq!(source.max_concurrent_files, 4);
         assert_eq!(source.poll_interval_secs, 60);
         assert!(source.partition_filter.is_none());
+        assert_eq!(pipeline.max_concurrent_files, 4);
     }
 
     #[test]
