@@ -315,10 +315,9 @@ pub async fn infer_schema_from_source(
         return Err(InferenceError::NoFilesFound);
     }
 
-    let max_attempts = files.len(); // We only listed up to MAX_FILE_ATTEMPTS files
     let mut last_error = None;
 
-    for path in files.iter().take(max_attempts) {
+    for path in &files {
         debug!(target = %pipeline, "Attempting to infer schema from file: {path}");
 
         match storage.get(path.as_str()).await {
