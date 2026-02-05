@@ -8,20 +8,20 @@ use std::sync::Arc;
 
 /// Returns a realistic schema with mixed types for benchmarking.
 ///
-/// Matches a typical orderbook-style schema:
+/// Matches a typical event-style schema:
 /// - id: String (non-nullable)
 /// - timestamp: Int64 (non-nullable)
-/// - price: Float64 (nullable)
-/// - quantity: Float64 (nullable)
-/// - side: String (nullable)
+/// - value: Float64 (nullable)
+/// - amount: Float64 (nullable)
+/// - category: String (nullable)
 /// - active: Boolean (nullable)
 pub fn benchmark_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("timestamp", DataType::Int64, false),
-        Field::new("price", DataType::Float64, true),
-        Field::new("quantity", DataType::Float64, true),
-        Field::new("side", DataType::Utf8, true),
+        Field::new("value", DataType::Float64, true),
+        Field::new("amount", DataType::Float64, true),
+        Field::new("category", DataType::Utf8, true),
         Field::new("active", DataType::Boolean, true),
     ]))
 }
@@ -31,19 +31,19 @@ pub fn benchmark_schema() -> SchemaRef {
 /// Each line is a valid JSON object matching the benchmark schema.
 pub fn generate_json_lines(count: usize) -> Vec<String> {
     let mut rng = rand::rng();
-    let sides = ["buy", "sell"];
+    let categories = ["incoming", "outgoing"];
 
     (0..count)
         .map(|i| {
-            let side = sides[rng.random_range(0..2)];
-            let price: f64 = rng.random_range(100.0..10000.0);
-            let quantity: f64 = rng.random_range(0.01..100.0);
+            let category = categories[rng.random_range(0..2)];
+            let value: f64 = rng.random_range(100.0..10000.0);
+            let amount: f64 = rng.random_range(0.01..100.0);
             let timestamp: i64 = 1700000000000 + (i as i64);
             let active: bool = rng.random_bool(0.9);
 
             format!(
-                r#"{{"id":"order_{}","timestamp":{},"price":{:.2},"quantity":{:.4},"side":"{}","active":{}}}"#,
-                i, timestamp, price, quantity, side, active
+                r#"{{"id":"record_{}","timestamp":{},"value":{:.2},"amount":{:.4},"category":"{}","active":{}}}"#,
+                i, timestamp, value, amount, category, active
             )
         })
         .collect()
@@ -84,7 +84,7 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
 
             // Generate ids
             let ids: Vec<String> = (0..batch_size)
-                .map(|i| format!("order_{}", base_idx + i))
+                .map(|i| format!("record_{}", base_idx + i))
                 .collect();
 
             // Generate timestamps
@@ -92,8 +92,8 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
                 .map(|i| 1700000000000 + ((base_idx + i) as i64))
                 .collect();
 
-            // Generate prices (some nulls)
-            let prices: Vec<Option<f64>> = (0..batch_size)
+            // Generate values (some nulls)
+            let values: Vec<Option<f64>> = (0..batch_size)
                 .map(|_| {
                     if rng.random_bool(0.95) {
                         Some(rng.random_range(100.0..10000.0))
@@ -103,8 +103,8 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
                 })
                 .collect();
 
-            // Generate quantities (some nulls)
-            let quantities: Vec<Option<f64>> = (0..batch_size)
+            // Generate amounts (some nulls)
+            let amounts: Vec<Option<f64>> = (0..batch_size)
                 .map(|_| {
                     if rng.random_bool(0.95) {
                         Some(rng.random_range(0.01..100.0))
@@ -114,13 +114,13 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
                 })
                 .collect();
 
-            // Generate sides
-            let sides: Vec<Option<&str>> = (0..batch_size)
+            // Generate categories
+            let categories: Vec<Option<&str>> = (0..batch_size)
                 .map(|_| {
                     if rng.random_bool(0.5) {
-                        Some("buy")
+                        Some("incoming")
                     } else {
-                        Some("sell")
+                        Some("outgoing")
                     }
                 })
                 .collect();
@@ -141,9 +141,9 @@ pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<Rec
                 vec![
                     Arc::new(StringArray::from(ids)),
                     Arc::new(Int64Array::from(timestamps)),
-                    Arc::new(Float64Array::from(prices)),
-                    Arc::new(Float64Array::from(quantities)),
-                    Arc::new(StringArray::from(sides)),
+                    Arc::new(Float64Array::from(values)),
+                    Arc::new(Float64Array::from(amounts)),
+                    Arc::new(StringArray::from(categories)),
                     Arc::new(BooleanArray::from(active)),
                 ],
             )

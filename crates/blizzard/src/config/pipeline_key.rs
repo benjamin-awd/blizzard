@@ -19,8 +19,8 @@ use std::fmt;
 /// use blizzard::config::PipelineKey;
 ///
 /// // Create from explicit name
-/// let key = PipelineKey::new("orderbooks");
-/// assert_eq!(key.id(), "orderbooks");
+/// let key = PipelineKey::new("events");
+/// assert_eq!(key.id(), "events");
 ///
 /// // Derive from URI
 /// let key = PipelineKey::from_uri("gs://bucket/path/to/events");
@@ -101,8 +101,8 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let key = PipelineKey::new("orderbooks");
-        assert_eq!(format!("{key}"), "orderbooks");
+        let key = PipelineKey::new("events");
+        assert_eq!(format!("{key}"), "events");
     }
 
     #[test]
@@ -130,13 +130,13 @@ mod tests {
         use std::collections::HashMap;
 
         let mut map = HashMap::new();
-        map.insert(PipelineKey::new("orderbooks"), "orderbooks_value");
-        map.insert(PipelineKey::new("trades"), "trades_value");
+        map.insert(PipelineKey::new("events"), "events_value");
+        map.insert(PipelineKey::new("logs"), "logs_value");
 
         assert_eq!(
-            map.get(&PipelineKey::new("orderbooks")),
-            Some(&"orderbooks_value")
+            map.get(&PipelineKey::new("events")),
+            Some(&"events_value")
         );
-        assert_eq!(map.get(&PipelineKey::new("trades")), Some(&"trades_value"));
+        assert_eq!(map.get(&PipelineKey::new("logs")), Some(&"logs_value"));
     }
 }
