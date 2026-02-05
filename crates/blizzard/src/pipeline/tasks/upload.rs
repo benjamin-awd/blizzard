@@ -33,7 +33,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use blizzard_core::emit;
-use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{
     ActiveUploads, ParquetFileWritten, UploadQueueBytes, UploadQueueDepth, UploadResultsPending,
 };
@@ -145,7 +144,6 @@ impl UploadTask {
         let mut active_uploads: usize = 0;
         let mut queue_bytes: usize = 0;
         let mut results_pending: usize = 0;
-        let mut util_timer = UtilizationTimer::new("uploader");
 
         // Buffer for a result waiting to be sent (when result channel is full)
         let mut pending_result: Option<Result<UploadedFile, TableWriteError>> = None;
@@ -163,8 +161,6 @@ impl UploadTask {
 
                 // Second priority: process completed uploads (to free up slots)
                 Some((result, size)) = uploads.next(), if !uploads.is_empty() && pending_result.is_none() => {
-                    util_timer.maybe_update();
-
                     active_uploads -= 1;
                     queue_bytes -= size;
                     emit!(ActiveUploads {
@@ -173,11 +169,6 @@ impl UploadTask {
                     });
                     emit!(UploadQueueBytes { bytes: queue_bytes });
                     emit!(UploadQueueDepth { count: active_uploads });
-
-                    // Update utilization state: waiting if no active uploads
-                    if active_uploads == 0 {
-                        util_timer.start_wait();
-                    }
 
                     match &result {
                         Ok(uploaded) => {
@@ -207,10 +198,6 @@ impl UploadTask {
                     let pipeline_clone = pipeline.clone();
                     let size = file.size;
 
-                    // Transition to working state when we have uploads
-                    if active_uploads == 0 {
-                        util_timer.stop_wait();
-                    }
                     active_uploads += 1;
                     queue_bytes += size;
                     emit!(ActiveUploads {
