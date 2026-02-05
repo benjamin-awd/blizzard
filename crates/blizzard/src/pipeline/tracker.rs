@@ -197,8 +197,16 @@ impl MultiSourceTracker {
     }
 
     /// Initialize all source trackers on cold start.
-    pub async fn init_all(&mut self) -> Result<(), PipelineError> {
+    pub async fn init_all(
+        &mut self,
+        configs: &IndexMap<String, &SourceConfig>,
+    ) -> Result<(), PipelineError> {
         for (source_name, tracker) in &mut self.trackers {
+            let source_path = configs
+                .get(source_name)
+                .map(|c| c.path.as_str())
+                .unwrap_or("unknown");
+
             match tracker.init().await? {
                 Some(msg) => info!(
                     target = %self.pipeline_key,
@@ -209,7 +217,7 @@ impl MultiSourceTracker {
                     target = %self.pipeline_key,
                     source = %source_name,
                     mode = tracker.mode_name(),
-                    "Cold start - beginning fresh processing"
+                    "Cold start - scanning {source_path}"
                 ),
             }
         }
