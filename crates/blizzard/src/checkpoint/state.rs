@@ -4,6 +4,7 @@
 //! for efficient incremental file discovery.
 
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 /// Default schema version for checkpoint state.
 fn default_schema_version() -> u32 {
@@ -63,6 +64,13 @@ impl CheckpointState {
         };
 
         if should_update {
+            if let Some(old) = &self.watermark {
+                debug!(
+                    old = %old,
+                    new = %new_watermark,
+                    "Watermark advanced"
+                );
+            }
             self.watermark = Some(new_watermark.to_string());
             self.last_update_ts = chrono::Utc::now().timestamp();
             true
