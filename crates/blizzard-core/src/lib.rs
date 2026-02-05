@@ -51,6 +51,6 @@ pub use topology::{
 pub use tracing::init_tracing;
 pub use types::FinishedFile;
 pub use watermark::{
-    FileListingConfig, generate_prefixes, list_files_above_watermark, list_files_cold_start,
-    parse_watermark,
+    FileListingConfig, generate_prefixes, list_files_above_partition_watermarks,
+    list_files_above_watermark, list_files_cold_start, parse_watermark,
 };

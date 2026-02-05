@@ -13,7 +13,9 @@
 
 pub mod state;
 
-pub use state::CheckpointState;
+pub use state::{CheckpointState, WatermarkState};
+
+use std::collections::HashMap;
 
 /// Directory name for blizzard checkpoint files within the table URI.
 pub const CHECKPOINT_DIR: &str = "_blizzard";
@@ -166,9 +168,11 @@ impl CheckpointManager {
         Ok(())
     }
 
-    /// Get the current watermark.
+    /// Get the current watermark path for filtering.
+    ///
+    /// Works for both Active and Idle states.
     pub fn watermark(&self) -> Option<&str> {
-        self.state.watermark.as_deref()
+        self.state.watermark_path()
     }
 
     /// Update the watermark to the given path if it's greater than the current watermark.
@@ -176,6 +180,19 @@ impl CheckpointManager {
     /// Returns `true` if the watermark was updated.
     pub fn update_watermark(&mut self, path: &str) -> bool {
         self.state.update_watermark(path)
+    }
+
+    /// Transition to Idle state if currently Active.
+    ///
+    /// Called when no new files are found above the watermark.
+    /// Returns true if the state was changed.
+    pub fn mark_idle(&mut self) -> bool {
+        self.state.mark_idle()
+    }
+
+    /// Get the partition watermarks for per-partition filtering.
+    pub fn partition_watermarks(&self) -> &HashMap<String, String> {
+        &self.state.partition_watermarks
     }
 
     /// Get a reference to the current checkpoint state.

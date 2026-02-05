@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use crate::checkpoint::CheckpointManager;
 use crate::config::SourceConfig;
 use crate::error::{ConfigError, PipelineError};
-use crate::source::list_ndjson_files_above_watermark;
+use crate::source::list_ndjson_files_with_partition_watermarks;
 
 /// Trait for tracking which source files have been processed.
 #[async_trait]
@@ -35,6 +35,12 @@ pub trait StateTracker: Send + Sync {
 
     /// Mark a file as processed.
     fn mark_processed(&mut self, path: &str);
+
+    /// Transition to Idle state when no new files are found.
+    ///
+    /// Default implementation is a no-op. Watermark trackers override this
+    /// to distinguish between "no files exist" vs "files filtered by watermark".
+    fn mark_idle(&mut self) {}
 
     /// Save state to storage (no-op for in-memory trackers).
     async fn save(&self) -> Result<(), PipelineError>;
@@ -87,9 +93,11 @@ impl StateTracker for WatermarkTracker {
         prefixes: Option<&[String]>,
         pipeline_key: &str,
     ) -> Result<Vec<String>, PipelineError> {
-        list_ndjson_files_above_watermark(
+        // Use partition watermarks for more efficient per-partition filtering
+        list_ndjson_files_with_partition_watermarks(
             storage,
             self.checkpoint_manager.watermark(),
+            Some(self.checkpoint_manager.partition_watermarks()),
             prefixes,
             pipeline_key,
         )
@@ -99,6 +107,10 @@ impl StateTracker for WatermarkTracker {
 
     fn mark_processed(&mut self, path: &str) {
         self.checkpoint_manager.update_watermark(path);
+    }
+
+    fn mark_idle(&mut self) {
+        self.checkpoint_manager.mark_idle();
     }
 
     async fn save(&self) -> Result<(), PipelineError> {
@@ -295,6 +307,16 @@ impl MultiSourceTracker {
                 path = %path,
                 "Attempted to mark file processed for unknown source"
             );
+        }
+    }
+
+    /// Mark all trackers as idle when no new files are found.
+    ///
+    /// Called when prepare() returns an empty pending file list to distinguish
+    /// between "no files exist" vs "all files filtered by watermark".
+    pub fn mark_all_idle(&mut self) {
+        for tracker in self.trackers.values_mut() {
+            tracker.mark_idle();
         }
     }
 

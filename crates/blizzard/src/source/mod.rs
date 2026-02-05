@@ -13,7 +13,7 @@ pub use compression::{
     CompressionCodec, CompressionCodecExt, DecompressionError, GzipCodec, NoopCodec, ZstdCodec,
 };
 pub use inference::infer_schema_from_source;
-pub use listing::list_ndjson_files_above_watermark;
+pub use listing::{list_ndjson_files_above_watermark, list_ndjson_files_with_partition_watermarks};
 pub use reader::{NdjsonReader, NdjsonReaderConfig};
 pub use traits::{FileReader, ReadResult};
 

@@ -102,6 +102,161 @@ Partitions:
   date=2024-01-29/  ← Scanned (after watermark partition, all files)
 ```
 
+## Watermark State Tracking
+
+Blizzard tracks not just the watermark position but also the **activity state** of the watermark. This provides operational visibility into why no files were processed on a given poll cycle.
+
+### State Machine
+
+The watermark transitions between three states:
+
+```
+                    ┌─────────────────────────────────┐
+                    │                                 │
+                    ▼                                 │
+┌─────────┐   update_watermark()   ┌────────┐   update_watermark()
+│ Initial │ ─────────────────────► │ Active │ ◄─────────────────────┐
+└─────────┘                        └────────┘                       │
+                                       │                            │
+                                       │ mark_idle()                │
+                                       │ (no new files)             │
+                                       ▼                            │
+                                   ┌────────┐                       │
+                                   │  Idle  │ ──────────────────────┘
+                                   └────────┘   (new files appear)
+```
+
+| State | Meaning |
+|-------|---------|
+| **Initial** | Cold start—no watermark has been set yet |
+| **Active** | Actively processing files at the current position |
+| **Idle** | No new files found above the watermark on the last poll |
+
+### Why Track Idle State?
+
+Without idle tracking, when no files are returned from a poll cycle, you can't distinguish between:
+
+- **No files exist** — The source location is empty
+- **Files filtered by watermark** — Files exist but all are at or below the watermark
+
+The idle state makes this explicit: if the state is `Idle`, files exist but have already been processed. This is useful for:
+
+- **Operational dashboards** — Show whether a pipeline is waiting for new data vs. actively processing
+- **Alerting** — Distinguish "no new data" (expected) from "no data at all" (potential issue)
+- **Debugging** — Quickly see if files are being filtered vs. missing
+
+### Checkpoint Format
+
+The watermark state is persisted in the checkpoint file:
+
+```json
+{
+  "schema_version": 1,
+  "watermark": {
+    "state": "Active",
+    "value": "date=2024-01-28/1706450400-uuid.ndjson.gz"
+  },
+  "partition_watermarks": {
+    "date=2024-01-28": "1706450400-uuid.ndjson.gz",
+    "date=2024-01-29": "1706536800-uuid.ndjson.gz"
+  },
+  "last_update_ts": 1706450500
+}
+```
+
+## Per-Partition Watermarks
+
+For high-throughput pipelines with **concurrent partitions** receiving data simultaneously, Blizzard tracks per-partition watermarks to avoid redundant scanning.
+
+### The Problem
+
+Consider a pipeline ingesting 1000+ files per hour partition, with 2 hour partitions active at any time:
+
+```
+date=2024-01-28/hour=13/  ← 1000 files, watermark at file #950
+date=2024-01-28/hour=14/  ← 500 files, watermark at file #500
+```
+
+With a single global watermark at `hour=14/file500.ndjson.gz`:
+
+- Every poll scans **all 500 files** in `hour=14/` to find new ones
+- The `hour=13/` partition (with 50 unprocessed files) is completely ignored because the global watermark is in a "later" partition
+
+### The Solution
+
+Per-partition watermarks track progress independently within each partition:
+
+```json
+{
+  "watermark": {"state": "Active", "value": "date=2024-01-28/hour=14/file500.ndjson.gz"},
+  "partition_watermarks": {
+    "date=2024-01-28/hour=13": "file950.ndjson.gz",
+    "date=2024-01-28/hour=14": "file500.ndjson.gz"
+  }
+}
+```
+
+Now each partition is filtered independently:
+
+- `hour=13/` — Only scans files above `file950` (finds 50 new files)
+- `hour=14/` — Only scans files above `file500` (finds new files as they arrive)
+
+### Behavior for New Partitions
+
+When a partition has no entry in `partition_watermarks`:
+
+- **All files are included** — No watermark means no filtering
+- The global watermark is **not** used as a fallback (would incorrectly skip files)
+
+This is correct for truly new partitions that appear after the pipeline started.
+
+### Performance Impact
+
+For a pipeline with 2 concurrent hour partitions receiving 1000 files/hour each:
+
+| Approach | Files Listed Per Poll | Files Filtered |
+|----------|----------------------|----------------|
+| Global watermark only | 2000+ | Up to 1000 (entire newer partition) |
+| Per-partition watermarks | Only new files | Minimal |
+
+The improvement is most significant when:
+- Multiple partitions receive data simultaneously
+- Partitions have many files (100s to 1000s)
+- Poll intervals are short (seconds to minutes)
+
+## Watermark Advancement Atomicity
+
+Watermarks only advance after successful sink writes. This ensures exactly-once semantics even during failures.
+
+### Guarantee
+
+In the processing loop:
+
+```rust
+// 1. Write to sink (must succeed)
+ctx.sink.write_file_batches(&path, batches).await?;
+
+// 2. Only then advance watermark
+ctx.multi_tracker.mark_processed(&source_name, &path);
+```
+
+The `?` operator ensures that if the sink write fails:
+- The error propagates immediately
+- `mark_processed()` is never called
+- The watermark stays at its previous position
+
+### Recovery Behavior
+
+If the pipeline crashes or restarts:
+
+1. **Watermark is at last successfully written file**
+2. **Failed file will be reprocessed** on restart
+3. **No data loss** — Files are either fully processed or will be retried
+
+:::tip[Idempotent Writes]
+For true exactly-once semantics, ensure your sink is idempotent (e.g., Delta Lake with deduplication) so reprocessing the same file doesn't create duplicates.
+:::
+
 ## Blizzard: Source File Discovery
 
 Blizzard uses watermarks to track which source files have been processed.
@@ -189,6 +344,43 @@ If Penguin crashes after committing but before updating the watermark:
 
 See [Fault Tolerance](/blizzard/concepts/fault-tolerance/) for detailed failure scenarios.
 
+## Checkpoint Storage
+
+Blizzard persists checkpoint state to cloud storage at:
+
+```
+{table_uri}/_blizzard/{pipeline}_{source}_checkpoint.json
+```
+
+For example:
+```
+s3://my-bucket/events/_blizzard/events_asia_checkpoint.json
+s3://my-bucket/events/_blizzard/events_europe_checkpoint.json
+```
+
+### Atomic Writes
+
+Checkpoints use atomic write semantics:
+
+1. Write to temporary file: `{pipeline}_{source}_checkpoint.json.tmp`
+2. Atomic rename to final path: `{pipeline}_{source}_checkpoint.json`
+
+This ensures checkpoints are never partially written, even during crashes.
+
+### Checkpoint Frequency
+
+Configure how often checkpoints are saved:
+
+```yaml
+sources:
+  events:
+    checkpoint:
+      interval_files: 100   # After every N files processed
+      interval_secs: 60     # Or after N seconds elapsed
+```
+
+More frequent checkpoints mean less reprocessing after crashes but more I/O overhead.
+
 ## Requirements
 
 Watermark-based tracking requires:
@@ -209,5 +401,42 @@ If files don't follow lexicographic ordering (e.g., random UUIDs without timesta
 | Recovery | Resume from watermark | Reload full set |
 | Requirements | Lexicographic file names | Any file names |
 | Reprocessing | Cannot reprocess old files | Can mark files unprocessed |
+| Concurrent partitions | Efficient with per-partition watermarks | Always O(n) |
 
 Watermark tracking is preferred for high-volume pipelines where memory efficiency and fast recovery are important.
+
+## Debugging Watermarks
+
+### View Current State
+
+Check the checkpoint file directly:
+
+```bash
+# S3
+aws s3 cp s3://bucket/table/_blizzard/pipeline_source_checkpoint.json -
+
+# GCS
+gsutil cat gs://bucket/table/_blizzard/pipeline_source_checkpoint.json
+```
+
+### Debug Logging
+
+Enable debug logs to see watermark filtering:
+
+```bash
+RUST_LOG=blizzard=debug blizzard run config.yaml
+```
+
+You'll see:
+- Partition watermark updates
+- Files filtered by watermark
+- Idle state transitions
+
+### Common Issues
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| Files never discovered | File names don't sort chronologically | Use timestamp prefixes |
+| Same files reprocessed | Checkpoint not persisting | Check storage permissions |
+| Older partition ignored | Global watermark in newer partition | Per-partition watermarks handle this |
+| Pipeline always idle | No new files arriving | Check source location |

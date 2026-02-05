@@ -456,6 +456,9 @@ impl PollingProcessor for PipelineOrchestrator {
             .await?;
 
         if pending_files.is_empty() {
+            // Mark all trackers as idle when no new files are found.
+            // This distinguishes between "no files exist" vs "files filtered by watermark".
+            self.multi_tracker.mark_all_idle();
             return Ok(None);
         }
 

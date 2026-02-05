@@ -238,6 +238,18 @@ impl Downloader {
         }
     }
 
+    /// Handle a processed file result.
+    ///
+    /// # Watermark Advancement Atomicity
+    ///
+    /// The watermark is only advanced after successful sink writes. This is
+    /// guaranteed by the `?` operator on `write_file_batches()`:
+    ///
+    /// 1. `write_file_batches()` must succeed first
+    /// 2. Only then does `mark_processed()` advance the watermark
+    ///
+    /// If the sink write fails, the error propagates and the watermark is
+    /// never updated. On restart, the file will be reprocessed.
     async fn handle_processed_file(
         &self,
         result: Result<ProcessedFile, PipelineError>,
@@ -249,6 +261,8 @@ impl Downloader {
                 path,
                 batches,
             }) => {
+                // IMPORTANT: Sink write must succeed before watermark update.
+                // The `?` ensures atomicity - if write fails, watermark stays put.
                 ctx.sink.write_file_batches(&path, batches).await?;
                 ctx.multi_tracker.mark_processed(&source_name, &path);
                 emit!(FileProcessed {
