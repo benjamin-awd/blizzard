@@ -201,10 +201,8 @@ impl MultiSourceTracker {
         configs: &IndexMap<String, &SourceConfig>,
     ) -> Result<(), PipelineError> {
         for (source_name, tracker) in &mut self.trackers {
-            let source_path = configs
-                .get(source_name)
-                .map(|c| c.path.as_str())
-                .unwrap_or("unknown");
+            let config = configs.get(source_name);
+            let source_path = config.map(|c| c.path.as_str()).unwrap_or("unknown");
 
             match tracker.init().await? {
                 Some(msg) => info!(
@@ -212,12 +210,24 @@ impl MultiSourceTracker {
                     source = %source_name,
                     "{msg}"
                 ),
-                None => info!(
-                    target = %self.pipeline_key,
-                    source = %source_name,
-                    mode = tracker.mode_name(),
-                    "Cold start - scanning {source_path}"
-                ),
+                None => {
+                    let prefixes = config.and_then(|c| c.date_prefixes());
+                    match prefixes {
+                        Some(p) => info!(
+                            target = %self.pipeline_key,
+                            source = %source_name,
+                            mode = tracker.mode_name(),
+                            prefixes = ?p,
+                            "Cold start - scanning with partition filter"
+                        ),
+                        None => info!(
+                            target = %self.pipeline_key,
+                            source = %source_name,
+                            mode = tracker.mode_name(),
+                            "Cold start - scanning {source_path}"
+                        ),
+                    }
+                }
             }
         }
         Ok(())
