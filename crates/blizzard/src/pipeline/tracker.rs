@@ -50,12 +50,6 @@ pub trait StateTracker: Send + Sync {
 
     /// Describe the mode (for logging).
     fn mode_name(&self) -> &'static str;
-
-    /// Get the current watermark for logging purposes.
-    /// Returns None for trackers that don't use watermarks.
-    fn watermark(&self) -> Option<&str> {
-        None
-    }
 }
 
 /// Watermark-based state tracker that persists to storage.
@@ -127,10 +121,6 @@ impl StateTracker for WatermarkTracker {
 
     fn mode_name(&self) -> &'static str {
         "watermark"
-    }
-
-    fn watermark(&self) -> Option<&str> {
-        self.checkpoint_manager.watermark()
     }
 }
 
@@ -326,14 +316,11 @@ impl MultiSourceTracker {
         for (source_name, tracker) in &self.trackers {
             match tracker.save().await {
                 Ok(()) => {
-                    if let Some(wm) = tracker.watermark() {
-                        info!(
-                            target = %self.pipeline_key,
-                            source = %source_name,
-                            watermark = %wm,
-                            "Saved checkpoint"
-                        );
-                    }
+                    info!(
+                        target = %self.pipeline_key,
+                        source = %source_name,
+                        "Saved checkpoint"
+                    );
                 }
                 Err(e) => {
                     warn!(
