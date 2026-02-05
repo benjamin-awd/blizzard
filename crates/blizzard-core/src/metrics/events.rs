@@ -428,6 +428,19 @@ impl InternalEvent for CheckpointAge {
     }
 }
 
+/// Event emitted when a checkpoint is successfully saved.
+pub struct CheckpointSaved {
+    /// Target/pipeline identifier.
+    pub target: String,
+}
+
+impl InternalEvent for CheckpointSaved {
+    fn emit(self) {
+        trace!(target = %self.target, "Checkpoint saved");
+        counter!("blizzard_checkpoints_saved_total", "target" => self.target).increment(1);
+    }
+}
+
 // ============================================================================
 // Memory tracking events
 // ============================================================================
