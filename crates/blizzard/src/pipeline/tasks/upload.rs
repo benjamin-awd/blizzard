@@ -298,7 +298,7 @@ async fn upload_file(
 
     if let Some(bytes) = file.bytes {
         storage
-            .put_payload(
+            .put_parquet(
                 &object_store::path::Path::from(filename.as_str()),
                 PutPayload::from(bytes),
             )

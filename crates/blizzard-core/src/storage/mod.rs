@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::ready};
 use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
-use object_store::{ObjectStore, PutPayload};
+use object_store::{Attribute, AttributeValue, Attributes, ObjectStore, PutOptions, PutPayload};
 use snafu::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -277,9 +277,40 @@ impl StorageProvider {
 
     /// Put a payload to a path.
     pub async fn put_payload(&self, path: &Path, payload: PutPayload) -> Result<(), StorageError> {
+        self.put_payload_with_opts(path, payload, PutOptions::default())
+            .await
+    }
+
+    /// Put a Parquet file to a path with the correct content type.
+    ///
+    /// Sets `Content-Type: application/vnd.apache.parquet` on cloud storage backends.
+    /// Local filesystem doesn't support attributes, so they are skipped.
+    pub async fn put_parquet(&self, path: &Path, payload: PutPayload) -> Result<(), StorageError> {
+        // Local filesystem doesn't support content-type attributes
+        if matches!(self.config, BackendConfig::Local(_)) {
+            return self.put_payload(path, payload).await;
+        }
+
+        let opts = PutOptions {
+            attributes: Attributes::from_iter([(
+                Attribute::ContentType,
+                AttributeValue::from("application/vnd.apache.parquet"),
+            )]),
+            ..Default::default()
+        };
+        self.put_payload_with_opts(path, payload, opts).await
+    }
+
+    /// Put a payload to a path with options.
+    async fn put_payload_with_opts(
+        &self,
+        path: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<(), StorageError> {
         let path = self.qualify_path(path);
         let start = Instant::now();
-        let result = self.object_store.put(&path, payload).await;
+        let result = self.object_store.put_opts(&path, payload, opts).await;
 
         let status = if result.is_ok() {
             RequestStatus::Success
