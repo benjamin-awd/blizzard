@@ -65,8 +65,11 @@ impl StateTracker for WatermarkTracker {
     async fn init(&mut self) -> Result<Option<String>, PipelineError> {
         match self.checkpoint_manager.load().await {
             Ok(true) => Ok(Some(format!(
-                "Restored checkpoint from storage (watermark: {:?})",
-                self.checkpoint_manager.watermark()
+                "Restored checkpoint from storage (watermark: {})",
+                self.checkpoint_manager
+                    .watermark()
+                    .as_deref()
+                    .unwrap_or("None")
             ))),
             Ok(false) => Ok(None),
             Err(e) => {
