@@ -528,6 +528,96 @@ pub async fn list_ndjson_files(storage: &StorageProvider) -> Result<Vec<String>,
     Ok(files)
 }
 
+/// List NDJSON.gz files with optional prefix filtering and early termination.
+///
+/// When prefixes are provided, only lists files under those prefixes.
+/// When a limit is provided, stops listing once enough files are found.
+/// This is much more efficient for operations that only need a few files
+/// (like schema inference which only needs 1-3 files).
+///
+/// Results are sorted for consistent ordering.
+pub async fn list_ndjson_files_with_limit(
+    storage: &StorageProvider,
+    prefixes: Option<&[String]>,
+    limit: Option<usize>,
+    pipeline: &str,
+) -> Result<Vec<String>, StorageError> {
+    // For unlimited listing, use the full listing function
+    let Some(max_files) = limit else {
+        return list_ndjson_files_with_prefixes(storage, prefixes, pipeline).await;
+    };
+
+    if max_files == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::with_capacity(max_files);
+
+    match prefixes {
+        None | Some([]) => {
+            // List all files but stop early
+            let mut stream = storage.list(true).await?;
+            while let Some(result) = stream.next().await {
+                let path = result.context(ObjectStoreSnafu)?;
+                if path.as_ref().ends_with(".ndjson.gz") {
+                    files.push(path.to_string());
+                    if files.len() >= max_files {
+                        tracing::debug!(
+                            target = %pipeline,
+                            "Found {} files for schema inference, stopping early",
+                            files.len()
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        Some(prefixes) => {
+            tracing::debug!(
+                target = %pipeline,
+                "Listing up to {} files under {} prefixes for schema inference",
+                max_files,
+                prefixes.len()
+            );
+
+            'outer: for prefix in prefixes {
+                let stream_result = storage.list_with_prefix(prefix).await;
+                let mut stream = match stream_result {
+                    Ok(s) => s,
+                    Err(e) if e.is_not_found() => continue,
+                    Err(e) => return Err(e),
+                };
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(path) => {
+                            if path.as_ref().ends_with(".ndjson.gz") {
+                                files.push(path.to_string());
+                                if files.len() >= max_files {
+                                    tracing::debug!(
+                                        target = %pipeline,
+                                        "Found {} files for schema inference, stopping early",
+                                        files.len()
+                                    );
+                                    break 'outer;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if !e.to_string().contains("not found") {
+                                return Err(StorageError::ObjectStore { source: e });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
 /// List NDJSON.gz files with optional prefix filtering.
 ///
 /// When prefixes are provided, only lists files under those prefixes.
@@ -693,5 +783,132 @@ mod tests {
             b"parquet data",
             "Content should be preserved"
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_ndjson_files_with_limit_stops_early() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create many files (more than the limit)
+        let partition = base_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        for i in 0..10 {
+            std::fs::write(partition.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+        }
+
+        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+        // Request only 3 files
+        let files = list_ndjson_files_with_limit(&storage, None, Some(3), "test")
+            .await
+            .unwrap();
+
+        // Should return exactly 3 files (early termination)
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_ndjson_files_with_limit_with_prefixes() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create multiple partitions with files
+        let partition1 = base_path.join("date=2024-01-01");
+        let partition2 = base_path.join("date=2024-01-02");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+
+        for i in 0..5 {
+            std::fs::write(partition1.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+            std::fs::write(partition2.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+        }
+
+        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+        let prefixes = vec!["date=2024-01-01".to_string(), "date=2024-01-02".to_string()];
+
+        // Request only 3 files with prefix filter
+        let files = list_ndjson_files_with_limit(&storage, Some(&prefixes), Some(3), "test")
+            .await
+            .unwrap();
+
+        // Should return exactly 3 files (early termination)
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_ndjson_files_with_limit_none_returns_all() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        let partition = base_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        for i in 0..5 {
+            std::fs::write(partition.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+        }
+
+        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+        // No limit - should return all files
+        let files = list_ndjson_files_with_limit(&storage, None, None, "test")
+            .await
+            .unwrap();
+
+        assert_eq!(files.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_list_ndjson_files_with_limit_zero_returns_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        let partition = base_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("file.ndjson.gz"), b"").unwrap();
+
+        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+        // Limit of 0 should return empty
+        let files = list_ndjson_files_with_limit(&storage, None, Some(0), "test")
+            .await
+            .unwrap();
+
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_ndjson_files_with_limit_fewer_files_than_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        let partition = base_path.join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        // Create only 2 files
+        std::fs::write(partition.join("file01.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition.join("file02.ndjson.gz"), b"").unwrap();
+
+        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap();
+
+        // Request 10 files but only 2 exist
+        let files = list_ndjson_files_with_limit(&storage, None, Some(10), "test")
+            .await
+            .unwrap();
+
+        // Should return all 2 files
+        assert_eq!(files.len(), 2);
     }
 }

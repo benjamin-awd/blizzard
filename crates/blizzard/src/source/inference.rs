@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use blizzard_core::emit;
 use blizzard_core::metrics::events::SchemaTypeConflicts;
-use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_prefixes};
+use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_limit};
 
 use super::compression::CompressionCodecExt;
 use crate::config::CompressionFormat;
@@ -281,8 +281,8 @@ pub async fn infer_schema_from_source(
     pipeline: &str,
     coerce_conflicts_to_utf8: bool,
 ) -> Result<SchemaRef, InferenceError> {
-    // List available files
-    let files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline)
+    // List only enough files for inference (stop early to avoid listing thousands)
+    let files = list_ndjson_files_with_limit(storage, prefixes, Some(MAX_FILE_ATTEMPTS), pipeline)
         .await
         .map_err(|e| InferenceError::ReadFile { source: e })?;
 
@@ -290,7 +290,7 @@ pub async fn infer_schema_from_source(
         return Err(InferenceError::NoFilesFound);
     }
 
-    let max_attempts = std::cmp::min(MAX_FILE_ATTEMPTS, files.len());
+    let max_attempts = files.len(); // We only listed up to MAX_FILE_ATTEMPTS files
     let mut last_error = None;
 
     for path in files.iter().take(max_attempts) {
