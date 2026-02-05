@@ -150,6 +150,9 @@ impl CheckpointCoordinator {
     /// This is the primary entry point for cold start recovery. It scans the
     /// table's transaction log for embedded checkpoint state and restores it to the coordinator.
     ///
+    /// If no checkpoint is found but the table has committed files, initializes the
+    /// watermark from the highest committed path to avoid repeated cold start scans.
+    ///
     /// Returns `true` if a checkpoint was recovered, `false` otherwise.
     pub async fn restore_from_table_log(
         &self,
@@ -166,7 +169,22 @@ impl CheckpointCoordinator {
             self.restore_from_state(checkpoint).await;
             Ok(true)
         } else {
-            info!(target = %self.table, "No checkpoint found in Delta log, starting fresh");
+            // No checkpoint found - initialize watermark from committed files if available.
+            // This prevents infinite cold start loops for tables where all files are
+            // already committed but no penguin checkpoint exists (e.g., tables created
+            // by other writers or after checkpoint state was lost).
+            let committed_paths = sink.get_committed_paths();
+            if let Some(highest_path) = committed_paths.iter().max() {
+                info!(
+                    target = %self.table,
+                    committed_files = committed_paths.len(),
+                    watermark = %highest_path,
+                    "No checkpoint found, initializing watermark from highest committed path"
+                );
+                self.update_watermark(highest_path.clone()).await;
+            } else {
+                info!(target = %self.table, "No checkpoint found in Delta log, starting fresh");
+            }
             Ok(false)
         }
     }
@@ -311,6 +329,150 @@ impl CheckpointManager for CheckpointCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode};
+    use deltalake::arrow::datatypes::{Schema, SchemaRef};
+    use std::collections::HashSet;
+
+    /// Mock TableSink for testing checkpoint recovery behavior.
+    struct MockTableSink {
+        committed_paths: HashSet<String>,
+        checkpoint: Option<(CheckpointState, i64)>,
+    }
+
+    impl MockTableSink {
+        fn with_committed_paths(paths: Vec<&str>) -> Self {
+            Self {
+                committed_paths: paths.into_iter().map(String::from).collect(),
+                checkpoint: None,
+            }
+        }
+
+        fn with_checkpoint(mut self, checkpoint: CheckpointState, version: i64) -> Self {
+            self.checkpoint = Some((checkpoint, version));
+            self
+        }
+    }
+
+    #[async_trait]
+    impl TableSink for MockTableSink {
+        async fn commit_files_with_checkpoint(
+            &mut self,
+            _files: &[FinishedFile],
+            _checkpoint: &CheckpointState,
+        ) -> Result<Option<i64>, DeltaError> {
+            Ok(Some(1))
+        }
+
+        fn version(&self) -> i64 {
+            0
+        }
+
+        fn checkpoint_version(&self) -> i64 {
+            0
+        }
+
+        fn schema(&self) -> Option<&SchemaRef> {
+            None
+        }
+
+        fn get_committed_paths(&self) -> HashSet<String> {
+            self.committed_paths.clone()
+        }
+
+        async fn recover_checkpoint_from_log(
+            &mut self,
+        ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
+            Ok(self.checkpoint.clone())
+        }
+
+        fn validate_schema(
+            &self,
+            _incoming: &Schema,
+            _mode: SchemaEvolutionMode,
+        ) -> Result<EvolutionAction, crate::error::SchemaError> {
+            Ok(EvolutionAction::None)
+        }
+
+        async fn evolve_schema(&mut self, _action: EvolutionAction) -> Result<(), DeltaError> {
+            Ok(())
+        }
+
+        async fn create_checkpoint(&self) -> Result<(), DeltaError> {
+            Ok(())
+        }
+
+        fn table_name(&self) -> &str {
+            "mock_table"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_table_log_initializes_watermark_from_committed_paths() {
+        // Create a mock sink with committed paths but no checkpoint
+        let mut sink = MockTableSink::with_committed_paths(vec![
+            "date=2026-01-28/file1.parquet",
+            "date=2026-01-28/file2.parquet",
+            "date=2026-01-29/file3.parquet",
+        ]);
+
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        // Verify watermark is initially None
+        assert!(coordinator.watermark().await.is_none());
+
+        // Restore from table log - should initialize watermark from highest committed path
+        let recovered = coordinator.restore_from_table_log(&mut sink).await.unwrap();
+        assert!(!recovered); // No checkpoint was recovered
+
+        // Watermark should now be set to the highest committed path
+        let watermark = coordinator.watermark().await;
+        assert_eq!(watermark, Some("date=2026-01-29/file3.parquet".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_table_log_with_checkpoint_uses_checkpoint_watermark() {
+        // Create a checkpoint with a specific watermark
+        let checkpoint = CheckpointState {
+            schema_version: 2,
+            source_state: SourceState::new(),
+            delta_version: 5,
+            watermark: Some("date=2026-01-28/checkpoint-file.parquet".to_string()),
+        };
+
+        // Create sink with committed paths AND a checkpoint
+        let mut sink = MockTableSink::with_committed_paths(vec![
+            "date=2026-01-29/newer-file.parquet", // Higher than checkpoint watermark
+        ])
+        .with_checkpoint(checkpoint, 1);
+
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        // Restore from table log - should use checkpoint watermark, not committed paths
+        let recovered = coordinator.restore_from_table_log(&mut sink).await.unwrap();
+        assert!(recovered); // Checkpoint was recovered
+
+        // Watermark should be from the checkpoint, not the committed paths
+        let watermark = coordinator.watermark().await;
+        assert_eq!(
+            watermark,
+            Some("date=2026-01-28/checkpoint-file.parquet".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_table_log_empty_table_no_watermark() {
+        // Create a mock sink with no committed paths and no checkpoint
+        let mut sink = MockTableSink::with_committed_paths(vec![]);
+
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        // Restore from table log - should leave watermark as None
+        let recovered = coordinator.restore_from_table_log(&mut sink).await.unwrap();
+        assert!(!recovered);
+
+        // Watermark should remain None
+        assert!(coordinator.watermark().await.is_none());
+    }
 
     #[test]
     fn test_checkpoint_state_serialization() {
