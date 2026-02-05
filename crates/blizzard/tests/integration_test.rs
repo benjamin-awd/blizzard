@@ -250,6 +250,9 @@ pipelines:
 
     #[test]
     fn test_rollover_timeout_triggers_file_roll() {
+        use bytes::Bytes;
+        use deltalake::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
         // End-to-end test: config → policies → writer → actual file roll
         let yaml = r#"
 pipelines:
@@ -305,6 +308,39 @@ pipelines:
         assert!(
             finished[0].size < 100 * MB,
             "File should be well below size limit since time triggered the roll"
+        );
+
+        // Verify record count: both batches (20 records) are in the finished file
+        // because the second write is added to the buffer before the roll check triggers
+        assert_eq!(
+            finished[0].record_count, 20,
+            "Finished file should contain 20 records (both batches before roll)"
+        );
+
+        // Verify the Parquet file is readable and contains correct data
+        let bytes = finished[0]
+            .bytes
+            .as_ref()
+            .expect("FinishedFile should contain parquet bytes");
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::clone(bytes))
+            .expect("Should be able to create Parquet reader from bytes")
+            .build()
+            .expect("Should be able to build Parquet reader");
+
+        // Read all batches and verify total record count
+        let mut total_rows = 0;
+        for batch_result in reader {
+            let batch = batch_result.expect("Should be able to read batch from Parquet file");
+            total_rows += batch.num_rows();
+
+            // Verify schema matches expected (id: Utf8, value: Int64)
+            assert_eq!(batch.num_columns(), 2, "Should have 2 columns");
+            assert_eq!(batch.schema().field(0).name(), "id");
+            assert_eq!(batch.schema().field(1).name(), "value");
+        }
+        assert_eq!(
+            total_rows, 20,
+            "Parquet file should contain 20 rows when read back"
         );
     }
 }
