@@ -439,17 +439,16 @@ impl PollingProcessor for PipelineOrchestrator {
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
-        if cold_start {
-            self.multi_tracker.init_all().await?;
-        }
-
-        // Build config references for list_all_pending
         let configs: IndexMap<String, &SourceConfig> = self
             .config
             .sources
             .iter()
             .map(|(k, v)| (k.clone(), v))
             .collect();
+
+        if cold_start {
+            self.multi_tracker.init_all(&configs).await?;
+        }
 
         let pending_files = self
             .multi_tracker
@@ -498,5 +497,19 @@ impl PollingProcessor for PipelineOrchestrator {
         }
 
         Ok(result)
+    }
+
+    async fn finalize(&mut self) -> Result<(), Self::Error> {
+        let table_uri = &self.config.sink.table_uri;
+        let checkpoint_dir = crate::checkpoint::CHECKPOINT_DIR;
+        info!(
+            target = %self.key,
+            checkpoint_path = %format!("{table_uri}/{checkpoint_dir}/"),
+            "Saving checkpoint on shutdown"
+        );
+        if let Err(e) = self.multi_tracker.save_all().await {
+            warn!(target = %self.key, error = %e, "Failed to save checkpoint on shutdown");
+        }
+        Ok(())
     }
 }
