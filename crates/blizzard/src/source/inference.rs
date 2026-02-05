@@ -7,14 +7,15 @@
 //! as both an object and a string), a fallback inference strategy is used that treats
 //! conflicting fields as `Utf8` strings.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
+use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit};
 use deltalake::arrow::error::ArrowError;
 use deltalake::arrow::json::reader::infer_json_schema;
+use indexmap::IndexSet;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -32,91 +33,171 @@ const SAMPLE_SIZE: usize = 1000;
 /// Maximum number of files to try for schema inference.
 const MAX_FILE_ATTEMPTS: usize = 3;
 
-/// Simplified JSON type for conflict detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum JsonType {
-    Null,
-    Boolean,
-    Integer,
-    Float,
-    String,
-    Array,
-    Object,
+/// Represents an inferred type during schema inference.
+///
+/// Tracks observed Arrow `DataType`s directly, avoiding an intermediate type enum.
+/// Based on the approach used by arrow-rs's JSON schema inference.
+#[derive(Debug, Clone, Default)]
+enum InferredType {
+    /// One or more scalar types observed (e.g., Int64, Float64, Utf8).
+    Scalar(IndexSet<DataType>),
+    /// An array/list type with inferred element type.
+    Array(Box<InferredType>),
+    /// An object/struct type with inferred field types.
+    Object(HashMap<String, InferredType>),
+    /// No type observed yet (e.g., field only seen as null).
+    #[default]
+    Any,
 }
 
-impl JsonType {
-    /// Determine the JsonType from a serde_json Value.
-    fn from_value(value: &Value) -> Self {
-        match value {
-            Value::Null => JsonType::Null,
-            Value::Bool(_) => JsonType::Boolean,
-            Value::Number(n) => {
-                if n.is_i64() || n.is_u64() {
-                    JsonType::Integer
-                } else {
-                    JsonType::Float
+impl InferredType {
+    /// Merge another inferred type into this one.
+    fn merge(&mut self, other: InferredType) {
+        match (self, other) {
+            (InferredType::Scalar(lhs), InferredType::Scalar(rhs)) => {
+                lhs.extend(rhs);
+            }
+            (InferredType::Array(lhs), InferredType::Array(rhs)) => {
+                lhs.merge(*rhs);
+            }
+            (InferredType::Object(lhs), InferredType::Object(rhs)) => {
+                for (k, v) in rhs {
+                    lhs.entry(k).or_default().merge(v);
                 }
             }
-            Value::String(_) => JsonType::String,
-            Value::Array(_) => JsonType::Array,
-            Value::Object(_) => JsonType::Object,
+            (s @ InferredType::Any, other) => {
+                *s = other;
+            }
+            (_, InferredType::Any) => {}
+            // Scalar + Array -> Array (coerce scalar into array element)
+            (InferredType::Array(inner), InferredType::Scalar(types)) => {
+                inner.merge(InferredType::Scalar(types));
+            }
+            (s @ InferredType::Scalar(_), InferredType::Array(mut inner)) => {
+                inner.merge(s.clone());
+                *s = InferredType::Array(inner);
+            }
+            // Incompatible: Object + Scalar or Object + Array -> Scalar(Utf8)
+            (s, _) => {
+                *s = InferredType::Scalar([DataType::Utf8].into_iter().collect());
+            }
+        }
+    }
+
+    /// Convert to Arrow DataType, collecting conflicts.
+    fn to_data_type(&self, path: &str, conflicts: &mut Vec<String>) -> DataType {
+        match self {
+            InferredType::Any => DataType::Utf8,
+            InferredType::Scalar(types) => coerce_scalar_types(types, path, conflicts),
+            InferredType::Array(inner) => {
+                let item_path = format!("{path}[]");
+                let inner_type = inner.to_data_type(&item_path, conflicts);
+                DataType::List(Arc::new(Field::new("item", inner_type, true)))
+            }
+            InferredType::Object(fields) => {
+                let mut arrow_fields: Vec<Field> = fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        let field_path = if path.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{path}.{name}")
+                        };
+                        Field::new(name, ty.to_data_type(&field_path, conflicts), true)
+                    })
+                    .collect();
+                // Sort for deterministic ordering
+                arrow_fields.sort_by(|a, b| a.name().cmp(b.name()));
+                DataType::Struct(Fields::from(arrow_fields))
+            }
         }
     }
 }
 
-/// Tracks observed types for each field during custom inference.
+/// Coerce a set of observed scalar types into a single Arrow DataType.
+///
+/// Rules:
+/// - Single type -> that type
+/// - Int64 + Float64 -> Float64 (numeric widening)
+/// - Any other combination -> Utf8 (conflict)
+fn coerce_scalar_types(
+    types: &IndexSet<DataType>,
+    path: &str,
+    conflicts: &mut Vec<String>,
+) -> DataType {
+    // Filter out Null
+    let non_null: IndexSet<_> = types
+        .iter()
+        .filter(|t| **t != DataType::Null)
+        .cloned()
+        .collect();
+
+    if non_null.is_empty() {
+        return DataType::Utf8;
+    }
+
+    if non_null.len() == 1 {
+        return non_null.into_iter().next().unwrap();
+    }
+
+    // Numeric widening: Int64 + Float64 -> Float64
+    if non_null.len() == 2
+        && non_null.contains(&DataType::Int64)
+        && non_null.contains(&DataType::Float64)
+    {
+        return DataType::Float64;
+    }
+
+    // Incompatible types -> Utf8
+    conflicts.push(path.to_string());
+    DataType::Utf8
+}
+
+/// Infer type from a JSON value.
+fn infer_type(value: &Value) -> InferredType {
+    match value {
+        Value::Null => InferredType::Scalar([DataType::Null].into_iter().collect()),
+        Value::Bool(_) => InferredType::Scalar([DataType::Boolean].into_iter().collect()),
+        Value::Number(n) => {
+            let dt = if n.is_i64() || n.is_u64() {
+                DataType::Int64
+            } else {
+                DataType::Float64
+            };
+            InferredType::Scalar([dt].into_iter().collect())
+        }
+        Value::String(_) => InferredType::Scalar([DataType::Utf8].into_iter().collect()),
+        Value::Array(arr) => {
+            let mut inner = InferredType::Any;
+            for elem in arr {
+                inner.merge(infer_type(elem));
+            }
+            InferredType::Array(Box::new(inner))
+        }
+        Value::Object(obj) => {
+            let mut fields: HashMap<String, InferredType> = HashMap::new();
+            for (k, v) in obj {
+                fields.entry(k.clone()).or_default().merge(infer_type(v));
+            }
+            InferredType::Object(fields)
+        }
+    }
+}
+
+/// Tracks inferred types for schema building with conflict detection.
 #[derive(Debug, Default)]
 struct FieldTypeTracker {
-    /// Maps field path (e.g., "user.address.city") to observed types.
-    field_types: HashMap<String, HashSet<JsonType>>,
-    /// Tracks nested object structures for fields observed as objects.
-    nested_trackers: HashMap<String, FieldTypeTracker>,
-    /// Tracks array element types for fields observed as arrays.
-    array_element_types: HashMap<String, HashSet<JsonType>>,
-    /// Tracks nested array element structures (for arrays of objects).
-    array_nested_trackers: HashMap<String, FieldTypeTracker>,
+    fields: HashMap<String, InferredType>,
 }
 
 impl FieldTypeTracker {
     /// Track all fields in a JSON object.
     fn track_object(&mut self, obj: &serde_json::Map<String, Value>) {
         for (key, value) in obj {
-            let json_type = JsonType::from_value(value);
-            self.field_types
+            self.fields
                 .entry(key.clone())
                 .or_default()
-                .insert(json_type);
-
-            match value {
-                Value::Object(nested) => {
-                    self.nested_trackers
-                        .entry(key.clone())
-                        .or_default()
-                        .track_object(nested);
-                }
-                Value::Array(arr) => {
-                    self.track_array_elements(key, arr);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Track element types within an array field.
-    fn track_array_elements(&mut self, key: &str, arr: &[Value]) {
-        for elem in arr {
-            let elem_type = JsonType::from_value(elem);
-            self.array_element_types
-                .entry(key.to_string())
-                .or_default()
-                .insert(elem_type);
-
-            if let Value::Object(nested) = elem {
-                self.array_nested_trackers
-                    .entry(key.to_string())
-                    .or_default()
-                    .track_object(nested);
-            }
+                .merge(infer_type(value));
         }
     }
 
@@ -124,147 +205,15 @@ impl FieldTypeTracker {
     /// Returns the schema and a list of field paths that had type conflicts.
     fn build_schema(&self) -> (Schema, Vec<String>) {
         let mut conflicts = Vec::new();
-        let schema = self.build_schema_inner("", &mut conflicts);
-        (schema, conflicts)
-    }
-
-    /// Build schema, collecting conflicts into the provided vec.
-    fn build_schema_inner(&self, prefix: &str, conflicts: &mut Vec<String>) -> Schema {
-        let mut fields = Vec::new();
-
-        for (name, types) in &self.field_types {
-            let full_path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}.{name}")
-            };
-
-            let data_type = self.infer_data_type(name, types, &full_path, conflicts);
-            fields.push(Field::new(name, data_type, true));
-        }
-
-        // Sort fields for deterministic schema ordering
-        fields.sort_by(|a, b| a.name().cmp(b.name()));
-        Schema::new(fields)
-    }
-
-    /// Infer Arrow DataType from observed JSON types.
-    fn infer_data_type(
-        &self,
-        field_name: &str,
-        types: &HashSet<JsonType>,
-        full_path: &str,
-        conflicts: &mut Vec<String>,
-    ) -> DataType {
-        // Remove Null from consideration for type inference
-        let non_null_types: HashSet<_> = types
+        let mut fields: Vec<Field> = self
+            .fields
             .iter()
-            .filter(|t| **t != JsonType::Null)
-            .copied()
+            .map(|(name, ty)| Field::new(name, ty.to_data_type(name, &mut conflicts), true))
             .collect();
 
-        if non_null_types.is_empty() {
-            return DataType::Utf8;
-        }
-
-        if non_null_types.len() == 1 {
-            let single_type = non_null_types.iter().next().unwrap();
-            return self.map_single_type(field_name, *single_type, full_path, conflicts);
-        }
-
-        // Check for numeric widening (Int + Float -> Float64)
-        if non_null_types.len() == 2
-            && non_null_types.contains(&JsonType::Integer)
-            && non_null_types.contains(&JsonType::Float)
-        {
-            return DataType::Float64;
-        }
-
-        // Multiple incompatible types - use Utf8
-        conflicts.push(full_path.to_string());
-        DataType::Utf8
-    }
-
-    /// Map a single JsonType to Arrow DataType.
-    fn map_single_type(
-        &self,
-        field_name: &str,
-        json_type: JsonType,
-        full_path: &str,
-        conflicts: &mut Vec<String>,
-    ) -> DataType {
-        match json_type {
-            JsonType::Null => DataType::Utf8,
-            JsonType::Boolean => DataType::Boolean,
-            JsonType::Integer => DataType::Int64,
-            JsonType::Float => DataType::Float64,
-            JsonType::String => DataType::Utf8,
-            JsonType::Object => {
-                if let Some(nested) = self.nested_trackers.get(field_name) {
-                    let nested_schema = nested.build_schema_inner(full_path, conflicts);
-                    DataType::Struct(nested_schema.fields)
-                } else {
-                    DataType::Utf8
-                }
-            }
-            JsonType::Array => self.build_array_type(field_name, full_path, conflicts),
-        }
-    }
-
-    /// Build Arrow List type from tracked array element types.
-    fn build_array_type(
-        &self,
-        field_name: &str,
-        full_path: &str,
-        conflicts: &mut Vec<String>,
-    ) -> DataType {
-        let elem_types = self.array_element_types.get(field_name);
-        let array_item_path = format!("{full_path}[]");
-
-        let inner_type = match elem_types {
-            None => DataType::Utf8,
-            Some(types) => {
-                let non_null_types: HashSet<_> = types
-                    .iter()
-                    .filter(|t| **t != JsonType::Null)
-                    .copied()
-                    .collect();
-
-                if non_null_types.is_empty() {
-                    DataType::Utf8
-                } else if non_null_types.len() == 1 {
-                    let single_type = non_null_types.iter().next().unwrap();
-                    match single_type {
-                        JsonType::Object => {
-                            if let Some(nested) = self.array_nested_trackers.get(field_name) {
-                                let nested_schema =
-                                    nested.build_schema_inner(&array_item_path, conflicts);
-                                DataType::Struct(nested_schema.fields)
-                            } else {
-                                DataType::Utf8
-                            }
-                        }
-                        JsonType::Boolean => DataType::Boolean,
-                        JsonType::Integer => DataType::Int64,
-                        JsonType::Float => DataType::Float64,
-                        JsonType::String => DataType::Utf8,
-                        JsonType::Array => DataType::Utf8, // Nested arrays become strings
-                        JsonType::Null => DataType::Utf8,
-                    }
-                } else if non_null_types.len() == 2
-                    && non_null_types.contains(&JsonType::Integer)
-                    && non_null_types.contains(&JsonType::Float)
-                {
-                    DataType::Float64
-                } else {
-                    // Array element type conflict
-                    conflicts.push(array_item_path);
-                    DataType::Utf8
-                }
-            }
-        };
-
-        DataType::List(Arc::new(Field::new("item", inner_type, true)))
+        // Sort for deterministic ordering
+        fields.sort_by(|a, b| a.name().cmp(b.name()));
+        (Schema::new(fields), conflicts)
     }
 }
 
