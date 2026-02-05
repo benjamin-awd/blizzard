@@ -40,13 +40,6 @@ struct ConflictInfo {
     reason: String,
 }
 
-impl ConflictInfo {
-    /// Format the resolved type as a human-readable string.
-    fn resolved_type_str(&self) -> String {
-        self.resolved_type.to_string()
-    }
-}
-
 /// Maximum number of files to try for schema inference.
 const MAX_FILE_ATTEMPTS: usize = 3;
 
@@ -280,7 +273,7 @@ fn infer_with_conflict_handling(data: &[u8], pipeline: &str) -> Result<SchemaRef
             warn!(
                 target = %pipeline,
                 field = %conflict.field,
-                resolved_type = %conflict.resolved_type_str(),
+                resolved_type = %conflict.resolved_type,
                 "Type conflict coerced: {}",
                 conflict.reason
             );
