@@ -442,24 +442,80 @@ mod dlq_tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4, "Should have 4 failure records");
 
-        // Parse each line and verify structure
-        let mut stages_seen = Vec::new();
+        // Expected records (path -> (error, stage))
+        let expected: std::collections::HashMap<&str, (&str, &str)> = [
+            (
+                "s3://bucket/data/file1.ndjson.gz",
+                ("Connection timeout after 30s", "download"),
+            ),
+            (
+                "s3://bucket/data/file2.ndjson.gz",
+                ("invalid gzip header", "decompress"),
+            ),
+            (
+                "s3://bucket/data/file3.ndjson.gz",
+                ("JSON parse error at line 42: unexpected token", "parse"),
+            ),
+            (
+                "s3://bucket/data/file4.ndjson.gz",
+                ("S3 PutObject failed: Access Denied", "upload"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        // Track paths seen to verify no duplicates
+        let mut paths_seen = std::collections::HashSet::new();
+
         for line in lines {
             let record: serde_json::Value =
                 serde_json::from_str(line).expect("Each line should be valid JSON");
-            assert!(record.get("path").and_then(|v| v.as_str()).is_some());
-            assert!(record.get("error").and_then(|v| v.as_str()).is_some());
-            assert_eq!(record.get("retry_count").and_then(|v| v.as_u64()), Some(0));
-            if let Some(stage) = record.get("stage").and_then(|v| v.as_str()) {
-                stages_seen.push(stage.to_string());
-            }
+
+            // Verify required fields exist
+            let path = record
+                .get("path")
+                .and_then(|v| v.as_str())
+                .expect("Record should have 'path' field");
+            let error = record
+                .get("error")
+                .and_then(|v| v.as_str())
+                .expect("Record should have 'error' field");
+            let stage = record
+                .get("stage")
+                .and_then(|v| v.as_str())
+                .expect("Record should have 'stage' field");
+            let retry_count = record
+                .get("retry_count")
+                .and_then(|v| v.as_u64())
+                .expect("Record should have 'retry_count' field");
+
+            // Verify no duplicate paths
+            assert!(
+                paths_seen.insert(path.to_string()),
+                "Duplicate path found: {path}"
+            );
+
+            // Verify retry_count is 0 (first failure)
+            assert_eq!(retry_count, 0, "retry_count should be 0");
+
+            // Verify path, error, and stage match expected values
+            let (expected_error, expected_stage) = expected
+                .get(path)
+                .unwrap_or_else(|| panic!("Unexpected path in DLQ: {path}"));
+            assert_eq!(
+                error, *expected_error,
+                "Error message mismatch for path {path}"
+            );
+            assert_eq!(stage, *expected_stage, "Stage mismatch for path {path}");
         }
 
-        // Verify all stages are represented
-        assert!(stages_seen.iter().any(|s| s == "download"));
-        assert!(stages_seen.iter().any(|s| s == "decompress"));
-        assert!(stages_seen.iter().any(|s| s == "parse"));
-        assert!(stages_seen.iter().any(|s| s == "upload"));
+        // Verify all expected paths were seen
+        assert_eq!(
+            paths_seen.len(),
+            expected.len(),
+            "Should have exactly {} unique paths",
+            expected.len()
+        );
     }
 
     #[tokio::test]
