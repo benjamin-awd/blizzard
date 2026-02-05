@@ -354,6 +354,37 @@ impl StorageProvider {
         Ok(())
     }
 
+    /// Atomically write content to a path using temp file + rename.
+    ///
+    /// This ensures the target file is never partially written:
+    /// 1. Write to `{path}.tmp`
+    /// 2. Rename `{path}.tmp` to `{path}`
+    ///
+    /// If the write or rename fails, the original file (if any) is unchanged.
+    pub async fn atomic_write(&self, path: &Path, content: Vec<u8>) -> Result<(), StorageError> {
+        let temp_path = Path::from(format!("{path}.tmp"));
+        self.put_payload(&temp_path, PutPayload::from(Bytes::from(content)))
+            .await?;
+        self.rename(&temp_path, path).await
+    }
+
+    /// Atomically write a payload to a path using temp file + rename.
+    ///
+    /// This ensures the target file is never partially written:
+    /// 1. Write to `{path}.tmp`
+    /// 2. Rename `{path}.tmp` to `{path}`
+    ///
+    /// If the write or rename fails, the original file (if any) is unchanged.
+    pub async fn atomic_put_payload(
+        &self,
+        path: &Path,
+        payload: PutPayload,
+    ) -> Result<(), StorageError> {
+        let temp_path = Path::from(format!("{path}.tmp"));
+        self.put_payload(&temp_path, payload).await?;
+        self.rename(&temp_path, path).await
+    }
+
     /// Server-side rename (move) operation.
     ///
     /// This is a zero-copy operation on cloud storage (GCS, S3, Azure).
@@ -946,5 +977,57 @@ mod tests {
 
         // Should return all 2 files
         assert_eq!(files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
+
+        let path = Path::from("test_file.json");
+        let content = b"test content".to_vec();
+
+        // Atomic write should create the file
+        storage.atomic_write(&path, content.clone()).await.unwrap();
+
+        // Verify the file exists with correct content
+        let read_content = storage.get("test_file.json").await.unwrap();
+        assert_eq!(read_content.as_ref(), content.as_slice());
+
+        // Temp file should not exist
+        let temp_path = base_path.join("test_file.json.tmp");
+        assert!(!temp_path.exists(), "Temp file should be cleaned up");
+    }
+
+    #[tokio::test]
+    async fn test_atomic_write_overwrites_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create initial file
+        std::fs::write(base_path.join("test_file.json"), b"old content").unwrap();
+
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
+
+        let path = Path::from("test_file.json");
+        let new_content = b"new content".to_vec();
+
+        // Atomic write should overwrite atomically
+        storage
+            .atomic_write(&path, new_content.clone())
+            .await
+            .unwrap();
+
+        // Verify new content
+        let read_content = storage.get("test_file.json").await.unwrap();
+        assert_eq!(read_content.as_ref(), new_content.as_slice());
     }
 }
