@@ -301,19 +301,19 @@ mod tests {
 
         let manager_asia = CheckpointManager::new(
             storage.clone(),
-            "orderbooks".to_string(),
+            "events".to_string(),
             "asia".to_string(),
         );
         let manager_europe =
-            CheckpointManager::new(storage, "orderbooks".to_string(), "europe".to_string());
+            CheckpointManager::new(storage, "events".to_string(), "europe".to_string());
 
         assert_eq!(
             manager_asia.checkpoint_path().to_string(),
-            "_blizzard/orderbooks_asia_checkpoint.json"
+            "_blizzard/events_asia_checkpoint.json"
         );
         assert_eq!(
             manager_europe.checkpoint_path().to_string(),
-            "_blizzard/orderbooks_europe_checkpoint.json"
+            "_blizzard/events_europe_checkpoint.json"
         );
     }
 }

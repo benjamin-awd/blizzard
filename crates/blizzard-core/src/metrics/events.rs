@@ -7,7 +7,7 @@
 //! ## Target Labels
 //!
 //! For multi-target deployments, metrics include a `target` label to enable
-//! per-target observability (e.g., `"orderbooks"`, `"trades"`).
+//! per-target observability (e.g., `"events"`, `"logs"`).
 
 use metrics::{counter, gauge, histogram};
 use std::time::Duration;

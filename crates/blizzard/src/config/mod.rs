@@ -337,25 +337,25 @@ impl PipelineConfig {
 ///
 /// ```yaml
 /// pipelines:
-///   orderbooks:
+///   events:
 ///     source:
-///       path: "gs://bucket/orderbooks-raw"
+///       path: "gs://bucket/events-raw"
 ///       compression: gzip
 ///     sink:
-///       table_uri: "gs://bucket/delta/orderbooks"
+///       table_uri: "gs://bucket/delta/events"
 ///     schema:
 ///       fields:
 ///         - name: id
 ///           type: string
 ///
-///   trades:
+///   logs:
 ///     source:
-///       path: "gs://bucket/trades-raw"
+///       path: "gs://bucket/logs-raw"
 ///     sink:
-///       table_uri: "gs://bucket/delta/trades"
+///       table_uri: "gs://bucket/delta/logs"
 ///     schema:
 ///       fields:
-///         - name: trade_id
+///         - name: log_id
 ///           type: string
 ///
 /// global:
@@ -568,18 +568,18 @@ pipelines:
     fn test_multi_source_pipeline_parse() {
         let yaml = r#"
 pipelines:
-  orderbooks:
+  events:
     sources:
       asia:
-        path: gs://bucket/region=asia-northeast1/orderbooks
+        path: gs://bucket/region=asia-northeast1/events
         compression: gzip
         use_watermark: true
       europe:
-        path: gs://bucket/region=europe-west1/orderbooks
+        path: gs://bucket/region=europe-west1/events
         compression: zstd
         use_watermark: true
     sink:
-      table_uri: gs://bucket/delta/orderbooks
+      table_uri: gs://bucket/delta/events
     schema:
       infer: true
 "#;
@@ -587,16 +587,16 @@ pipelines:
         assert_eq!(config.pipeline_count(), 1);
 
         let (key, pipeline) = config.pipelines().next().unwrap();
-        assert_eq!(key.id(), "orderbooks");
+        assert_eq!(key.id(), "events");
         assert_eq!(pipeline.sources.len(), 2);
 
         let asia = pipeline.sources.get("asia").unwrap();
-        assert_eq!(asia.path, "gs://bucket/region=asia-northeast1/orderbooks");
+        assert_eq!(asia.path, "gs://bucket/region=asia-northeast1/events");
         assert!(matches!(asia.compression, CompressionFormat::Gzip));
         assert!(asia.use_watermark);
 
         let europe = pipeline.sources.get("europe").unwrap();
-        assert_eq!(europe.path, "gs://bucket/region=europe-west1/orderbooks");
+        assert_eq!(europe.path, "gs://bucket/region=europe-west1/events");
         assert!(matches!(europe.compression, CompressionFormat::Zstd));
         assert!(europe.use_watermark);
     }
@@ -605,27 +605,27 @@ pipelines:
     fn test_multi_pipeline_parse() {
         let yaml = r#"
 pipelines:
-  orderbooks:
+  events:
     sources:
       default:
-        path: gs://bucket/orderbooks-raw
+        path: gs://bucket/events-raw
         compression: gzip
     sink:
-      table_uri: gs://bucket/delta/orderbooks
+      table_uri: gs://bucket/delta/events
     schema:
       fields:
         - name: id
           type: string
 
-  trades:
+  logs:
     sources:
       default:
-        path: gs://bucket/trades-raw
+        path: gs://bucket/logs-raw
     sink:
-      table_uri: gs://bucket/delta/trades
+      table_uri: gs://bucket/delta/logs
     schema:
       fields:
-        - name: trade_id
+        - name: log_id
           type: string
 
 global:
@@ -639,15 +639,15 @@ global:
         assert_eq!(pipelines.len(), 2);
 
         // IndexMap preserves insertion order
-        assert_eq!(pipelines[0].0.id(), "orderbooks");
+        assert_eq!(pipelines[0].0.id(), "events");
         assert_eq!(
             pipelines[0].1.sources.get("default").unwrap().path,
-            "gs://bucket/orderbooks-raw"
+            "gs://bucket/events-raw"
         );
-        assert_eq!(pipelines[1].0.id(), "trades");
+        assert_eq!(pipelines[1].0.id(), "logs");
         assert_eq!(
             pipelines[1].1.sources.get("default").unwrap().path,
-            "gs://bucket/trades-raw"
+            "gs://bucket/logs-raw"
         );
     }
 
