@@ -7,7 +7,7 @@
 //! as both an object and a string), a fallback inference strategy is used that treats
 //! conflicting fields as `Utf8` strings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
@@ -74,25 +74,13 @@ impl JsonType {
             Value::Object(_) => JsonType::Object,
         }
     }
-
-    /// Convert to Arrow DataType for scalar types.
-    fn to_scalar_data_type(self) -> Option<DataType> {
-        match self {
-            JsonType::Null => None,
-            JsonType::Bool => Some(DataType::Boolean),
-            JsonType::Int => Some(DataType::Int64),
-            JsonType::Float => Some(DataType::Float64),
-            JsonType::String => Some(DataType::Utf8),
-            JsonType::Array | JsonType::Object => None,
-        }
-    }
 }
 
 /// Observed type information for a field.
 #[derive(Debug, Clone, Default)]
 struct ObservedTypes {
     /// All non-null scalar types seen at this path.
-    scalar_types: Vec<JsonType>,
+    scalar_types: HashSet<JsonType>,
     /// If array was observed, the element types.
     array_element: Option<Box<ObservedTypes>>,
     /// If object was observed, the nested fields.
@@ -106,18 +94,14 @@ impl ObservedTypes {
         match value {
             Value::Null => {}
             Value::Object(obj) => {
-                if !self.scalar_types.contains(&JsonType::Object) {
-                    self.scalar_types.push(JsonType::Object);
-                }
+                self.scalar_types.insert(JsonType::Object);
                 let fields = self.object_fields.get_or_insert_with(HashMap::new);
                 for (k, v) in obj {
                     fields.entry(k.clone()).or_default().observe(v);
                 }
             }
             Value::Array(arr) => {
-                if !self.scalar_types.contains(&JsonType::Array) {
-                    self.scalar_types.push(JsonType::Array);
-                }
+                self.scalar_types.insert(JsonType::Array);
                 let elem = self
                     .array_element
                     .get_or_insert_with(|| Box::new(ObservedTypes::default()));
@@ -126,39 +110,36 @@ impl ObservedTypes {
                 }
             }
             _ => {
-                if !self.scalar_types.contains(&json_type) {
-                    self.scalar_types.push(json_type);
-                }
+                self.scalar_types.insert(json_type);
             }
         }
     }
 
     /// Check if there's a type conflict (incompatible types observed).
     fn has_conflict(&self) -> bool {
-        let non_null: Vec<_> = self
+        let non_null_count = self
             .scalar_types
             .iter()
             .filter(|t| **t != JsonType::Null)
-            .collect();
+            .count();
 
-        if non_null.len() <= 1 {
+        if non_null_count <= 1 {
             return false;
         }
 
+        let has_int = self.scalar_types.contains(&JsonType::Int);
+        let has_float = self.scalar_types.contains(&JsonType::Float);
+        let has_array = self.scalar_types.contains(&JsonType::Array);
+        let has_object = self.scalar_types.contains(&JsonType::Object);
+
         // Int + Float is not a conflict (widening)
-        if non_null.len() == 2
-            && non_null.contains(&&JsonType::Int)
-            && non_null.contains(&&JsonType::Float)
-        {
+        if non_null_count == 2 && has_int && has_float {
             return false;
         }
 
         // Array + scalar is not a conflict (Arrow handles this)
-        if non_null.len() == 2 && non_null.contains(&&JsonType::Array) {
-            let other = non_null.iter().find(|t| ***t != JsonType::Array).unwrap();
-            if other.to_scalar_data_type().is_some() {
-                return false;
-            }
+        if non_null_count == 2 && has_array && !has_object {
+            return false;
         }
 
         true
@@ -166,14 +147,14 @@ impl ObservedTypes {
 
     /// Convert to Arrow DataType, reporting conflicts.
     fn to_data_type(&self, path: &str, conflicts: &mut Vec<ConflictInfo>) -> DataType {
-        let non_null: Vec<_> = self
+        let non_null_count = self
             .scalar_types
             .iter()
             .filter(|t| **t != JsonType::Null)
-            .collect();
+            .count();
 
         // No types observed -> Utf8
-        if non_null.is_empty() {
+        if non_null_count == 0 {
             return DataType::Utf8;
         }
 
@@ -189,7 +170,7 @@ impl ObservedTypes {
         }
 
         // Single type or compatible types
-        if non_null.contains(&&JsonType::Object)
+        if self.scalar_types.contains(&JsonType::Object)
             && let Some(fields) = &self.object_fields
         {
             let mut arrow_fields: Vec<Field> = fields
@@ -207,7 +188,7 @@ impl ObservedTypes {
             return DataType::Struct(Fields::from(arrow_fields));
         }
 
-        if non_null.contains(&&JsonType::Array) {
+        if self.scalar_types.contains(&JsonType::Array) {
             let elem_path = format!("{path}[]");
             let inner_type = if let Some(elem) = &self.array_element {
                 elem.to_data_type(&elem_path, conflicts)
@@ -218,15 +199,13 @@ impl ObservedTypes {
         }
 
         // Scalar types
-        if non_null.contains(&&JsonType::Float)
-            || (non_null.contains(&&JsonType::Int) && non_null.contains(&&JsonType::Float))
-        {
+        if self.scalar_types.contains(&JsonType::Float) {
             return DataType::Float64;
         }
-        if non_null.contains(&&JsonType::Int) {
+        if self.scalar_types.contains(&JsonType::Int) {
             return DataType::Int64;
         }
-        if non_null.contains(&&JsonType::Bool) {
+        if self.scalar_types.contains(&JsonType::Bool) {
             return DataType::Boolean;
         }
 
