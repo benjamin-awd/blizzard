@@ -30,6 +30,24 @@ use crate::error::InferenceError;
 /// Number of records to sample for schema inference.
 const SAMPLE_SIZE: usize = 1000;
 
+/// Information about a type conflict that was resolved during schema inference.
+#[derive(Debug)]
+struct ConflictInfo {
+    /// The field path (e.g., "nested.field" or "items").
+    field: String,
+    /// The resolved Arrow DataType.
+    resolved_type: DataType,
+    /// Description of the conflicting types (e.g., "Object(...) vs Scalar(...)").
+    reason: String,
+}
+
+impl ConflictInfo {
+    /// Format the resolved type as a human-readable string.
+    fn resolved_type_str(&self) -> String {
+        self.resolved_type.to_string()
+    }
+}
+
 /// Maximum number of files to try for schema inference.
 const MAX_FILE_ATTEMPTS: usize = 3;
 
@@ -45,6 +63,14 @@ enum InferredType {
     Array(Box<InferredType>),
     /// An object/struct type with inferred field types.
     Object(HashMap<String, InferredType>),
+    /// A type that was coerced to Utf8 due to incompatible types (e.g., Object vs Scalar).
+    /// Stores the original conflicting types for reporting.
+    Coerced {
+        /// The first type observed (before coercion).
+        original: Box<InferredType>,
+        /// The conflicting type that triggered coercion.
+        conflicting: Box<InferredType>,
+    },
     /// No type observed yet (e.g., field only seen as null).
     #[default]
     Any,
@@ -77,22 +103,42 @@ impl InferredType {
                 inner.merge(s.clone());
                 *s = InferredType::Array(inner);
             }
-            // Incompatible: Object + Scalar or Object + Array -> Scalar(Utf8)
-            (s, _) => {
-                *s = InferredType::Scalar([DataType::Utf8].into_iter().collect());
+            // Already coerced -> stay coerced
+            (InferredType::Coerced { .. }, _) => {}
+            // Incompatible: Object + Scalar or Object + Array -> Coerced(Utf8)
+            // Track the original types for reporting
+            (s, other) => {
+                let original = std::mem::take(s);
+                *s = InferredType::Coerced {
+                    original: Box::new(original),
+                    conflicting: Box::new(other),
+                };
             }
         }
     }
 
     /// Convert to Arrow DataType, collecting conflicts.
-    fn to_data_type(&self, path: &str, conflicts: &mut Vec<String>) -> DataType {
+    fn to_data_type(&self, path: &str, conflicts: &mut Vec<ConflictInfo>) -> DataType {
         match self {
             InferredType::Any => DataType::Utf8,
             InferredType::Scalar(types) => coerce_scalar_types(types, path, conflicts),
             InferredType::Array(inner) => {
+                // Track conflicts at the array level so we can report the full List<...> type
+                let start_conflicts = conflicts.len();
                 let item_path = format!("{path}[]");
                 let inner_type = inner.to_data_type(&item_path, conflicts);
-                DataType::List(Arc::new(Field::new("item", inner_type, true)))
+                let list_type = DataType::List(Arc::new(Field::new("item", inner_type, true)));
+
+                // Update any conflicts added by the inner type to report the full array field
+                // if they were at the immediate element level (path[])
+                for conflict in conflicts.iter_mut().skip(start_conflicts) {
+                    if conflict.field == item_path {
+                        conflict.field = path.to_string();
+                        conflict.resolved_type = list_type.clone();
+                    }
+                }
+
+                list_type
             }
             InferredType::Object(fields) => {
                 let mut arrow_fields: Vec<Field> = fields
@@ -110,6 +156,18 @@ impl InferredType {
                 arrow_fields.sort_by(|a, b| a.name().cmp(b.name()));
                 DataType::Struct(Fields::from(arrow_fields))
             }
+            InferredType::Coerced {
+                original,
+                conflicting,
+            } => {
+                let reason = format!("{original:?} vs {conflicting:?}");
+                conflicts.push(ConflictInfo {
+                    field: path.to_string(),
+                    resolved_type: DataType::Utf8,
+                    reason,
+                });
+                DataType::Utf8
+            }
         }
     }
 }
@@ -123,7 +181,7 @@ impl InferredType {
 fn coerce_scalar_types(
     types: &IndexSet<DataType>,
     path: &str,
-    conflicts: &mut Vec<String>,
+    conflicts: &mut Vec<ConflictInfo>,
 ) -> DataType {
     // Filter out Null
     let non_null: IndexSet<_> = types
@@ -149,7 +207,12 @@ fn coerce_scalar_types(
     }
 
     // Incompatible types -> Utf8
-    conflicts.push(path.to_string());
+    let reason = format!("{non_null:?}");
+    conflicts.push(ConflictInfo {
+        field: path.to_string(),
+        resolved_type: DataType::Utf8,
+        reason,
+    });
     DataType::Utf8
 }
 
@@ -202,8 +265,8 @@ impl FieldTypeTracker {
     }
 
     /// Build an Arrow schema from tracked types.
-    /// Returns the schema and a list of field paths that had type conflicts.
-    fn build_schema(&self) -> (Schema, Vec<String>) {
+    /// Returns the schema and a list of conflict info for fields that had type conflicts.
+    fn build_schema(&self) -> (Schema, Vec<ConflictInfo>) {
         let mut conflicts = Vec::new();
         let mut fields: Vec<Field> = self
             .fields
@@ -247,12 +310,15 @@ fn infer_with_conflict_handling(data: &[u8], pipeline: &str) -> Result<SchemaRef
     let (schema, conflicts) = tracker.build_schema();
 
     if !conflicts.is_empty() {
-        info!(
-            target = %pipeline,
-            "Resolved {} type conflicts as Utf8: {:?}",
-            conflicts.len(),
-            conflicts
-        );
+        for conflict in &conflicts {
+            warn!(
+                target = %pipeline,
+                field = %conflict.field,
+                resolved_type = %conflict.resolved_type_str(),
+                "Type conflict coerced: {}",
+                conflict.reason
+            );
+        }
         emit!(SchemaTypeConflicts {
             count: conflicts.len(),
             target: pipeline.to_string(),
@@ -942,11 +1008,11 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "nested.value"),
+            conflicts.iter().any(|c| c.field == "nested.value"),
             "Should report nested conflict with full path. Got: {conflicts:?}"
         );
         assert!(
-            !conflicts.iter().any(|c| c == "nested.stable"),
+            !conflicts.iter().any(|c| c.field == "nested.stable"),
             "Should not report non-conflicting nested field"
         );
     }
@@ -972,7 +1038,7 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "items[].count"),
+            conflicts.iter().any(|c| c.field == "items[].count"),
             "Should report array nested conflict with full path. Got: {conflicts:?}"
         );
     }
@@ -997,7 +1063,7 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "a.b.c.deep_field"),
+            conflicts.iter().any(|c| c.field == "a.b.c.deep_field"),
             "Should report deeply nested conflict with full path. Got: {conflicts:?}"
         );
     }
@@ -1026,15 +1092,15 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "top"),
+            conflicts.iter().any(|c| c.field == "top"),
             "Should report top-level conflict. Got: {conflicts:?}"
         );
         assert!(
-            conflicts.iter().any(|c| c == "nested.mid"),
+            conflicts.iter().any(|c| c.field == "nested.mid"),
             "Should report mid-level conflict. Got: {conflicts:?}"
         );
         assert!(
-            conflicts.iter().any(|c| c == "nested.deep.bottom"),
+            conflicts.iter().any(|c| c.field == "nested.deep.bottom"),
             "Should report deep-level conflict. Got: {conflicts:?}"
         );
         assert_eq!(conflicts.len(), 3, "Should have exactly 3 conflicts");
@@ -1043,6 +1109,7 @@ mod tests {
     #[test]
     fn test_array_element_type_conflict() {
         // Array with mixed primitive types (not nested objects)
+        // Now reports the parent array field with List<Utf8> type
         let mut tracker = FieldTypeTracker::default();
 
         let record1: Value = serde_json::from_str(r#"{"tags": [1, 2, 3]}"#).unwrap();
@@ -1058,8 +1125,14 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "tags[]"),
-            "Should report array element type conflict. Got: {conflicts:?}"
+            conflicts.iter().any(|c| c.field == "tags"),
+            "Should report array field (not tags[]). Got: {conflicts:?}"
+        );
+        let conflict = conflicts.iter().find(|c| c.field == "tags").unwrap();
+        assert_eq!(
+            conflict.resolved_type_str(),
+            "List(Utf8)",
+            "Should report List(Utf8) as resolved type"
         );
     }
 
@@ -1083,7 +1156,7 @@ mod tests {
         let (_schema, conflicts) = tracker.build_schema();
 
         assert!(
-            conflicts.iter().any(|c| c == "outer.items[].value"),
+            conflicts.iter().any(|c| c.field == "outer.items[].value"),
             "Should report nested array object field conflict. Got: {conflicts:?}"
         );
     }
@@ -1109,6 +1182,134 @@ mod tests {
         assert!(
             conflicts.is_empty(),
             "Int+Float widening should not be reported as conflict. Got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn test_object_vs_scalar_conflict_reports_field_and_reason() {
+        // This is the scenario that triggered the original issue:
+        // Arrow reports "Object(...) v.s. Scalar(...)" but doesn't say which field.
+        // Our fallback should report both the field name and the conflicting types.
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value = serde_json::from_str(
+            r#"{"indexes": {"alias": "foo", "doNotExpire": true, "name": "bar"}}"#,
+        )
+        .unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value = serde_json::from_str(r#"{"indexes": "just a string"}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert_eq!(conflicts.len(), 1, "Should have exactly 1 conflict");
+        let conflict = &conflicts[0];
+        assert_eq!(
+            conflict.field, "indexes",
+            "Should report 'indexes' as conflicting field"
+        );
+        assert_eq!(
+            conflict.resolved_type,
+            DataType::Utf8,
+            "Should resolve to Utf8"
+        );
+        assert!(
+            conflict.reason.contains("Object") && conflict.reason.contains("Scalar"),
+            "Reason should mention Object and Scalar types. Got: {}",
+            conflict.reason
+        );
+    }
+
+    #[test]
+    fn test_array_of_objects_vs_strings_reports_list_utf8() {
+        // Array elements that are sometimes objects and sometimes strings
+        // should report the resolved type as List<Utf8>
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value =
+            serde_json::from_str(r#"{"components": [{"alias": "foo", "name": "bar"}]}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value = serde_json::from_str(r#"{"components": ["just a string"]}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (schema, conflicts) = tracker.build_schema();
+
+        assert_eq!(conflicts.len(), 1, "Should have exactly 1 conflict");
+        let conflict = &conflicts[0];
+        assert_eq!(
+            conflict.field, "components",
+            "Should report 'components' as conflicting field"
+        );
+
+        // Verify resolved type is List(Utf8)
+        let expected_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
+        assert_eq!(
+            conflict.resolved_type, expected_type,
+            "Should resolve to List(Utf8)"
+        );
+        assert_eq!(conflict.resolved_type_str(), "List(Utf8)");
+
+        // Verify the actual schema type matches
+        let components_field = schema.field_with_name("components").unwrap();
+        assert_eq!(
+            components_field.data_type(),
+            &expected_type,
+            "Schema should have List<Utf8> type for components"
+        );
+    }
+
+    #[test]
+    fn test_nested_array_conflict_reports_correct_type() {
+        // List<List<Utf8>> case: nested arrays with conflicting element types
+        // The conflict bubbles up to the outermost array that contains it
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value = serde_json::from_str(r#"{"matrix": [[1, 2], [3, 4]]}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value = serde_json::from_str(r#"{"matrix": [["a", "b"]]}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (schema, conflicts) = tracker.build_schema();
+
+        assert_eq!(conflicts.len(), 1, "Should have exactly 1 conflict");
+        let conflict = &conflicts[0];
+
+        // The conflict bubbles up to the top-level field
+        assert_eq!(
+            conflict.field, "matrix",
+            "Should report 'matrix' as conflicting field"
+        );
+
+        // The resolved type is the full List(List(Utf8))
+        let inner_list_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
+        let outer_list_type = DataType::List(Arc::new(Field::new("item", inner_list_type, true)));
+        assert_eq!(
+            conflict.resolved_type, outer_list_type,
+            "Should report full List(List(Utf8)) type"
+        );
+        assert_eq!(conflict.resolved_type_str(), "List(List(Utf8))");
+
+        // Verify the schema matches
+        let matrix_field = schema.field_with_name("matrix").unwrap();
+        assert_eq!(
+            matrix_field.data_type(),
+            &outer_list_type,
+            "Schema should have List<List<Utf8>> type for matrix"
         );
     }
 }

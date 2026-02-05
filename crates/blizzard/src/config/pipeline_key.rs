@@ -133,10 +133,7 @@ mod tests {
         map.insert(PipelineKey::new("events"), "events_value");
         map.insert(PipelineKey::new("logs"), "logs_value");
 
-        assert_eq!(
-            map.get(&PipelineKey::new("events")),
-            Some(&"events_value")
-        );
+        assert_eq!(map.get(&PipelineKey::new("events")), Some(&"events_value"));
         assert_eq!(map.get(&PipelineKey::new("logs")), Some(&"logs_value"));
     }
 }

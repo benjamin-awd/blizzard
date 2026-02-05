@@ -299,11 +299,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = create_test_storage(&temp_dir).await;
 
-        let manager_asia = CheckpointManager::new(
-            storage.clone(),
-            "events".to_string(),
-            "asia".to_string(),
-        );
+        let manager_asia =
+            CheckpointManager::new(storage.clone(), "events".to_string(), "asia".to_string());
         let manager_europe =
             CheckpointManager::new(storage, "events".to_string(), "europe".to_string());
 
