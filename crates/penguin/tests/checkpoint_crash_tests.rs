@@ -115,6 +115,8 @@ async fn test_checkpoint_commit_and_recovery() {
 /// or inconsistent state due to the single consolidated lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_coordinator_access() {
+    use std::collections::HashSet;
+
     let coordinator = Arc::new(CheckpointCoordinator::new("test".to_string()));
 
     // Spawn multiple tasks that update state concurrently
@@ -158,6 +160,53 @@ async fn test_concurrent_coordinator_access() {
     // Final state should have all 400 files
     let final_state = coordinator.capture_state().await;
     assert_eq!(final_state.source_state.files.len(), 400);
+
+    // Verify all 400 unique file IDs are present (no lost updates)
+    let expected_files: HashSet<String> =
+        (0..400).map(|id| format!("file{id}.ndjson.gz")).collect();
+    let actual_files: HashSet<String> = final_state.source_state.files.keys().cloned().collect();
+    assert_eq!(
+        actual_files, expected_files,
+        "All 400 unique file IDs should be present with no lost updates"
+    );
+
+    // Verify each file is marked as finished
+    for file_id in 0..400 {
+        let filename = format!("file{file_id}.ndjson.gz");
+        assert!(
+            final_state.source_state.is_file_finished(&filename),
+            "File {filename} should be marked as finished"
+        );
+    }
+
+    // Verify intermediate captured states are consistent:
+    // - File count should be monotonically non-decreasing over time
+    // - Each captured state should be a valid snapshot (no partial updates visible)
+    for (i, state) in captured_states.iter().enumerate() {
+        // All files in any captured state should be marked finished
+        for filename in state.source_state.files.keys() {
+            assert!(
+                state.source_state.is_file_finished(filename),
+                "Captured state {i}: file {filename} should be finished"
+            );
+        }
+    }
+
+    // Verify file counts are monotonically non-decreasing (eventual consistency)
+    // Note: Due to concurrent updates, we may see same count multiple times,
+    // but we should never see a decrease followed by an increase to the same value
+    let file_counts: Vec<usize> = captured_states
+        .iter()
+        .map(|s| s.source_state.files.len())
+        .collect();
+    for window in file_counts.windows(2) {
+        assert!(
+            window[1] >= window[0],
+            "File count should be monotonically non-decreasing, but saw {} -> {}",
+            window[0],
+            window[1]
+        );
+    }
 }
 
 /// Test: Lazy schema inference creates Delta table with correct schema.
