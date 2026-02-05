@@ -20,7 +20,6 @@ use std::collections::HashMap;
 /// Directory name for blizzard checkpoint files within the table URI.
 pub const CHECKPOINT_DIR: &str = "_blizzard";
 
-use object_store::PutPayload;
 use object_store::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -70,16 +69,6 @@ impl CheckpointManager {
         let source_name = &self.source_name;
         Path::from(format!(
             "{dir}/{pipeline_key}_{source_name}_checkpoint.json"
-        ))
-    }
-
-    /// Get the temporary checkpoint file path.
-    fn temp_checkpoint_path(&self) -> Path {
-        let dir = CHECKPOINT_DIR;
-        let pipeline_key = &self.pipeline_key;
-        let source_name = &self.source_name;
-        Path::from(format!(
-            "{dir}/{pipeline_key}_{source_name}_checkpoint.json.tmp"
         ))
     }
 
@@ -133,16 +122,8 @@ impl CheckpointManager {
         let json = serde_json::to_string_pretty(&self.state)
             .expect("checkpoint state should always serialize");
 
-        let temp_path = self.temp_checkpoint_path();
-        let final_path = self.checkpoint_path();
-
-        // Write to temp file
-        self.storage
-            .put_payload(&temp_path, PutPayload::from(json.into_bytes()))
-            .await?;
-
-        // Atomic rename
-        self.storage.rename(&temp_path, &final_path).await?;
+        let path = self.checkpoint_path();
+        self.storage.atomic_write(&path, json.into_bytes()).await?;
 
         emit!(CheckpointSaved {
             target: self.pipeline_key.clone(),
