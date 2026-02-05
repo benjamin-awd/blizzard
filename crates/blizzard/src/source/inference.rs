@@ -2,15 +2,24 @@
 //!
 //! This module uses Arrow's built-in JSON schema inference to automatically detect
 //! field names and types from NDJSON files.
+//!
+//! When Arrow's inference fails due to type conflicts (e.g., the same field appearing
+//! as both an object and a string), a fallback inference strategy is used that treats
+//! conflicting fields as `Utf8` strings.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
+use deltalake::arrow::error::ArrowError;
 use deltalake::arrow::json::reader::infer_json_schema;
+use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use blizzard_core::emit;
+use blizzard_core::metrics::events::SchemaTypeConflicts;
 use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_prefixes};
 
 use super::compression::CompressionCodecExt;
@@ -23,15 +32,278 @@ const SAMPLE_SIZE: usize = 1000;
 /// Maximum number of files to try for schema inference.
 const MAX_FILE_ATTEMPTS: usize = 3;
 
+/// Simplified JSON type for conflict detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum JsonType {
+    Null,
+    Boolean,
+    Integer,
+    Float,
+    String,
+    Array,
+    Object,
+}
+
+impl JsonType {
+    /// Determine the JsonType from a serde_json Value.
+    fn from_value(value: &Value) -> Self {
+        match value {
+            Value::Null => JsonType::Null,
+            Value::Bool(_) => JsonType::Boolean,
+            Value::Number(n) => {
+                if n.is_i64() || n.is_u64() {
+                    JsonType::Integer
+                } else {
+                    JsonType::Float
+                }
+            }
+            Value::String(_) => JsonType::String,
+            Value::Array(_) => JsonType::Array,
+            Value::Object(_) => JsonType::Object,
+        }
+    }
+}
+
+/// Tracks observed types for each field during custom inference.
+#[derive(Debug, Default)]
+struct FieldTypeTracker {
+    /// Maps field path (e.g., "user.address.city") to observed types.
+    field_types: HashMap<String, HashSet<JsonType>>,
+    /// Tracks nested object structures for fields observed as objects.
+    nested_trackers: HashMap<String, FieldTypeTracker>,
+    /// Tracks array element types for fields observed as arrays.
+    array_element_types: HashMap<String, HashSet<JsonType>>,
+    /// Tracks nested array element structures (for arrays of objects).
+    array_nested_trackers: HashMap<String, FieldTypeTracker>,
+}
+
+impl FieldTypeTracker {
+    /// Track all fields in a JSON object.
+    fn track_object(&mut self, obj: &serde_json::Map<String, Value>) {
+        for (key, value) in obj {
+            let json_type = JsonType::from_value(value);
+            self.field_types
+                .entry(key.clone())
+                .or_default()
+                .insert(json_type);
+
+            match value {
+                Value::Object(nested) => {
+                    self.nested_trackers
+                        .entry(key.clone())
+                        .or_default()
+                        .track_object(nested);
+                }
+                Value::Array(arr) => {
+                    self.track_array_elements(key, arr);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Track element types within an array field.
+    fn track_array_elements(&mut self, key: &str, arr: &[Value]) {
+        for elem in arr {
+            let elem_type = JsonType::from_value(elem);
+            self.array_element_types
+                .entry(key.to_string())
+                .or_default()
+                .insert(elem_type);
+
+            if let Value::Object(nested) = elem {
+                self.array_nested_trackers
+                    .entry(key.to_string())
+                    .or_default()
+                    .track_object(nested);
+            }
+        }
+    }
+
+    /// Build an Arrow schema from tracked types.
+    /// Returns the schema and a list of field names that had type conflicts.
+    fn build_schema(&self) -> (Schema, Vec<String>) {
+        let mut fields = Vec::new();
+        let mut conflicts = Vec::new();
+
+        for (name, types) in &self.field_types {
+            let (data_type, has_conflict) = self.infer_data_type(name, types);
+            if has_conflict {
+                conflicts.push(name.clone());
+            }
+            fields.push(Field::new(name, data_type, true));
+        }
+
+        // Sort fields for deterministic schema ordering
+        fields.sort_by(|a, b| a.name().cmp(b.name()));
+
+        (Schema::new(fields), conflicts)
+    }
+
+    /// Infer Arrow DataType from observed JSON types.
+    /// Returns (DataType, has_conflict).
+    fn infer_data_type(&self, field_name: &str, types: &HashSet<JsonType>) -> (DataType, bool) {
+        // Remove Null from consideration for type inference
+        let non_null_types: HashSet<_> = types
+            .iter()
+            .filter(|t| **t != JsonType::Null)
+            .copied()
+            .collect();
+
+        if non_null_types.is_empty() {
+            // All nulls - default to Utf8
+            return (DataType::Utf8, false);
+        }
+
+        if non_null_types.len() == 1 {
+            let single_type = non_null_types.iter().next().unwrap();
+            return (self.map_single_type(field_name, *single_type), false);
+        }
+
+        // Check for numeric widening (Int + Float -> Float64)
+        if non_null_types.len() == 2
+            && non_null_types.contains(&JsonType::Integer)
+            && non_null_types.contains(&JsonType::Float)
+        {
+            return (DataType::Float64, false);
+        }
+
+        // Multiple incompatible types - use Utf8
+        (DataType::Utf8, true)
+    }
+
+    /// Map a single JsonType to Arrow DataType.
+    fn map_single_type(&self, field_name: &str, json_type: JsonType) -> DataType {
+        match json_type {
+            JsonType::Null => DataType::Utf8,
+            JsonType::Boolean => DataType::Boolean,
+            JsonType::Integer => DataType::Int64,
+            JsonType::Float => DataType::Float64,
+            JsonType::String => DataType::Utf8,
+            JsonType::Object => {
+                if let Some(nested) = self.nested_trackers.get(field_name) {
+                    let (nested_schema, _) = nested.build_schema();
+                    DataType::Struct(nested_schema.fields)
+                } else {
+                    // No nested data tracked, use Utf8
+                    DataType::Utf8
+                }
+            }
+            JsonType::Array => self.build_array_type(field_name),
+        }
+    }
+
+    /// Build Arrow List type from tracked array element types.
+    fn build_array_type(&self, field_name: &str) -> DataType {
+        let elem_types = self.array_element_types.get(field_name);
+
+        let inner_type = match elem_types {
+            None => DataType::Utf8,
+            Some(types) => {
+                let non_null_types: HashSet<_> = types
+                    .iter()
+                    .filter(|t| **t != JsonType::Null)
+                    .copied()
+                    .collect();
+
+                if non_null_types.is_empty() {
+                    DataType::Utf8
+                } else if non_null_types.len() == 1 {
+                    let single_type = non_null_types.iter().next().unwrap();
+                    match single_type {
+                        JsonType::Object => {
+                            if let Some(nested) = self.array_nested_trackers.get(field_name) {
+                                let (nested_schema, _) = nested.build_schema();
+                                DataType::Struct(nested_schema.fields)
+                            } else {
+                                DataType::Utf8
+                            }
+                        }
+                        JsonType::Boolean => DataType::Boolean,
+                        JsonType::Integer => DataType::Int64,
+                        JsonType::Float => DataType::Float64,
+                        JsonType::String => DataType::Utf8,
+                        JsonType::Array => DataType::Utf8, // Nested arrays become strings
+                        JsonType::Null => DataType::Utf8,
+                    }
+                } else if non_null_types.len() == 2
+                    && non_null_types.contains(&JsonType::Integer)
+                    && non_null_types.contains(&JsonType::Float)
+                {
+                    DataType::Float64
+                } else {
+                    DataType::Utf8
+                }
+            }
+        };
+
+        DataType::List(Arc::new(Field::new("item", inner_type, true)))
+    }
+}
+
+/// Perform custom schema inference with type conflict handling.
+///
+/// This is used as a fallback when Arrow's built-in inference fails due to
+/// incompatible types in the same field across different records.
+fn infer_with_conflict_handling(data: &[u8], pipeline: &str) -> Result<SchemaRef, InferenceError> {
+    let mut tracker = FieldTypeTracker::default();
+    let mut records_read = 0;
+
+    for line in data.split(|&b| b == b'\n').take(SAMPLE_SIZE) {
+        if line.is_empty() {
+            continue;
+        }
+
+        let value: Value = serde_json::from_slice(line).map_err(|e| InferenceError::JsonParse {
+            message: e.to_string(),
+        })?;
+
+        if let Value::Object(obj) = value {
+            tracker.track_object(&obj);
+            records_read += 1;
+        }
+    }
+
+    if records_read == 0 {
+        return Err(InferenceError::NoValidRecords);
+    }
+
+    let (schema, conflicts) = tracker.build_schema();
+
+    if !conflicts.is_empty() {
+        info!(
+            target = %pipeline,
+            "Resolved {} type conflicts as Utf8: {:?}",
+            conflicts.len(),
+            conflicts
+        );
+        emit!(SchemaTypeConflicts {
+            count: conflicts.len(),
+            target: pipeline.to_string(),
+        });
+    }
+
+    debug!(
+        "Custom inference built schema from {records_read} records with {} fields",
+        schema.fields().len()
+    );
+
+    Ok(coerce_schema(&schema))
+}
+
 /// Infer schema from the first available NDJSON file in storage.
 ///
 /// Tries up to 3 files in case some are corrupted or inaccessible.
 /// Returns the schema inferred from the first file that can be successfully read.
+///
+/// If `coerce_conflicts_to_utf8` is true and Arrow's inference fails due to type conflicts,
+/// falls back to custom inference that treats conflicting fields as `Utf8`.
 pub async fn infer_schema_from_source(
     storage: &StorageProviderRef,
     compression: CompressionFormat,
     prefixes: Option<&[String]>,
     pipeline: &str,
+    coerce_conflicts_to_utf8: bool,
 ) -> Result<SchemaRef, InferenceError> {
     // List available files
     let files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline)
@@ -49,22 +321,29 @@ pub async fn infer_schema_from_source(
         debug!(target = %pipeline, "Attempting to infer schema from file: {path}");
 
         match storage.get(path.as_str()).await {
-            Ok(bytes) => match infer_schema_from_bytes(&bytes, compression) {
-                Ok(schema) => {
-                    info!(
-                        target = %pipeline,
-                        "Inferred schema with {} fields from {}: {:?}",
-                        schema.fields().len(),
-                        path,
-                        schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-                    );
-                    return Ok(schema);
+            Ok(bytes) => {
+                match infer_schema_from_bytes(
+                    &bytes,
+                    compression,
+                    pipeline,
+                    coerce_conflicts_to_utf8,
+                ) {
+                    Ok(schema) => {
+                        info!(
+                            target = %pipeline,
+                            "Inferred schema with {} fields from {}: {:?}",
+                            schema.fields().len(),
+                            path,
+                            schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+                        );
+                        return Ok(schema);
+                    }
+                    Err(e) => {
+                        warn!(target = %pipeline, "Failed to infer schema from {path}: {e}");
+                        last_error = Some(e);
+                    }
                 }
-                Err(e) => {
-                    warn!(target = %pipeline, "Failed to infer schema from {path}: {e}");
-                    last_error = Some(e);
-                }
-            },
+            }
             Err(e) => {
                 warn!(target = %pipeline, "Failed to read file {path}: {e}");
                 last_error = Some(InferenceError::ReadFile { source: e });
@@ -79,28 +358,70 @@ pub async fn infer_schema_from_source(
 ///
 /// Decompresses the data, uses Arrow's built-in schema inference,
 /// and coerces timestamps to microseconds for Delta Lake compatibility.
+///
+/// If `coerce_conflicts_to_utf8` is true and Arrow's inference fails due to type conflicts
+/// (e.g., the same field appearing as both an object and a string), falls back to
+/// custom inference that treats conflicting fields as `Utf8`.
 pub fn infer_schema_from_bytes(
     bytes: &Bytes,
     compression: CompressionFormat,
+    pipeline: &str,
+    coerce_conflicts_to_utf8: bool,
 ) -> Result<SchemaRef, InferenceError> {
     // Decompress into memory
     let decompressed = decompress(bytes, compression)?;
 
-    // Use Arrow's built-in schema inference
-    let reader: Box<dyn BufRead> = Box::new(Cursor::new(decompressed));
-    let (schema, records_read) =
-        infer_json_schema(reader, Some(SAMPLE_SIZE)).map_err(|e| InferenceError::JsonParse {
-            message: e.to_string(),
-        })?;
-
-    if records_read == 0 {
-        return Err(InferenceError::NoValidRecords);
+    // Try Arrow's built-in schema inference first
+    let reader: Box<dyn BufRead> = Box::new(Cursor::new(&decompressed));
+    match infer_json_schema(reader, Some(SAMPLE_SIZE)) {
+        Ok((schema, records_read)) => {
+            if records_read == 0 {
+                return Err(InferenceError::NoValidRecords);
+            }
+            debug!("Arrow inferred schema from {records_read} records");
+            Ok(coerce_schema(&schema))
+        }
+        Err(e) => {
+            // Check if this is a type conflict error that we can handle
+            if coerce_conflicts_to_utf8 && is_type_conflict_error(&e) {
+                warn!(
+                    target = %pipeline,
+                    "Arrow inference hit type conflict, using fallback: {e}"
+                );
+                infer_with_conflict_handling(&decompressed, pipeline)
+            } else {
+                Err(InferenceError::JsonParse {
+                    message: e.to_string(),
+                })
+            }
+        }
     }
+}
 
-    debug!("Arrow inferred schema from {records_read} records");
-
-    // Coerce schema for Delta Lake compatibility (timestamps to microseconds)
-    Ok(coerce_schema(&schema))
+/// Check if an ArrowError is a type conflict that can be handled by fallback inference.
+///
+/// Arrow's `JsonError` variant is a plain `String` with no structured error codes,
+/// so we must match on error message text. This is fragile but necessary given Arrow's
+/// current API.
+///
+/// The following messages indicate recoverable type conflicts:
+/// - "Incompatible type found during schema inference" - different types for the same field
+/// - "Expected scalar or scalar array JSON type" - object where scalar expected
+/// - "Expected object json type" - scalar where object expected
+///
+/// # Stability
+///
+/// If Arrow changes these messages, the `test_arrow_error_message_*` tests will fail.
+/// Update the patterns here accordingly.
+fn is_type_conflict_error(err: &ArrowError) -> bool {
+    match err {
+        ArrowError::JsonError(msg) => {
+            msg.contains("Incompatible type found during schema inference")
+                || msg.contains("Expected scalar or scalar array JSON type")
+                || msg.contains("Expected object json type")
+        }
+        _ => false,
+    }
 }
 
 /// Decompress bytes based on compression format.
@@ -190,6 +511,8 @@ mod tests {
         Bytes::from(encoder.finish().unwrap())
     }
 
+    const TEST_PIPELINE: &str = "test";
+
     #[test]
     fn test_infer_basic_types() {
         let bytes = make_ndjson(&[
@@ -197,7 +520,8 @@ mod tests {
             r#"{"id": 2, "name": "Bob", "active": false, "score": 87.0}"#,
         ]);
 
-        let schema = infer_schema_from_bytes(&bytes, CompressionFormat::None).unwrap();
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
 
         assert_eq!(schema.fields().len(), 4);
         assert!(schema.field_with_name("id").is_ok());
@@ -210,7 +534,8 @@ mod tests {
     fn test_infer_nested_object() {
         let bytes = make_ndjson(&[r#"{"id": 1, "meta": {"key": "value", "count": 42}}"#]);
 
-        let schema = infer_schema_from_bytes(&bytes, CompressionFormat::None).unwrap();
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
 
         let meta_field = schema.field_with_name("meta").unwrap();
         match meta_field.data_type() {
@@ -225,7 +550,8 @@ mod tests {
     fn test_infer_array_type() {
         let bytes = make_ndjson(&[r#"{"tags": ["a", "b", "c"]}"#, r#"{"tags": ["d"]}"#]);
 
-        let schema = infer_schema_from_bytes(&bytes, CompressionFormat::None).unwrap();
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
 
         let tags_field = schema.field_with_name("tags").unwrap();
         assert!(matches!(tags_field.data_type(), DataType::List(_)));
@@ -238,7 +564,8 @@ mod tests {
             r#"{"id": 2, "name": "Bob"}"#,
         ]);
 
-        let schema = infer_schema_from_bytes(&bytes, CompressionFormat::Gzip).unwrap();
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::Gzip, TEST_PIPELINE, true).unwrap();
 
         assert_eq!(schema.fields().len(), 2);
         assert!(schema.field_with_name("id").is_ok());
@@ -248,7 +575,7 @@ mod tests {
     #[test]
     fn test_infer_empty_file_error() {
         let bytes = Bytes::new();
-        let result = infer_schema_from_bytes(&bytes, CompressionFormat::None);
+        let result = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true);
         assert!(result.is_err());
     }
 
@@ -319,5 +646,301 @@ mod tests {
             }
             other => panic!("Expected Struct, got {other:?}"),
         }
+    }
+
+    // ========================================================================
+    // Type conflict handling tests
+    // ========================================================================
+
+    #[test]
+    fn test_conflict_object_vs_string() {
+        // Same field is an object in one record and a string in another
+        let bytes = make_ndjson(&[
+            r#"{"data": {"nested": "value"}}"#,
+            r#"{"data": "just a string"}"#,
+        ]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let data_field = schema.field_with_name("data").unwrap();
+        assert_eq!(
+            data_field.data_type(),
+            &DataType::Utf8,
+            "Conflicting object/string field should become Utf8"
+        );
+    }
+
+    #[test]
+    fn test_conflict_number_vs_string() {
+        // Same field is a number in one record and a string in another
+        let bytes = make_ndjson(&[r#"{"value": 123}"#, r#"{"value": "not a number"}"#]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let value_field = schema.field_with_name("value").unwrap();
+        assert_eq!(
+            value_field.data_type(),
+            &DataType::Utf8,
+            "Conflicting number/string field should become Utf8"
+        );
+    }
+
+    #[test]
+    fn test_int_float_widening() {
+        // Same field is an integer in one record and a float in another
+        // This should widen to Float64, not be treated as a conflict
+        let bytes = make_ndjson(&[r#"{"amount": 100}"#, r#"{"amount": 99.99}"#]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let amount_field = schema.field_with_name("amount").unwrap();
+        assert_eq!(
+            amount_field.data_type(),
+            &DataType::Float64,
+            "Int + Float should widen to Float64"
+        );
+    }
+
+    #[test]
+    fn test_array_with_scalar_handled_by_arrow() {
+        // Arrow can handle array vs scalar by inferring List type
+        // This test verifies Arrow's behavior is preserved
+        let bytes = make_ndjson(&[r#"{"items": ["a", "b", "c"]}"#, r#"{"items": "single"}"#]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let items_field = schema.field_with_name("items").unwrap();
+        // Arrow infers List type - this is Arrow's behavior
+        assert!(
+            matches!(items_field.data_type(), DataType::List(_)),
+            "Arrow handles array/scalar by inferring List"
+        );
+    }
+
+    #[test]
+    fn test_array_vs_number_handled_by_arrow() {
+        // Arrow also handles array vs number by inferring List
+        let bytes = make_ndjson(&[r#"{"data": [1, 2, 3]}"#, r#"{"data": 42}"#]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let data_field = schema.field_with_name("data").unwrap();
+        // Arrow handles this by inferring List type
+        assert!(
+            matches!(data_field.data_type(), DataType::List(_)),
+            "Arrow handles array/number by inferring List"
+        );
+    }
+
+    #[test]
+    fn test_nested_fields_preserved_on_conflict() {
+        // When a field conflicts, sibling and other nested fields should stay typed
+        let bytes = make_ndjson(&[
+            r#"{"id": 1, "meta": {"key": "val"}, "conflict": {"a": 1}}"#,
+            r#"{"id": 2, "meta": {"key": "other"}, "conflict": "string"}"#,
+        ]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        // Non-conflicting fields should retain their types
+        let id_field = schema.field_with_name("id").unwrap();
+        assert_eq!(id_field.data_type(), &DataType::Int64);
+
+        let meta_field = schema.field_with_name("meta").unwrap();
+        assert!(
+            matches!(meta_field.data_type(), DataType::Struct(_)),
+            "Non-conflicting nested object should stay Struct"
+        );
+
+        // Conflicting field becomes Utf8
+        let conflict_field = schema.field_with_name("conflict").unwrap();
+        assert_eq!(conflict_field.data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_conflict_with_gzip_compression() {
+        // Type conflicts should be handled correctly with compressed data
+        let bytes = make_gzip_ndjson(&[
+            r#"{"data": {"nested": true}}"#,
+            r#"{"data": "string value"}"#,
+        ]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::Gzip, TEST_PIPELINE, true).unwrap();
+
+        let data_field = schema.field_with_name("data").unwrap();
+        assert_eq!(
+            data_field.data_type(),
+            &DataType::Utf8,
+            "Conflicting field in compressed data should become Utf8"
+        );
+    }
+
+    #[test]
+    fn test_no_conflict_normal_inference() {
+        // When there are no conflicts, normal Arrow inference should work
+        let bytes = make_ndjson(&[
+            r#"{"id": 1, "name": "Alice", "active": true}"#,
+            r#"{"id": 2, "name": "Bob", "active": false}"#,
+            r#"{"id": 3, "name": "Charlie", "active": true}"#,
+        ]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(
+            schema.field_with_name("id").unwrap().data_type(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            schema.field_with_name("name").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(
+            schema.field_with_name("active").unwrap().data_type(),
+            &DataType::Boolean
+        );
+    }
+
+    #[test]
+    fn test_conflict_bool_vs_string() {
+        // Boolean vs string conflict
+        let bytes = make_ndjson(&[r#"{"flag": true}"#, r#"{"flag": "yes"}"#]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let flag_field = schema.field_with_name("flag").unwrap();
+        assert_eq!(
+            flag_field.data_type(),
+            &DataType::Utf8,
+            "Conflicting bool/string field should become Utf8"
+        );
+    }
+
+    #[test]
+    fn test_null_handling_in_conflict_resolution() {
+        // Null values should not cause conflicts
+        let bytes = make_ndjson(&[
+            r#"{"value": null}"#,
+            r#"{"value": 42}"#,
+            r#"{"value": null}"#,
+        ]);
+
+        let schema =
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
+
+        let value_field = schema.field_with_name("value").unwrap();
+        assert_eq!(
+            value_field.data_type(),
+            &DataType::Int64,
+            "Null + Int should resolve to Int64"
+        );
+    }
+
+    #[test]
+    fn test_coerce_conflicts_to_utf8_disabled_returns_error() {
+        // When coerce_conflicts_to_utf8 is false, type conflicts should return an error
+        let bytes = make_ndjson(&[
+            r#"{"data": {"nested": "value"}}"#,
+            r#"{"data": "just a string"}"#,
+        ]);
+
+        let result = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, false);
+
+        assert!(
+            result.is_err(),
+            "Should return error when coerce_conflicts_to_utf8 is false"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Expected scalar"),
+            "Error should mention type conflict: {err}"
+        );
+    }
+
+    // ========================================================================
+    // Arrow error message stability tests
+    // ========================================================================
+    //
+    // These tests verify that Arrow's error messages haven't changed.
+    // If these fail after an Arrow upgrade, update `is_type_conflict_error`.
+
+    #[test]
+    fn test_arrow_error_message_object_then_scalar() {
+        // Object first, then scalar -> "Expected scalar or scalar array JSON type"
+        let data = r#"{"field": {"nested": 1}}
+{"field": "string"}"#;
+
+        let reader = Cursor::new(data.as_bytes());
+        let result = infer_json_schema(reader, None);
+
+        let err = result.expect_err("Should fail with type conflict");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("Expected scalar or scalar array JSON type"),
+            "Arrow error message changed! Update is_type_conflict_error(). Got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_arrow_error_message_scalar_then_object() {
+        // Scalar first, then object -> "Expected object json type"
+        let data = r#"{"field": 123}
+{"field": {"unexpected": "object"}}"#;
+
+        let reader = Cursor::new(data.as_bytes());
+        let result = infer_json_schema(reader, None);
+
+        let err = result.expect_err("Should fail with type conflict");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("Expected object json type"),
+            "Arrow error message changed! Update is_type_conflict_error(). Got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_is_type_conflict_error_detection() {
+        // Verify our detection function works for both error types
+        let incompatible_err =
+            ArrowError::JsonError("Incompatible type found during schema inference: X vs Y".into());
+        let expected_scalar_err = ArrowError::JsonError(
+            "Expected scalar or scalar array JSON type, found: Object".into(),
+        );
+        let expected_object_err =
+            ArrowError::JsonError("Expected object json type, found: Scalar".into());
+        let other_json_err = ArrowError::JsonError("Some other JSON error".into());
+        let other_err = ArrowError::ParseError("Not a JSON error".into());
+
+        assert!(
+            is_type_conflict_error(&incompatible_err),
+            "Should detect incompatible type error"
+        );
+        assert!(
+            is_type_conflict_error(&expected_scalar_err),
+            "Should detect expected scalar type error"
+        );
+        assert!(
+            is_type_conflict_error(&expected_object_err),
+            "Should detect expected object type error"
+        );
+        assert!(
+            !is_type_conflict_error(&other_json_err),
+            "Should not match other JSON errors"
+        );
+        assert!(
+            !is_type_conflict_error(&other_err),
+            "Should not match non-JSON errors"
+        );
     }
 }
