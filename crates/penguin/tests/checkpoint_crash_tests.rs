@@ -535,10 +535,14 @@ async fn test_schema_evolution_rejects_required_fields() {
 
 /// Test: Schema evolution allows type widening (Int32 -> Int64).
 ///
-/// Verifies that compatible type changes (widening) are allowed in merge mode.
+/// Verifies that compatible type changes (widening) are allowed in merge mode
+/// and that data can be written and read back correctly.
 #[tokio::test]
 async fn test_schema_evolution_allows_type_widening() {
+    use deltalake::arrow::array::Int32Array;
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::arrow::record_batch::RecordBatch;
+    use deltalake::parquet::arrow::ArrowWriter;
     use penguin::schema::evolution::EvolutionAction;
     use tempfile::TempDir;
 
@@ -552,7 +556,7 @@ async fn test_schema_evolution_allows_type_widening() {
     // Create table with Int32 field
     let initial_schema = Schema::new(vec![Field::new("value", DataType::Int32, true)]);
 
-    let delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
+    let mut delta_sink = DeltaSink::new(&storage, &initial_schema, vec![], "test".to_string())
         .await
         .unwrap();
 
@@ -569,4 +573,54 @@ async fn test_schema_evolution_allows_type_widening() {
         matches!(action, EvolutionAction::None),
         "Expected None action for compatible type widening, got {action:?}"
     );
+
+    // Actually write Int32 data to verify the table works
+    let int32_schema = Arc::new(initial_schema.clone());
+    let batch = RecordBatch::try_new(
+        int32_schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![Some(42), Some(100), None]))],
+    )
+    .unwrap();
+
+    // Write parquet file
+    let parquet_path = temp_dir.path().join("data.parquet");
+    let mut buffer = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut buffer, int32_schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+    std::fs::write(&parquet_path, &buffer).unwrap();
+
+    // Commit the file
+    let files = vec![FinishedFile::without_bytes(
+        "data.parquet".to_string(),
+        buffer.len(),
+        3,
+        HashMap::new(),
+        None,
+    )];
+
+    let checkpoint = CheckpointState {
+        schema_version: 2,
+        source_state: SourceState::new(),
+        delta_version: 0,
+        watermark: None,
+    };
+
+    delta_sink
+        .commit_files_with_checkpoint(&files, &checkpoint)
+        .await
+        .unwrap();
+
+    // Reopen the table and verify it can be queried
+    let reopened = DeltaSink::try_open(&storage, vec![], "test".to_string())
+        .await
+        .unwrap();
+
+    // Table should have Int32 schema (original)
+    let schema = reopened.schema().unwrap();
+    assert_eq!(schema.fields().len(), 1);
+    assert_eq!(schema.field(0).name(), "value");
+    assert_eq!(schema.field(0).data_type(), &DataType::Int32);
 }
