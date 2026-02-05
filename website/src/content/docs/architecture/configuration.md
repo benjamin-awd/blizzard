@@ -169,7 +169,28 @@ sink:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `fields` | array | **required** | List of field definitions |
+| `infer` | boolean | `false` | Automatically infer schema from source data |
+| `coerce_conflicts_to_utf8` | boolean | `false` | Resolve type conflicts as Utf8 (requires `infer: true`) |
+| `fields` | array | **required*** | List of field definitions |
+
+\* Required unless `infer: true`
+
+### Schema Inference
+
+Instead of defining fields manually, you can let Blizzard infer the schema:
+
+```yaml
+schema:
+  infer: true
+  coerce_conflicts_to_utf8: true  # Handle mixed types gracefully
+```
+
+When `infer: true`:
+- Schema is detected from the first source file (samples up to 1000 records)
+- Nested objects become `Struct` types, arrays become `List` types
+- When `coerce_conflicts_to_utf8: true`, fields with inconsistent types (e.g., sometimes object, sometimes string) are stored as `Utf8`
+
+See [Source Processing - Schema Inference](/architecture/source/#schema-inference) for details.
 
 ### Field Configuration
 

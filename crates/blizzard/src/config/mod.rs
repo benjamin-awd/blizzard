@@ -245,6 +245,15 @@ pub struct SchemaConfig {
     /// List of fields in the schema. Required unless `infer: true`.
     #[serde(default)]
     pub fields: Vec<FieldConfig>,
+    /// When true and `infer: true`, type conflicts during inference are coerced to Utf8.
+    ///
+    /// Arrow's schema inference fails when the same field has different types across records
+    /// (e.g., sometimes an object, sometimes a string). When this option is enabled, such
+    /// conflicts are resolved by treating the field as a Utf8 string.
+    ///
+    /// Only applies when `infer: true`.
+    #[serde(default)]
+    pub coerce_conflicts_to_utf8: bool,
 }
 
 impl SchemaConfig {
@@ -256,6 +265,11 @@ impl SchemaConfig {
     /// Returns the explicit fields if defined.
     pub fn fields(&self) -> &[FieldConfig] {
         &self.fields
+    }
+
+    /// Returns true if type conflicts should be coerced to Utf8 during inference.
+    pub fn should_coerce_conflicts_to_utf8(&self) -> bool {
+        self.coerce_conflicts_to_utf8
     }
 
     /// Convert to Arrow Schema. Panics if schema is set to infer mode.

@@ -2470,12 +2470,82 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Number of schema fields with type conflicts that were coerced to Utf8 strings during inference",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "id": 114,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(blizzard_schema_type_conflicts_total{job=~\"$job\", pod=~\"$pod\"})",
+          "legendFormat": "Type Conflicts",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Schema Type Conflicts",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 73
+        "y": 77
       },
       "id": 106,
       "panels": [],
@@ -2519,7 +2589,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 74
+        "y": 78
       },
       "id": 60,
       "options": {
@@ -2591,7 +2661,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 74
+        "y": 78
       },
       "id": 61,
       "options": {
@@ -2655,7 +2725,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 78
       },
       "id": 63,
       "options": {
@@ -2755,7 +2825,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 82
       },
       "id": 64,
       "options": {
@@ -2870,7 +2940,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 82
       },
       "id": 65,
       "options": {

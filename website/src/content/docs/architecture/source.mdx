@@ -103,6 +103,126 @@ JSON fields are mapped to Arrow/Parquet types based on the schema configuration:
 | object/array | `json` | `Utf8` | Stored as JSON string |
 | string (base64) | `binary` | `Binary` | Base64-decoded bytes |
 
+## Schema Inference
+
+Instead of manually specifying field types, Blizzard can automatically infer the schema from your source data:
+
+```yaml
+schema:
+  infer: true
+```
+
+### How It Works
+
+1. **Sampling**: Blizzard reads up to 1000 records from the first available NDJSON file
+2. **Type Detection**: Arrow's JSON reader analyzes the sampled records to determine field types
+3. **Schema Building**: A unified schema is built from the detected types
+
+Inferred type mappings:
+
+| JSON Value | Inferred Arrow Type |
+|------------|---------------------|
+| `"string"` | `Utf8` |
+| `123` | `Int64` |
+| `1.23` | `Float64` |
+| `true`/`false` | `Boolean` |
+| `null` | `Utf8` (if all null) |
+| `[...]` | `List<T>` |
+| `{...}` | `Struct` |
+
+### Type Conflict Resolution
+
+When the same field has different types across records, Arrow's schema inference fails by default. This commonly happens with:
+
+- Fields that are sometimes `null` and sometimes a value
+- Fields that alternate between objects and strings
+- Fields that mix numbers and strings
+- Optional nested objects that are sometimes omitted
+
+Enable `coerce_conflicts_to_utf8` to handle these cases:
+
+```yaml
+schema:
+  infer: true
+  coerce_conflicts_to_utf8: true
+```
+
+#### How It Works
+
+1. **Inference phase**: Blizzard samples records and detects type conflicts
+2. **Fallback inference**: Conflicting fields are marked as `Utf8` (string)
+3. **Reading phase**: Non-string values in `Utf8` fields are automatically stringified
+
+#### Conflict Examples
+
+**Object vs String:**
+```json
+{"data": {"nested": "value"}}
+{"data": "just a string"}
+```
+Result: `data` becomes `Utf8`, objects are JSON-serialized.
+
+**Number vs String:**
+```json
+{"threshold": 0.00025}
+{"threshold": "disabled"}
+```
+Result: `threshold` becomes `Utf8`, `0.00025` → `"0.00025"`.
+
+**Null vs Number:**
+```json
+{"count": null}
+{"count": 42}
+```
+Result: Usually infers as `Int64` (nulls don't conflict). But if mixed with strings, becomes `Utf8`.
+
+**Nested Object vs Null:**
+```json
+{"settings": {"timeout": 30}}
+{"settings": null}
+```
+Result: `settings` stays as `Struct` (nulls are allowed).
+
+#### Type Coercion During Reading
+
+When `coerce_conflicts_to_utf8` is enabled, the reader automatically converts mismatched types:
+
+| Actual Value | Schema Type | Result |
+|--------------|-------------|--------|
+| `{"a": 1}` | `Utf8` | `"{\"a\":1}"` |
+| `[1, 2, 3]` | `Utf8` | `"[1,2,3]"` |
+| `0.00025` | `Utf8` | `"0.00025"` |
+| `true` | `Utf8` | `"true"` |
+| `null` | `Utf8` | `null` |
+| `"hello"` | `Utf8` | `"hello"` |
+
+#### Metrics
+
+When type conflicts are resolved during inference, Blizzard emits:
+
+| Metric | Description |
+|--------|-------------|
+| `blizzard_schema_type_conflicts_total` | Number of fields with type conflicts coerced to Utf8 |
+
+#### Performance Note
+
+The coercing reader is slightly slower than the standard Arrow reader because it:
+1. Parses each JSON line with serde_json
+2. Walks through fields to coerce types
+3. Re-serializes before passing to Arrow
+
+For pipelines without type conflicts, leave `coerce_conflicts_to_utf8: false` (the default) to use the faster direct Arrow reader.
+
+### When to Use Inference
+
+| Use Case | Recommendation |
+|----------|----------------|
+| Prototyping / exploration | ✅ Use `infer: true` |
+| Schema changes frequently | ✅ Use `infer: true` |
+| Production with stable schema | ⚠️ Prefer explicit schema |
+| Need specific types (e.g., `int32` vs `int64`) | ❌ Use explicit schema |
+| Timestamps need parsing | ❌ Use explicit schema with `timestamp` type |
+
 ## Batching
 
 Records are parsed into Arrow RecordBatches for efficient columnar processing:
@@ -202,6 +322,7 @@ The `SourceState` tracks file processing progress:
 | `blizzard_active_downloads` | Gauge | Currently downloading files |
 | `blizzard_decompression_queue_depth` | Gauge | Files waiting to decompress |
 | `blizzard_recovered_records_total` | Counter | Records skipped during recovery |
+| `blizzard_schema_type_conflicts_total` | Counter | Fields with type conflicts coerced to Utf8 |
 
 ## Configuration Example
 

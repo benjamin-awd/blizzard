@@ -600,3 +600,26 @@ impl InternalEvent for IterationDuration {
         .record(self.duration.as_secs_f64());
     }
 }
+
+// ============================================================================
+// Schema inference events
+// ============================================================================
+
+/// Event emitted when schema inference encounters type conflicts.
+///
+/// When Arrow's inference fails due to incompatible types in the same field,
+/// the fallback inference resolves conflicts by treating those fields as strings.
+pub struct SchemaTypeConflicts {
+    /// Number of fields with type conflicts.
+    pub count: usize,
+    /// Target label for multi-target deployments.
+    pub target: String,
+}
+
+impl InternalEvent for SchemaTypeConflicts {
+    fn emit(self) {
+        trace!(count = self.count, target = %self.target, "Schema type conflicts resolved");
+        counter!("blizzard_schema_type_conflicts_total", "target" => self.target)
+            .increment(self.count as u64);
+    }
+}
