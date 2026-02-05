@@ -15,6 +15,9 @@ pub mod state;
 
 pub use state::CheckpointState;
 
+/// Directory name for blizzard checkpoint files within the table URI.
+pub const CHECKPOINT_DIR: &str = "_blizzard";
+
 use object_store::PutPayload;
 use object_store::path::Path;
 use std::sync::Arc;
@@ -60,19 +63,21 @@ impl CheckpointManager {
 
     /// Get the checkpoint file path.
     fn checkpoint_path(&self) -> Path {
+        let dir = CHECKPOINT_DIR;
         let pipeline_key = &self.pipeline_key;
         let source_name = &self.source_name;
         Path::from(format!(
-            "_blizzard/{pipeline_key}_{source_name}_checkpoint.json"
+            "{dir}/{pipeline_key}_{source_name}_checkpoint.json"
         ))
     }
 
     /// Get the temporary checkpoint file path.
     fn temp_checkpoint_path(&self) -> Path {
+        let dir = CHECKPOINT_DIR;
         let pipeline_key = &self.pipeline_key;
         let source_name = &self.source_name;
         Path::from(format!(
-            "_blizzard/{pipeline_key}_{source_name}_checkpoint.json.tmp"
+            "{dir}/{pipeline_key}_{source_name}_checkpoint.json.tmp"
         ))
     }
 

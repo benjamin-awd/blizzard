@@ -500,7 +500,13 @@ impl PollingProcessor for PipelineOrchestrator {
     }
 
     async fn finalize(&mut self) -> Result<(), Self::Error> {
-        info!(target = %self.key, "Saving checkpoint on shutdown");
+        let table_uri = &self.config.sink.table_uri;
+        let checkpoint_dir = crate::checkpoint::CHECKPOINT_DIR;
+        info!(
+            target = %self.key,
+            checkpoint_path = %format!("{table_uri}/{checkpoint_dir}/"),
+            "Saving checkpoint on shutdown"
+        );
         if let Err(e) = self.multi_tracker.save_all().await {
             warn!(target = %self.key, error = %e, "Failed to save checkpoint on shutdown");
         }

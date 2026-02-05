@@ -400,4 +400,12 @@ impl PollingProcessor for Processor {
 
         Ok(IterationResult::ProcessedItems)
     }
+
+    async fn finalize(&mut self) -> Result<(), Self::Error> {
+        // Penguin uses Txn-based checkpointing - checkpoints are committed atomically
+        // with Delta Lake commits, so there's no separate checkpoint to save on shutdown.
+        // The last successful commit already contains the checkpoint state.
+        info!(target = %self.table_key, "Shutdown complete, checkpoint state is consistent with last commit");
+        Ok(())
+    }
 }
