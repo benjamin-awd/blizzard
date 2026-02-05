@@ -150,17 +150,20 @@ impl IncomingReader {
             target: &self.table,
         };
 
-        if prefixes.as_ref().is_some_and(|p| !p.is_empty()) {
-            info!(
-                target = %self.table,
-                prefix_count = prefixes.as_ref().unwrap().len(),
-                "Cold start: scanning partitions with filter"
-            );
-        } else {
-            info!(
-                target = %self.table,
-                "Cold start: scanning all files (no filter configured)"
-            );
+        match &prefixes {
+            Some(p) if !p.is_empty() => {
+                info!(
+                    target = %self.table,
+                    prefixes = ?p,
+                    "Cold start: scanning partitions with filter"
+                );
+            }
+            _ => {
+                info!(
+                    target = %self.table,
+                    "Cold start: scanning all files (no filter configured)"
+                );
+            }
         }
 
         let paths = watermark::list_files_cold_start(&self.storage, prefixes.as_deref(), &config)
