@@ -4,6 +4,7 @@
 //! Supports multiple sources merging into a single sink.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use deltalake::arrow::datatypes::SchemaRef;
@@ -25,10 +26,10 @@ use super::sink::Sink;
 use super::tasks::{DownloadTask, UploadTask};
 use super::tracker::{HashMapTracker, MultiSourceTracker, SourcedFile, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
-use crate::config::{PipelineConfig, PipelineKey, SourceConfig};
+use crate::config::{MB, PipelineConfig, PipelineKey, SourceConfig};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{ConfigError, PipelineError, StorageSnafu};
-use crate::parquet::ParquetWriterConfig;
+use crate::parquet::{ParquetWriterConfig, RollingPolicy};
 use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
 /// Resolves all configuration and creates dependencies for pipeline execution.
@@ -290,10 +291,17 @@ impl Iteration {
     ) -> Result<Self, PipelineError> {
         let total_files = pending_files.len();
 
+        // Build rolling policies from config
+        let mut rolling_policies = vec![RollingPolicy::SizeLimit(config.sink.file_size_mb * MB)];
+        if let Some(secs) = config.sink.rollover_timeout_secs {
+            rolling_policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
+        }
+
         let writer_config = ParquetWriterConfig::default()
             .with_file_size_mb(config.sink.file_size_mb)
             .with_row_group_size_bytes(config.sink.row_group_size_bytes)
-            .with_compression(config.sink.compression);
+            .with_compression(config.sink.compression)
+            .with_rolling_policies(rolling_policies);
 
         // Spawn upload task for concurrent uploads
         let upload_task = UploadTask::spawn(
