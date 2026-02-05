@@ -9,6 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use deltalake::arrow::datatypes::SchemaRef;
 use indexmap::IndexMap;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -287,6 +288,7 @@ impl Iteration {
         ctx: &ProcessorContext,
         config: &PipelineConfig,
         shutdown: CancellationToken,
+        global_semaphore: Option<Arc<Semaphore>>,
         key: &str,
     ) -> Result<Self, PipelineError> {
         let total_files = pending_files.len();
@@ -307,6 +309,7 @@ impl Iteration {
         let upload_task = UploadTask::spawn(
             ctx.destination_storage.clone(),
             config.sink.max_concurrent_uploads,
+            global_semaphore.clone(),
             key.to_string(),
         );
 
@@ -323,6 +326,7 @@ impl Iteration {
             ctx.source_storages.clone(),
             shutdown,
             config.max_concurrent_files,
+            global_semaphore,
             key.to_string(),
         );
 
@@ -395,6 +399,8 @@ pub(super) struct PipelineOrchestrator {
     failure_tracker: FailureTracker,
     /// Shutdown signal for graceful termination.
     shutdown: CancellationToken,
+    /// Optional global semaphore for cross-pipeline concurrency limiting.
+    global_semaphore: Option<Arc<Semaphore>>,
 }
 
 impl PipelineOrchestrator {
@@ -403,6 +409,7 @@ impl PipelineOrchestrator {
         key: PipelineKey,
         config: PipelineConfig,
         resolved: ResolvedConfig,
+        global_semaphore: Option<Arc<Semaphore>>,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
@@ -412,6 +419,7 @@ impl PipelineOrchestrator {
             multi_tracker: resolved.multi_tracker,
             failure_tracker: resolved.failure_tracker,
             shutdown,
+            global_semaphore,
         }
     }
 }
@@ -432,12 +440,19 @@ impl Processor {
         key: PipelineKey,
         config: PipelineConfig,
         storage_pool: Option<StoragePoolRef>,
+        global_semaphore: Option<Arc<Semaphore>>,
         shutdown: CancellationToken,
     ) -> Result<impl PollingProcessor<State = Vec<SourcedFile>, Error = PipelineError>, PipelineError>
     {
         let resolver = ConfigResolver::new(key.clone(), &config, storage_pool);
         let resolved = resolver.resolve().await?;
-        Ok(PipelineOrchestrator::new(key, config, resolved, shutdown))
+        Ok(PipelineOrchestrator::new(
+            key,
+            config,
+            resolved,
+            global_semaphore,
+            shutdown,
+        ))
     }
 }
 
@@ -501,6 +516,7 @@ impl PollingProcessor for PipelineOrchestrator {
             &self.ctx,
             &self.config,
             self.shutdown.clone(),
+            self.global_semaphore.clone(),
             self.key.id(),
         )?;
 

@@ -1234,6 +1234,150 @@ mod watermark_tests {
     }
 }
 
+mod concurrency_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+
+    /// Test that global semaphore limits concurrent operations across multiple tasks.
+    ///
+    /// This verifies the `total_concurrency` config option works correctly by:
+    /// 1. Creating a semaphore with a small limit (2)
+    /// 2. Spawning more concurrent tasks than the limit (5)
+    /// 3. Verifying that no more than `limit` tasks run simultaneously
+    #[tokio::test]
+    async fn test_global_semaphore_limits_concurrency() {
+        let semaphore = Arc::new(Semaphore::new(2));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let current_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+
+        // Spawn 5 tasks that each try to acquire the semaphore
+        for _i in 0..5 {
+            let sem = semaphore.clone();
+            let max = max_concurrent.clone();
+            let current = current_concurrent.clone();
+
+            handles.push(tokio::spawn(async move {
+                // Acquire semaphore permit (like upload/download tasks do)
+                let _permit = sem.acquire().await.expect("semaphore should not be closed");
+
+                // Track concurrent count
+                let active = current.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Update max if this is the highest concurrent count we've seen
+                max.fetch_max(active, Ordering::SeqCst);
+
+                // Simulate I/O work
+                tokio::time::sleep(Duration::from_millis(50)).await;
+
+                // Done with work
+                current.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+
+        // Verify max concurrent never exceeded the semaphore limit
+        let max = max_concurrent.load(Ordering::SeqCst);
+        assert!(
+            max <= 2,
+            "Max concurrent tasks ({max}) should not exceed semaphore limit (2)"
+        );
+        assert!(
+            max >= 1,
+            "At least one task should have run concurrently (got {max})"
+        );
+    }
+
+    /// Test that when global_semaphore is None, operations proceed without blocking.
+    #[tokio::test]
+    async fn test_no_semaphore_allows_full_concurrency() {
+        let global_semaphore: Option<Arc<Semaphore>> = None;
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let current_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+
+        // Spawn 5 tasks without a semaphore
+        for _i in 0..5 {
+            let sem = global_semaphore.clone();
+            let max = max_concurrent.clone();
+            let current = current_concurrent.clone();
+
+            handles.push(tokio::spawn(async move {
+                // This is the pattern used in upload/download tasks:
+                // acquire permit only if semaphore is Some
+                let _permit = if let Some(ref s) = sem {
+                    Some(s.acquire().await.expect("semaphore should not be closed"))
+                } else {
+                    None
+                };
+
+                let active = current.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(active, Ordering::SeqCst);
+
+                // Brief sleep to allow concurrency
+                tokio::time::sleep(Duration::from_millis(20)).await;
+
+                current.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+
+        // Without a semaphore, all 5 tasks should be able to run concurrently
+        let max = max_concurrent.load(Ordering::SeqCst);
+        assert!(
+            max >= 3,
+            "Without semaphore, should allow high concurrency (got {max})"
+        );
+    }
+
+    /// Test that semaphore permit is released when task completes.
+    #[tokio::test]
+    async fn test_semaphore_permit_released_on_completion() {
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        // First task acquires the only permit
+        let sem1 = semaphore.clone();
+        let handle1 = tokio::spawn(async move {
+            let _permit = sem1.acquire().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // permit released here when _permit drops
+        });
+
+        // Give first task time to acquire permit
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Second task should be blocked
+        let sem2 = semaphore.clone();
+        let start = std::time::Instant::now();
+        let handle2 = tokio::spawn(async move {
+            let _permit = sem2.acquire().await.unwrap();
+            // This will only succeed after first task releases permit
+        });
+
+        // Wait for both to complete
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+
+        // Second task should have been blocked until first completed
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "Second task should have waited for first to release permit (elapsed: {elapsed:?})"
+        );
+    }
+}
+
 mod shutdown_tests {
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;

@@ -5,8 +5,9 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -46,12 +47,14 @@ impl DownloadTask {
     /// * `storages` - Per-source storage providers
     /// * `shutdown` - Cancellation token for graceful shutdown
     /// * `max_concurrent` - Maximum concurrent downloads
+    /// * `global_semaphore` - Optional global semaphore for cross-pipeline concurrency limiting
     /// * `pipeline` - Pipeline identifier for metrics
     pub fn spawn(
         pending_files: Vec<SourcedFile>,
         storages: IndexMap<String, StorageProviderRef>,
         shutdown: CancellationToken,
         max_concurrent: usize,
+        global_semaphore: Option<Arc<Semaphore>>,
         pipeline: String,
     ) -> Self {
         let (tx, rx) = mpsc::channel(max_concurrent);
@@ -62,6 +65,7 @@ impl DownloadTask {
             tx,
             shutdown,
             max_concurrent,
+            global_semaphore,
             pipeline,
         ));
 
@@ -81,6 +85,7 @@ impl DownloadTask {
         download_tx: mpsc::Sender<Result<DownloadedFile, StorageError>>,
         shutdown: CancellationToken,
         max_concurrent: usize,
+        global_semaphore: Option<Arc<Semaphore>>,
         pipeline: String,
     ) {
         let mut downloads: FuturesUnordered<DownloadFuture> = FuturesUnordered::new();
@@ -115,12 +120,22 @@ impl DownloadTask {
                 "[download] Starting {}:{} (active: {})",
                 sourced_file.source_name, sourced_file.path, active_downloads
             );
-            downloads.push(Box::pin(download_file(
-                storage,
-                sourced_file.source_name,
-                sourced_file.path,
-                pipeline_clone,
-            )));
+            let semaphore = global_semaphore.clone();
+            downloads.push(Box::pin(async move {
+                // Acquire global semaphore permit if configured
+                let _permit = if let Some(ref sem) = semaphore {
+                    Some(sem.acquire().await.expect("semaphore should not be closed"))
+                } else {
+                    None
+                };
+                download_file(
+                    storage,
+                    sourced_file.source_name,
+                    sourced_file.path,
+                    pipeline_clone,
+                )
+                .await
+            }));
         }
 
         // Process downloads and start new ones as they complete
@@ -196,12 +211,22 @@ impl DownloadTask {
                     "[download] Starting {}:{} (active: {})",
                     next_file.source_name, next_file.path, active_downloads
                 );
-                downloads.push(Box::pin(download_file(
-                    storage,
-                    next_file.source_name,
-                    next_file.path,
-                    pipeline_clone,
-                )));
+                let semaphore = global_semaphore.clone();
+                downloads.push(Box::pin(async move {
+                    // Acquire global semaphore permit if configured
+                    let _permit = if let Some(ref sem) = semaphore {
+                        Some(sem.acquire().await.expect("semaphore should not be closed"))
+                    } else {
+                        None
+                    };
+                    download_file(
+                        storage,
+                        next_file.source_name,
+                        next_file.path,
+                        pipeline_clone,
+                    )
+                    .await
+                }));
             }
         }
 

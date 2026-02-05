@@ -119,8 +119,6 @@ struct Processor {
     /// Coordinator for checkpoint management.
     checkpoint_coordinator: CheckpointCoordinator,
     /// Optional global semaphore for cross-table concurrency limiting.
-    /// Currently stored for future use in concurrent upload limiting.
-    #[allow(dead_code)]
     global_semaphore: Option<Arc<Semaphore>>,
 }
 
@@ -351,6 +349,13 @@ impl PollingProcessor for Processor {
             .map(|f| f.filename.as_str())
             .max()
             .map(String::from);
+
+        // Acquire global semaphore permit if configured (limits concurrent I/O across tables)
+        let _permit = if let Some(ref sem) = self.global_semaphore {
+            Some(sem.acquire().await.expect("semaphore should not be closed"))
+        } else {
+            None
+        };
 
         // Commit files to Delta Lake
         let committed_count = self
