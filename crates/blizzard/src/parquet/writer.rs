@@ -649,4 +649,53 @@ mod tests {
             "rollover timeout should have triggered exactly one roll"
         );
     }
+
+    #[test]
+    fn test_compression_codec_applied() {
+        use bytes::Bytes;
+        use deltalake::parquet::basic::Compression;
+        use deltalake::parquet::file::reader::{FileReader, SerializedFileReader};
+
+        fn get_compression_from_parquet(bytes: &Bytes) -> Compression {
+            let reader = SerializedFileReader::new(bytes.clone()).unwrap();
+            let metadata = reader.metadata();
+            metadata.row_group(0).column(0).compression()
+        }
+
+        // Test Snappy (default)
+        let schema = test_schema();
+        let config = ParquetWriterConfig::default();
+        assert!(matches!(config.compression, ParquetCompression::Snappy));
+        let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
+        writer.write_batch(&test_batch(100)).unwrap();
+        let files = writer.close().unwrap();
+        let compression = get_compression_from_parquet(files[0].bytes.as_ref().unwrap());
+        assert!(
+            matches!(compression, Compression::SNAPPY),
+            "expected SNAPPY, got {compression:?}",
+        );
+
+        // Test Zstd
+        let config = ParquetWriterConfig::default().with_compression(ParquetCompression::Zstd);
+        let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
+        writer.write_batch(&test_batch(100)).unwrap();
+        let files = writer.close().unwrap();
+        let compression = get_compression_from_parquet(files[0].bytes.as_ref().unwrap());
+        assert!(
+            matches!(compression, Compression::ZSTD(_)),
+            "expected ZSTD, got {compression:?}",
+        );
+
+        // Test Uncompressed
+        let config =
+            ParquetWriterConfig::default().with_compression(ParquetCompression::Uncompressed);
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
+        writer.write_batch(&test_batch(100)).unwrap();
+        let files = writer.close().unwrap();
+        let compression = get_compression_from_parquet(files[0].bytes.as_ref().unwrap());
+        assert!(
+            matches!(compression, Compression::UNCOMPRESSED),
+            "expected UNCOMPRESSED, got {compression:?}",
+        );
+    }
 }
