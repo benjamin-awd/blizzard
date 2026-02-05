@@ -467,7 +467,22 @@ impl PollingProcessor for PipelineOrchestrator {
             target: self.key.id().to_string(),
         });
 
-        info!(target = %self.key, files = pending_files.len(), "Found files to process");
+        // Build per-source file counts for logging
+        let mut source_counts: IndexMap<&str, usize> = IndexMap::new();
+        for file in &pending_files {
+            *source_counts.entry(file.source_name.as_str()).or_default() += 1;
+        }
+        let breakdown: Vec<_> = source_counts
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+
+        info!(
+            target = %self.key,
+            files = pending_files.len(),
+            breakdown = %breakdown.join(", "),
+            "Found files to process"
+        );
 
         Ok(Some(pending_files))
     }
