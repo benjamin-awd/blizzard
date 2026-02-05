@@ -6,4 +6,6 @@ target/
 *.claude
 
 *.yaml
+!.pre-commit-config.yaml
+
 deployment/gcp
