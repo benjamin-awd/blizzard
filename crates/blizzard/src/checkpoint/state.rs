@@ -8,56 +8,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+// Re-export WatermarkState from blizzard-core for convenience
+pub use blizzard_core::watermark::WatermarkState;
+
 /// Default schema version for checkpoint state.
 fn default_schema_version() -> u32 {
     1
-}
-
-/// Watermark state for operational visibility.
-///
-/// Tracks not just the position but also the activity state:
-/// - `Initial`: Cold start, no watermark yet
-/// - `Active`: Actively processing files at a specific position
-/// - `Idle`: No new files found above the current watermark
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "state", content = "value")]
-#[derive(Default)]
-pub enum WatermarkState {
-    /// Cold start - no watermark yet.
-    #[default]
-    Initial,
-    /// Active processing - at specific file path.
-    Active(String),
-    /// Idle - no new files found above watermark.
-    Idle(String),
-}
-
-impl WatermarkState {
-    /// Extract the path from Active or Idle states.
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            WatermarkState::Initial => None,
-            WatermarkState::Active(path) | WatermarkState::Idle(path) => Some(path),
-        }
-    }
-
-    /// Check if this is the Initial state.
-    pub fn is_initial(&self) -> bool {
-        matches!(self, WatermarkState::Initial)
-    }
-
-    /// Transition to Idle state if currently Active.
-    /// Returns true if the state was changed.
-    pub fn mark_idle(&mut self) -> bool {
-        match self {
-            WatermarkState::Active(path) => {
-                let path = std::mem::take(path);
-                *self = WatermarkState::Idle(path);
-                true
-            }
-            _ => false,
-        }
-    }
 }
 
 /// Checkpoint state for Blizzard source file tracking.
