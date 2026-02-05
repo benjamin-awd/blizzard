@@ -30,7 +30,9 @@ use tracing::{debug, info};
 use blizzard_core::FinishedFile;
 use blizzard_core::PartitionExtractor;
 use blizzard_core::storage::StorageProvider;
-use blizzard_core::watermark::{self, FileListingConfig, generate_prefixes};
+use blizzard_core::watermark::{
+    self, FileListingConfig, generate_prefixes, list_files_above_watermark_with_prefixes,
+};
 
 use crate::config::PartitionFilterConfig;
 use crate::error::{IncomingError, incoming_error};
@@ -107,6 +109,9 @@ impl IncomingReader {
     }
 
     /// List files above the given watermark.
+    ///
+    /// If a partition filter is configured, uses the filter prefixes to avoid
+    /// expensive full-recursive partition discovery.
     async fn list_files_above_watermark(
         &self,
         watermark: &str,
@@ -116,9 +121,17 @@ impl IncomingReader {
             target: &self.table,
         };
 
-        let paths = watermark::list_files_above_watermark(&self.storage, watermark, &config)
-            .await
-            .context(incoming_error::ListSnafu)?;
+        // Use partition filter prefixes if available to avoid full partition scan
+        let prefixes = self.generate_cold_start_prefixes();
+
+        let paths = list_files_above_watermark_with_prefixes(
+            &self.storage,
+            watermark,
+            prefixes.as_deref(),
+            &config,
+        )
+        .await
+        .context(incoming_error::ListSnafu)?;
 
         Ok(paths
             .into_iter()
