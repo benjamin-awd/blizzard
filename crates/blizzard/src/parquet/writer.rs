@@ -520,4 +520,128 @@ mod tests {
 
         assert!(writer.current_file_size() > 0);
     }
+
+    #[test]
+    fn test_rolling_policy_should_roll() {
+        // Test SizeLimit policy
+        let policy = RollingPolicy::SizeLimit(1000);
+        let mut stats = WriterStats::new();
+        stats.bytes_written = 500;
+        assert!(!policy.should_roll(&stats), "should not roll below limit");
+        stats.bytes_written = 1000;
+        assert!(policy.should_roll(&stats), "should roll at limit");
+        stats.bytes_written = 1500;
+        assert!(policy.should_roll(&stats), "should roll above limit");
+
+        // Test RolloverDuration policy with elapsed time
+        let policy = RollingPolicy::RolloverDuration(Duration::from_millis(10));
+        let stats = WriterStats::new();
+        assert!(
+            !policy.should_roll(&stats),
+            "should not roll immediately after creation"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(
+            policy.should_roll(&stats),
+            "should roll after duration elapsed"
+        );
+
+        // Test InactivityDuration policy
+        let policy = RollingPolicy::InactivityDuration(Duration::from_millis(10));
+        let mut stats = WriterStats::new();
+        assert!(
+            !policy.should_roll(&stats),
+            "should not roll immediately after write"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(
+            policy.should_roll(&stats),
+            "should roll after inactivity period"
+        );
+        // Simulate a new write by updating last_write_at
+        stats.last_write_at = Instant::now();
+        assert!(
+            !policy.should_roll(&stats),
+            "should not roll right after write"
+        );
+    }
+
+    #[test]
+    fn test_combined_rolling_policies_size_wins() {
+        // Configure both size limit (small) and rollover duration (long)
+        // Size should trigger first when writing enough data
+        let schema = test_schema();
+        let config = ParquetWriterConfig::default().with_rolling_policies(vec![
+            RollingPolicy::SizeLimit(1024), // 1KB - very small, will trigger quickly
+            RollingPolicy::RolloverDuration(Duration::from_secs(3600)), // 1 hour - won't trigger
+        ]);
+
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
+
+        // Write batches until size limit triggers a roll
+        for _ in 0..50 {
+            let batch = test_batch(100);
+            writer.write_batch(&batch).unwrap();
+        }
+
+        // Size limit should have triggered file rolls
+        let finished_files = writer.take_finished_files();
+        assert!(
+            !finished_files.is_empty(),
+            "size limit should have triggered at least one roll"
+        );
+
+        // Verify that each finished file is roughly at the size limit
+        for file in &finished_files {
+            // Files should be around the 1KB limit (with some variance due to parquet overhead)
+            assert!(
+                file.size >= 1024,
+                "finished file should be at least the size limit"
+            );
+        }
+    }
+
+    #[test]
+    fn test_combined_rolling_policies_time_wins() {
+        // Configure both size limit (large) and rollover duration (short)
+        // Time should trigger first when not writing much data
+        let schema = test_schema();
+        let config = ParquetWriterConfig::default().with_rolling_policies(vec![
+            RollingPolicy::SizeLimit(100 * MB), // 100MB - won't trigger with small writes
+            RollingPolicy::RolloverDuration(Duration::from_millis(50)), // 50ms - will trigger
+        ]);
+
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
+
+        // Write a small batch
+        let batch = test_batch(10);
+        writer.write_batch(&batch).unwrap();
+
+        // Wait for rollover duration to elapse
+        std::thread::sleep(Duration::from_millis(60));
+
+        // Write another small batch - this should trigger the time-based roll
+        let batch = test_batch(10);
+        writer.write_batch(&batch).unwrap();
+
+        // Time-based policy should have triggered a roll
+        let finished_files = writer.take_finished_files();
+        assert_eq!(
+            finished_files.len(),
+            1,
+            "rollover duration should have triggered exactly one roll"
+        );
+
+        // Verify the file is much smaller than the size limit
+        let file = &finished_files[0];
+        assert!(
+            file.size < 100 * MB,
+            "file should be well below size limit since time triggered first"
+        );
+    }
+
+    // Note: InactivityDuration cannot trigger during write_batch because last_write_at
+    // is updated before checking rolling policies. It would need a separate periodic
+    // check mechanism (e.g., a background ticker) to be useful. The policy is still
+    // tested via should_roll() unit tests above.
 }
