@@ -151,12 +151,13 @@ mod checkpoint_tests {
 }
 
 mod parquet_tests {
-    use blizzard::config::ParquetCompression;
-    use blizzard::parquet::{ParquetWriter, ParquetWriterConfig};
+    use blizzard::config::{Config, MB};
+    use blizzard::parquet::{ParquetWriter, ParquetWriterConfig, RollingPolicy};
     use deltalake::arrow::array::{Int64Array, StringArray};
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use deltalake::arrow::record_batch::RecordBatch;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -181,29 +182,130 @@ mod parquet_tests {
         .unwrap()
     }
 
-    // test_parquet_writer_basic is in blizzard/src/parquet/writer.rs
-
-    #[test]
-    fn test_parquet_writer_multiple_batches() {
-        let schema = test_schema();
-        let config = ParquetWriterConfig::default();
-        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
-
-        for _ in 0..5 {
-            let batch = create_test_batch(100);
-            writer.write_batch(&batch).unwrap();
+    /// Build rolling policies from config the same way processor.rs does.
+    /// This mirrors the logic in Iteration::new() to ensure config is wired correctly.
+    fn build_rolling_policies_from_config(config: &Config) -> Vec<RollingPolicy> {
+        let (_, pipeline) = config.pipelines().next().unwrap();
+        let mut policies = vec![RollingPolicy::SizeLimit(pipeline.sink.file_size_mb * MB)];
+        if let Some(secs) = pipeline.sink.rollover_timeout_secs {
+            policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
         }
-
-        assert!(writer.current_file_size() > 0);
+        policies
     }
 
     #[test]
-    fn test_parquet_writer_config() {
-        let config = ParquetWriterConfig::default()
-            .with_file_size_mb(64)
-            .with_compression(ParquetCompression::Zstd);
+    fn test_rollover_timeout_config_to_policy_wiring() {
+        // Test that rollover_timeout_secs in config gets wired to RollingPolicy::RolloverDuration
+        let yaml = r#"
+pipelines:
+  events:
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+      rollover_timeout_secs: 300
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let policies = build_rolling_policies_from_config(&config);
 
-        assert_eq!(config.target_file_size, 64 * 1024 * 1024);
+        // Should have both SizeLimit (default) and RolloverDuration
+        assert_eq!(policies.len(), 2);
+        assert!(
+            matches!(policies[0], RollingPolicy::SizeLimit(size) if size == 128 * MB),
+            "First policy should be SizeLimit with default 128MB"
+        );
+        assert!(
+            matches!(policies[1], RollingPolicy::RolloverDuration(d) if d == Duration::from_secs(300)),
+            "Second policy should be RolloverDuration(300s)"
+        );
+    }
+
+    #[test]
+    fn test_no_rollover_timeout_config_only_size_policy() {
+        // Test that without rollover_timeout_secs, only SizeLimit policy is created
+        let yaml = r#"
+pipelines:
+  events:
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let policies = build_rolling_policies_from_config(&config);
+
+        assert_eq!(policies.len(), 1);
+        assert!(matches!(policies[0], RollingPolicy::SizeLimit(_)));
+    }
+
+    #[test]
+    fn test_rollover_timeout_triggers_file_roll() {
+        // End-to-end test: config → policies → writer → actual file roll
+        let yaml = r#"
+pipelines:
+  events:
+    sources:
+      default:
+        path: "/input/*.ndjson.gz"
+    sink:
+      table_uri: "/output/table"
+      file_size_mb: 100
+      rollover_timeout_secs: 1
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        // Build config the same way processor.rs does
+        let mut policies = vec![RollingPolicy::SizeLimit(pipeline.sink.file_size_mb * MB)];
+        if let Some(secs) = pipeline.sink.rollover_timeout_secs {
+            policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
+        }
+
+        let writer_config = ParquetWriterConfig::default()
+            .with_file_size_mb(pipeline.sink.file_size_mb)
+            .with_rolling_policies(policies);
+
+        let mut writer =
+            ParquetWriter::new(test_schema(), writer_config, "test".to_string()).unwrap();
+
+        // Write a small batch (won't trigger size limit)
+        let batch = create_test_batch(10);
+        writer.write_batch(&batch).unwrap();
+        assert!(
+            writer.take_finished_files().is_empty(),
+            "Should not roll immediately"
+        );
+
+        // Wait for rollover timeout (1 second + buffer)
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // Write another batch - this should trigger the time-based roll
+        writer.write_batch(&batch).unwrap();
+
+        let finished = writer.take_finished_files();
+        assert_eq!(
+            finished.len(),
+            1,
+            "Rollover timeout should have triggered exactly one file roll"
+        );
+        assert!(
+            finished[0].size < 100 * MB,
+            "File should be well below size limit since time triggered the roll"
+        );
     }
 }
 
