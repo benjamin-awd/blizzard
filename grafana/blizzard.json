@@ -529,7 +529,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rate of files discovered per second",
+      "description": "Total number of files discovered",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -545,7 +545,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -580,12 +580,12 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(blizzard_files_discovered_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
-          "legendFormat": "Discovered/s",
+          "expr": "sum(blizzard_files_discovered_total{job=~\"$job\", pod=~\"$pod\"})",
+          "legendFormat": "Discovered",
           "refId": "A"
         }
       ],
-      "title": "Files Discovered Rate",
+      "title": "Files Discovered",
       "type": "stat"
     },
     {
@@ -1589,7 +1589,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_active_downloads{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_active_downloads{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Active Downloads",
           "refId": "A"
         },
@@ -1598,7 +1598,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_active_uploads{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_active_uploads{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Active Uploads",
           "refId": "B"
         },
@@ -1607,7 +1607,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_active_multipart_parts{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_active_multipart_parts{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Active Multipart Parts",
           "refId": "C"
         }
@@ -1704,7 +1704,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_pending_batches{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_pending_batches{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Pending Batches",
           "refId": "A"
         },
@@ -1713,7 +1713,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_decompression_queue_depth{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_decompression_queue_depth{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Decompression Queue Depth",
           "refId": "B"
         },
@@ -1722,7 +1722,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_upload_queue_depth{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_upload_queue_depth{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Upload Queue Depth",
           "refId": "C"
         },
@@ -1731,7 +1731,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_buffered_records{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_buffered_records{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Buffered Records",
           "refId": "D"
         },
@@ -1740,7 +1740,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_upload_results_pending{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum(blizzard_upload_results_pending{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Upload Results Pending",
           "refId": "E"
         }
@@ -1956,8 +1956,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (result) (rate(blizzard_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
-          "legendFormat": "{{result}}",
+          "expr": "sum by (result, target) (rate(blizzard_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "legendFormat": "{{target}} - {{result}}",
           "range": true,
           "refId": "A"
         }
@@ -2616,8 +2616,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_source_state_files{job=~\"$job\", pod=~\"$pod\"}",
-          "legendFormat": "Files Tracked",
+          "expr": "sum by (target) (blizzard_source_state_files{job=~\"$job\", pod=~\"$pod\"})",
+          "legendFormat": "{{target}}",
           "refId": "A"
         }
       ],
@@ -2852,7 +2852,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_source_state_files{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "sum by (target) (blizzard_source_state_files{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
