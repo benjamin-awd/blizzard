@@ -7,6 +7,9 @@ import d2 from 'astro-d2';
 export default defineConfig({
 	site: 'https://benjamin-awd.github.io',
 	base: '/blizzard',
+	experimental: {
+		svgo: true,
+	},
 	integrations: [
 		d2(),
 		starlight({
