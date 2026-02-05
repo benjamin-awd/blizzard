@@ -131,7 +131,7 @@ impl Default for ParquetWriterConfig {
         Self {
             target_file_size,
             row_group_size_bytes: 128 * MB,
-            compression: ParquetCompression::Snappy,
+            compression: ParquetCompression::Zstd,
             rolling_policies: vec![RollingPolicy::SizeLimit(target_file_size)],
         }
     }
@@ -662,21 +662,10 @@ mod tests {
             metadata.row_group(0).column(0).compression()
         }
 
-        // Test Snappy (default)
+        // Test Zstd (default)
         let schema = test_schema();
         let config = ParquetWriterConfig::default();
-        assert!(matches!(config.compression, ParquetCompression::Snappy));
-        let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
-        writer.write_batch(&test_batch(100)).unwrap();
-        let files = writer.close().unwrap();
-        let compression = get_compression_from_parquet(files[0].bytes.as_ref().unwrap());
-        assert!(
-            matches!(compression, Compression::SNAPPY),
-            "expected SNAPPY, got {compression:?}",
-        );
-
-        // Test Zstd
-        let config = ParquetWriterConfig::default().with_compression(ParquetCompression::Zstd);
+        assert!(matches!(config.compression, ParquetCompression::Zstd));
         let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
         writer.write_batch(&test_batch(100)).unwrap();
         let files = writer.close().unwrap();
@@ -684,6 +673,17 @@ mod tests {
         assert!(
             matches!(compression, Compression::ZSTD(_)),
             "expected ZSTD, got {compression:?}",
+        );
+
+        // Test Snappy
+        let config = ParquetWriterConfig::default().with_compression(ParquetCompression::Snappy);
+        let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
+        writer.write_batch(&test_batch(100)).unwrap();
+        let files = writer.close().unwrap();
+        let compression = get_compression_from_parquet(files[0].bytes.as_ref().unwrap());
+        assert!(
+            matches!(compression, Compression::SNAPPY),
+            "expected SNAPPY, got {compression:?}",
         );
 
         // Test Uncompressed
