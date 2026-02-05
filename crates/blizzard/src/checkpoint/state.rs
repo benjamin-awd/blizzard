@@ -32,7 +32,6 @@ pub enum WatermarkState {
     Idle(String),
 }
 
-
 impl WatermarkState {
     /// Extract the path from Active or Idle states.
     pub fn path(&self) -> Option<&str> {
@@ -230,8 +229,10 @@ mod tests {
 
     #[test]
     fn test_checkpoint_state_serialization() {
-        let mut state = CheckpointState::default();
-        state.schema_version = 1;
+        let mut state = CheckpointState {
+            schema_version: 1,
+            ..Default::default()
+        };
         state.update_watermark("date=2026-01-28/1738100400-uuid.ndjson.gz");
         state.last_update_ts = 1738100500;
 

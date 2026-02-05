@@ -476,7 +476,7 @@ mod watermark_tests {
     use blizzard::checkpoint::{CheckpointManager, CheckpointState, WatermarkState};
     use blizzard_core::storage::StorageProvider;
     use blizzard_core::watermark::{
-        list_files_above_partition_watermarks, list_files_above_watermark, FileListingConfig,
+        FileListingConfig, list_files_above_partition_watermarks, list_files_above_watermark,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -484,9 +484,12 @@ mod watermark_tests {
 
     async fn create_test_storage(temp_dir: &TempDir) -> Arc<StorageProvider> {
         Arc::new(
-            StorageProvider::for_url_with_options(temp_dir.path().to_str().unwrap(), HashMap::new())
-                .await
-                .unwrap(),
+            StorageProvider::for_url_with_options(
+                temp_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
         )
     }
 
@@ -539,8 +542,10 @@ mod watermark_tests {
     #[test]
     fn test_checkpoint_format_roundtrip() {
         // Create checkpoint with new format
-        let mut state = CheckpointState::default();
-        state.schema_version = 1;
+        let mut state = CheckpointState {
+            schema_version: 1,
+            ..Default::default()
+        };
         state.update_watermark("date=2024-01-28/file1.ndjson.gz");
         state.update_watermark("date=2024-01-29/file2.ndjson.gz");
 
@@ -750,8 +755,14 @@ mod watermark_tests {
 
         // Set different watermarks for each partition
         let mut partition_watermarks = HashMap::new();
-        partition_watermarks.insert("date=2024-01-28".to_string(), "2000-uuid.ndjson.gz".to_string());
-        partition_watermarks.insert("date=2024-01-29".to_string(), "1000-uuid.ndjson.gz".to_string());
+        partition_watermarks.insert(
+            "date=2024-01-28".to_string(),
+            "2000-uuid.ndjson.gz".to_string(),
+        );
+        partition_watermarks.insert(
+            "date=2024-01-29".to_string(),
+            "1000-uuid.ndjson.gz".to_string(),
+        );
 
         let files =
             list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
@@ -840,10 +851,7 @@ mod watermark_tests {
 
         // With global watermark, only gets file2 from hour=14
         assert_eq!(global_files.len(), 1);
-        assert_eq!(
-            global_files[0],
-            "date=2024-01-28/hour=14/file2.ndjson.gz"
-        );
+        assert_eq!(global_files[0], "date=2024-01-28/hour=14/file2.ndjson.gz");
 
         // Per-partition watermarks approach
         let mut partition_watermarks = HashMap::new();
@@ -923,10 +931,14 @@ mod watermark_tests {
             "date=2024-01-28/hour=06".to_string(),
         ];
 
-        let files =
-            list_files_above_partition_watermarks(&storage, &partition_watermarks, Some(&prefixes), &config)
-                .await
-                .unwrap();
+        let files = list_files_above_partition_watermarks(
+            &storage,
+            &partition_watermarks,
+            Some(&prefixes),
+            &config,
+        )
+        .await
+        .unwrap();
 
         // Should find:
         // - file3 from day1 (above watermark file2)
@@ -969,11 +981,8 @@ mod watermark_tests {
         manager.save().await.unwrap();
 
         // Load with new manager
-        let mut manager2 = CheckpointManager::new(
-            storage,
-            "test_pipeline".to_string(),
-            "source1".to_string(),
-        );
+        let mut manager2 =
+            CheckpointManager::new(storage, "test_pipeline".to_string(), "source1".to_string());
         let loaded = manager2.load().await.unwrap();
 
         assert!(loaded);
@@ -984,8 +993,14 @@ mod watermark_tests {
 
         // Verify partition watermarks loaded
         let pw = manager2.partition_watermarks();
-        assert_eq!(pw.get("date=2024-01-28"), Some(&"file2.ndjson.gz".to_string()));
-        assert_eq!(pw.get("date=2024-01-29"), Some(&"file1.ndjson.gz".to_string()));
+        assert_eq!(
+            pw.get("date=2024-01-28"),
+            Some(&"file2.ndjson.gz".to_string())
+        );
+        assert_eq!(
+            pw.get("date=2024-01-29"),
+            Some(&"file1.ndjson.gz".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1007,11 +1022,8 @@ mod watermark_tests {
         manager.save().await.unwrap();
 
         // Load and verify idle state
-        let mut manager2 = CheckpointManager::new(
-            storage,
-            "test_pipeline".to_string(),
-            "source1".to_string(),
-        );
+        let mut manager2 =
+            CheckpointManager::new(storage, "test_pipeline".to_string(), "source1".to_string());
         manager2.load().await.unwrap();
 
         // Watermark path should still be accessible
@@ -1026,7 +1038,6 @@ mod watermark_tests {
             WatermarkState::Idle(_)
         ));
     }
-
 }
 
 mod shutdown_tests {

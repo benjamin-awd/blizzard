@@ -83,10 +83,11 @@ pub async fn list_ndjson_files_with_partition_watermarks(
 
     // Use partition watermarks if available and non-empty
     if let Some(pw) = partition_watermarks
-        && !pw.is_empty() {
-            return watermark::list_files_above_partition_watermarks(storage, pw, prefixes, &config)
-                .await;
-        }
+        && !pw.is_empty()
+    {
+        return watermark::list_files_above_partition_watermarks(storage, pw, prefixes, &config)
+            .await;
+    }
 
     // Fall back to global watermark logic
     match watermark {
