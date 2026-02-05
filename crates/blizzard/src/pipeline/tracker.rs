@@ -76,9 +76,10 @@ impl WatermarkTracker {
 impl StateTracker for WatermarkTracker {
     async fn init(&mut self) -> Result<Option<String>, PipelineError> {
         match self.checkpoint_manager.load().await {
-            Ok(true) => Ok(self.checkpoint_manager.watermark().map(|w| {
-                format!("Restored checkpoint from storage (watermark: {w})")
-            })),
+            Ok(true) => Ok(self
+                .checkpoint_manager
+                .watermark()
+                .map(|w| format!("Restored checkpoint from storage (watermark: {w})"))),
             Ok(false) => Ok(None),
             Err(e) => {
                 warn!(error = %e, "Failed to load checkpoint, starting fresh");

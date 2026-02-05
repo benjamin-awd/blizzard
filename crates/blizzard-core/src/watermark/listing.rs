@@ -702,9 +702,10 @@ mod tests {
         let mut partition_watermarks = HashMap::new();
         partition_watermarks.insert("date=2026-01-28".to_string(), "file2.ndjson.gz".to_string());
 
-        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
-            .await
-            .unwrap();
+        let files =
+            list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+                .await
+                .unwrap();
 
         // Should find:
         // - file3 from partition1 (above watermark)
@@ -738,12 +739,19 @@ mod tests {
 
         // Both partitions have watermarks
         let mut partition_watermarks = HashMap::new();
-        partition_watermarks.insert("date=2026-01-28".to_string(), "1000-uuid.ndjson.gz".to_string());
-        partition_watermarks.insert("date=2026-01-29".to_string(), "1000-uuid.ndjson.gz".to_string());
+        partition_watermarks.insert(
+            "date=2026-01-28".to_string(),
+            "1000-uuid.ndjson.gz".to_string(),
+        );
+        partition_watermarks.insert(
+            "date=2026-01-29".to_string(),
+            "1000-uuid.ndjson.gz".to_string(),
+        );
 
-        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
-            .await
-            .unwrap();
+        let files =
+            list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+                .await
+                .unwrap();
 
         // Should find file2 from each partition (above their respective watermarks)
         assert_eq!(files.len(), 2);
@@ -765,9 +773,10 @@ mod tests {
         // Empty partition watermarks - should include all files from all partitions
         let partition_watermarks = HashMap::new();
 
-        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
-            .await
-            .unwrap();
+        let files =
+            list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+                .await
+                .unwrap();
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "date=2026-01-28/file1.ndjson.gz");

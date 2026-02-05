@@ -795,12 +795,13 @@ mod tests {
         std::fs::create_dir_all(&partition).unwrap();
 
         for i in 0..10 {
-            std::fs::write(partition.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+            std::fs::write(partition.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
         }
 
-        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
-            .await
-            .unwrap();
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
 
         // Request only 3 files
         let files = list_ndjson_files_with_limit(&storage, None, Some(3), "test")
@@ -823,13 +824,14 @@ mod tests {
         std::fs::create_dir_all(&partition2).unwrap();
 
         for i in 0..5 {
-            std::fs::write(partition1.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
-            std::fs::write(partition2.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+            std::fs::write(partition1.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
+            std::fs::write(partition2.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
         }
 
-        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
-            .await
-            .unwrap();
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
 
         let prefixes = vec!["date=2024-01-01".to_string(), "date=2024-01-02".to_string()];
 
@@ -851,12 +853,13 @@ mod tests {
         std::fs::create_dir_all(&partition).unwrap();
 
         for i in 0..5 {
-            std::fs::write(partition.join(format!("file{:02}.ndjson.gz", i)), b"").unwrap();
+            std::fs::write(partition.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
         }
 
-        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
-            .await
-            .unwrap();
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
 
         // No limit - should return all files
         let files = list_ndjson_files_with_limit(&storage, None, None, "test")
@@ -875,9 +878,10 @@ mod tests {
         std::fs::create_dir_all(&partition).unwrap();
         std::fs::write(partition.join("file.ndjson.gz"), b"").unwrap();
 
-        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
-            .await
-            .unwrap();
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
 
         // Limit of 0 should return empty
         let files = list_ndjson_files_with_limit(&storage, None, Some(0), "test")
@@ -899,9 +903,10 @@ mod tests {
         std::fs::write(partition.join("file01.ndjson.gz"), b"").unwrap();
         std::fs::write(partition.join("file02.ndjson.gz"), b"").unwrap();
 
-        let storage = StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
-            .await
-            .unwrap();
+        let storage =
+            StorageProvider::for_url_with_options(base_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap();
 
         // Request 10 files but only 2 exist
         let files = list_ndjson_files_with_limit(&storage, None, Some(10), "test")
