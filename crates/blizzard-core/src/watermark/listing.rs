@@ -100,6 +100,31 @@ pub async fn list_files_above_watermark(
     watermark: &str,
     config: &FileListingConfig<'_>,
 ) -> Result<Vec<String>, StorageError> {
+    list_files_above_watermark_with_prefixes(storage, watermark, None, config).await
+}
+
+/// List files above the given watermark, optionally filtering by partition prefixes.
+///
+/// When `prefixes` is provided and non-empty, only those partitions are scanned.
+/// This avoids the expensive full-recursive listing to discover partitions.
+///
+/// # Arguments
+///
+/// * `storage` - Storage provider for the source directory
+/// * `watermark` - High-watermark (last processed file path)
+/// * `prefixes` - Optional partition prefixes to scan (avoids full partition discovery)
+/// * `config` - File listing configuration (extension and target for logging)
+///
+/// # Returns
+///
+/// List of file paths (relative to storage root) above the watermark,
+/// sorted lexicographically for deterministic ordering.
+pub async fn list_files_above_watermark_with_prefixes(
+    storage: &StorageProvider,
+    watermark: &str,
+    prefixes: Option<&[String]>,
+    config: &FileListingConfig<'_>,
+) -> Result<Vec<String>, StorageError> {
     let (watermark_partition, watermark_filename) = parse_watermark(watermark);
 
     debug!(
@@ -107,6 +132,7 @@ pub async fn list_files_above_watermark(
         watermark_partition = %watermark_partition,
         watermark_filename = %watermark_filename,
         extension = %config.extension,
+        prefix_filter = ?prefixes.map(|p| p.len()),
         "Listing files above watermark"
     );
 
@@ -121,31 +147,61 @@ pub async fn list_files_above_watermark(
             }
         }
     } else {
-        // List partitions and filter to >= watermark partition
-        let partitions = list_partitions(storage).await?;
-        let total_partitions = partitions.len();
-        let relevant_partitions: Vec<_> = partitions
-            .into_iter()
-            .filter(|p| p.as_str() >= watermark_partition.as_str())
-            .collect();
+        // Determine partitions to scan
+        let partitions_to_scan: Vec<String> = match prefixes {
+            Some(prefixes) if !prefixes.is_empty() => {
+                // Use provided prefixes, filter to those >= watermark partition
+                let relevant: Vec<_> = prefixes
+                    .iter()
+                    .filter(|p| p.as_str() >= watermark_partition.as_str())
+                    .cloned()
+                    .collect();
+                debug!(
+                    target = %config.target,
+                    prefix_count = prefixes.len(),
+                    relevant_count = relevant.len(),
+                    "Using prefix filter for partition scan"
+                );
+                relevant
+            }
+            _ => {
+                // No prefixes provided - fall back to discovering all partitions
+                // This is expensive but maintains backward compatibility
+                let partitions = list_partitions(storage).await?;
+                let total_partitions = partitions.len();
+                let relevant: Vec<_> = partitions
+                    .into_iter()
+                    .filter(|p| p.as_str() >= watermark_partition.as_str())
+                    .collect();
 
-        let skipped = total_partitions - relevant_partitions.len();
-        if skipped > 0 {
-            debug!(
-                target = %config.target,
-                skipped_count = skipped,
-                "Skipped partitions before watermark"
-            );
-        }
+                let skipped = total_partitions - relevant.len();
+                if skipped > 0 {
+                    debug!(
+                        target = %config.target,
+                        skipped_count = skipped,
+                        "Skipped partitions before watermark"
+                    );
+                }
+                relevant
+            }
+        };
 
         debug!(
             target = %config.target,
-            partition_count = relevant_partitions.len(),
+            partition_count = partitions_to_scan.len(),
             "Scanning partitions >= watermark"
         );
 
-        for partition in relevant_partitions {
-            let partition_files = list_files_in_partition(storage, &partition, config).await?;
+        for partition in partitions_to_scan {
+            let partition_files = match list_files_in_partition(storage, &partition, config).await {
+                Ok(files) => files,
+                Err(e) if e.is_not_found() => {
+                    // Partition doesn't exist (common with prefix filters)
+                    debug!(target = %config.target, partition = %partition, "Partition not found, skipping");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             for file in partition_files {
                 // For watermark's partition, filter to files > watermark filename
@@ -830,5 +886,81 @@ mod tests {
         assert!(files.contains(&"date=2026-01-29/file1.ndjson.gz".to_string()));
         assert!(!files.contains(&"date=2026-01-27/old-file.ndjson.gz".to_string()));
         assert!(!files.contains(&"date=2026-01-28/file1.ndjson.gz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_watermark_with_prefixes() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create multiple partitions
+        let partition1 = temp_dir.path().join("date=2026-01-26");
+        let partition2 = temp_dir.path().join("date=2026-01-27");
+        let partition3 = temp_dir.path().join("date=2026-01-28");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+        std::fs::create_dir_all(&partition3).unwrap();
+
+        // Files in each partition
+        std::fs::write(partition1.join("old-file.parquet"), b"").unwrap();
+        std::fs::write(partition2.join("file1.parquet"), b"").unwrap();
+        std::fs::write(partition2.join("file2.parquet"), b"").unwrap();
+        std::fs::write(partition3.join("file1.parquet"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = parquet_config("test");
+
+        // Watermark is in the middle of partition2
+        let watermark = "date=2026-01-27/file1.parquet";
+
+        // Only provide prefixes for partition2 and partition3 (excluding partition1)
+        let prefixes = vec!["date=2026-01-27".to_string(), "date=2026-01-28".to_string()];
+
+        let files =
+            list_files_above_watermark_with_prefixes(&storage, watermark, Some(&prefixes), &config)
+                .await
+                .unwrap();
+
+        // Should find:
+        // - file2 from partition2 (above watermark)
+        // - file1 from partition3 (partition is after watermark partition)
+        // Should NOT include:
+        // - old-file from partition1 (excluded by prefix filter)
+        // - file1 from partition2 (at or below watermark)
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"date=2026-01-27/file2.parquet".to_string()));
+        assert!(files.contains(&"date=2026-01-28/file1.parquet".to_string()));
+        assert!(!files.contains(&"date=2026-01-26/old-file.parquet".to_string()));
+        assert!(!files.contains(&"date=2026-01-27/file1.parquet".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_watermark_with_prefixes_skips_nonexistent_partitions() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Only create one partition
+        let partition = temp_dir.path().join("date=2026-01-28");
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("file1.parquet"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = parquet_config("test");
+
+        let watermark = "date=2026-01-27/file1.parquet";
+
+        // Include prefixes for partitions that don't exist
+        let prefixes = vec![
+            "date=2026-01-27".to_string(), // doesn't exist
+            "date=2026-01-28".to_string(), // exists
+            "date=2026-01-29".to_string(), // doesn't exist
+        ];
+
+        let files =
+            list_files_above_watermark_with_prefixes(&storage, watermark, Some(&prefixes), &config)
+                .await
+                .unwrap();
+
+        // Should only find the file in the partition that exists
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "date=2026-01-28/file1.parquet");
     }
 }
