@@ -1745,7 +1745,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Pipeline stage utilization percentage (0-100%)",
+      "description": "Pipeline utilization percentage (0-100%)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1807,11 +1807,11 @@
             "uid": "${datasource}"
           },
           "expr": "blizzard_utilization{job=~\"$job\", pod=~\"$pod\"} * 100",
-          "legendFormat": "{{stage}}",
+          "legendFormat": "{{target}}",
           "refId": "A"
         }
       ],
-      "title": "Stage Utilization",
+      "title": "Pipeline Utilization",
       "type": "stat"
     },
     {
