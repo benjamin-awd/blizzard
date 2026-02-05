@@ -355,7 +355,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "blizzard_checkpoint_age_seconds{job=~\"$job\", pod=~\"$pod\"}",
+          "expr": "max(blizzard_checkpoint_age_seconds{job=~\"$job\", pod=~\"$pod\"})",
           "legendFormat": "Age",
           "refId": "A"
         }
