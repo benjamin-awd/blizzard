@@ -169,6 +169,11 @@ pub struct SinkConfig {
     /// Maximum concurrent upload operations.
     #[serde(default = "default_max_concurrent_uploads")]
     pub max_concurrent_uploads: usize,
+    /// Roll file after it has been open for this many seconds.
+    ///
+    /// Provides an upper bound on file age, ensuring data is committed regularly
+    /// even during continuous high-throughput writes.
+    pub rollover_timeout_secs: Option<u64>,
 }
 
 fn default_max_concurrent_uploads() -> usize {
@@ -819,6 +824,36 @@ pipelines:
         assert_eq!(pipeline.sink.file_size_mb, 128);
         assert_eq!(pipeline.sink.row_group_size_bytes, 128 * MB);
         assert!(pipeline.sink.partition_by.is_none());
+        assert!(
+            pipeline.sink.rollover_timeout_secs.is_none(),
+            "rollover_timeout_secs should default to None"
+        );
+    }
+
+    #[test]
+    fn test_sink_config_rollover_timeout() {
+        let yaml = r#"
+pipelines:
+  events:
+    sources:
+      default:
+        path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+      rollover_timeout_secs: 300
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, pipeline) = config.pipelines().next().unwrap();
+
+        assert_eq!(
+            pipeline.sink.rollover_timeout_secs,
+            Some(300),
+            "rollover_timeout_secs should be 300"
+        );
     }
 
     #[test]

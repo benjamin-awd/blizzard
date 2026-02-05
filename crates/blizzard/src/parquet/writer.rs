@@ -57,8 +57,6 @@ impl WriterStats {
 pub enum RollingPolicy {
     /// Roll when file reaches this size in bytes.
     SizeLimit(usize),
-    /// Roll after this duration of inactivity.
-    InactivityDuration(Duration),
     /// Roll after file has been open this long.
     RolloverDuration(Duration),
 }
@@ -68,9 +66,6 @@ impl RollingPolicy {
     pub fn should_roll(&self, stats: &WriterStats) -> bool {
         match self {
             RollingPolicy::SizeLimit(limit) => stats.bytes_written >= *limit,
-            RollingPolicy::InactivityDuration(duration) => {
-                stats.last_write_at.elapsed() >= *duration
-            }
             RollingPolicy::RolloverDuration(duration) => {
                 stats.first_write_at.elapsed() >= *duration
             }
@@ -545,25 +540,6 @@ mod tests {
             policy.should_roll(&stats),
             "should roll after duration elapsed"
         );
-
-        // Test InactivityDuration policy
-        let policy = RollingPolicy::InactivityDuration(Duration::from_millis(10));
-        let mut stats = WriterStats::new();
-        assert!(
-            !policy.should_roll(&stats),
-            "should not roll immediately after write"
-        );
-        std::thread::sleep(Duration::from_millis(15));
-        assert!(
-            policy.should_roll(&stats),
-            "should roll after inactivity period"
-        );
-        // Simulate a new write by updating last_write_at
-        stats.last_write_at = Instant::now();
-        assert!(
-            !policy.should_roll(&stats),
-            "should not roll right after write"
-        );
     }
 
     #[test]
@@ -640,8 +616,37 @@ mod tests {
         );
     }
 
-    // Note: InactivityDuration cannot trigger during write_batch because last_write_at
-    // is updated before checking rolling policies. It would need a separate periodic
-    // check mechanism (e.g., a background ticker) to be useful. The policy is still
-    // tested via should_roll() unit tests above.
+    #[test]
+    fn test_rollover_timeout_triggers_during_write() {
+        // RolloverDuration triggers based on first_write_at, which is set at writer creation.
+        let schema = test_schema();
+        let config = ParquetWriterConfig::default().with_rolling_policies(vec![
+            RollingPolicy::SizeLimit(100 * MB), // Won't trigger
+            RollingPolicy::RolloverDuration(Duration::from_millis(30)), // Will trigger
+        ]);
+
+        let mut writer = ParquetWriter::new(schema, config, "test".to_string()).unwrap();
+
+        // Write initial batch
+        let batch = test_batch(10);
+        writer.write_batch(&batch).unwrap();
+        assert!(
+            writer.take_finished_files().is_empty(),
+            "should not roll immediately"
+        );
+
+        // Wait for rollover timeout
+        std::thread::sleep(Duration::from_millis(40));
+
+        // Write another batch - this should trigger rollover
+        let batch = test_batch(10);
+        writer.write_batch(&batch).unwrap();
+
+        let finished = writer.take_finished_files();
+        assert_eq!(
+            finished.len(),
+            1,
+            "rollover timeout should have triggered exactly one roll"
+        );
+    }
 }

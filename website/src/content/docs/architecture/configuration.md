@@ -128,7 +128,6 @@ storage_options:
 | `path` | string | **required** | Path to output Delta Lake table directory |
 | `file_size_mb` | integer | `128` | Target Parquet file size in MB |
 | `row_group_size_bytes` | integer | `134217728` | Row group size (128 MB) |
-| `inactivity_timeout_secs` | integer | none | Roll file after inactivity |
 | `rollover_timeout_secs` | integer | none | Max file open duration |
 | `compression` | string | `snappy` | Parquet compression codec |
 | `partition_by` | object | none | Partition configuration (see below) |
@@ -292,7 +291,6 @@ sink:
   file_size_mb: 128
   row_group_size_bytes: 134217728
   compression: snappy
-  inactivity_timeout_secs: 60
   rollover_timeout_secs: 300
   partition_by:
     prefix_template: "date=%Y-%m-%d"

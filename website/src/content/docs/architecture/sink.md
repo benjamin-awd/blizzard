@@ -38,13 +38,11 @@ Files are rolled (completed) based on configurable policies:
 | Policy | Config | Description |
 |--------|--------|-------------|
 | **Size limit** | `file_size_mb` | Roll when file reaches target size |
-| **Inactivity timeout** | `inactivity_timeout_secs` | Roll after period of no writes |
 | **Rollover timeout** | `rollover_timeout_secs` | Roll after file has been open too long |
 
 ```yaml
 sink:
   file_size_mb: 128              # Target file size (default: 128 MB)
-  inactivity_timeout_secs: 60    # Roll after 60s of inactivity
   rollover_timeout_secs: 300     # Roll after 5 minutes max
 ```
 
