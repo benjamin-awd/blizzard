@@ -1,6 +1,6 @@
 [package]
 name = "blizzard"
-version = "0.3.0"
+version = "0.3.1"
 description = "File loader for streaming NDJSON.gz files to Parquet staging"
 edition.workspace = true
 rust-version.workspace = true
