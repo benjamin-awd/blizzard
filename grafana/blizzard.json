@@ -296,7 +296,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Time since the last successful checkpoint. High values indicate checkpoint issues.",
+      "description": "Rate of checkpoint saves per second",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -309,18 +309,10 @@
               {
                 "color": "green",
                 "value": 0
-              },
-              {
-                "color": "yellow",
-                "value": 300
-              },
-              {
-                "color": "red",
-                "value": 600
               }
             ]
           },
-          "unit": "s"
+          "unit": "ops"
         },
         "overrides": []
       },
@@ -333,7 +325,7 @@
       "id": 5,
       "options": {
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
@@ -355,12 +347,12 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(blizzard_checkpoint_age_seconds{job=~\"$job\", pod=~\"$pod\"})",
-          "legendFormat": "Age",
+          "expr": "sum(rate(blizzard_checkpoints_saved_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "legendFormat": "Checkpoints/s",
           "refId": "A"
         }
       ],
-      "title": "Checkpoint Age",
+      "title": "Checkpoint Rate",
       "type": "stat"
     },
     {
