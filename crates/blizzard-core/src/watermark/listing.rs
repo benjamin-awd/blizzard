@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use futures::StreamExt;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::error::StorageError;
 use crate::storage::StorageProvider;
@@ -18,6 +18,35 @@ pub struct FileListingConfig<'a> {
     pub extension: &'a str,
     /// Target identifier for logging (e.g., pipeline name or table name).
     pub target: &'a str,
+}
+
+/// Explain lexicographic comparison between two strings.
+/// Returns (comparison_result, explanation) showing the common prefix and divergence point.
+/// e.g. (Ordering::Less, "'17702[6]...' < '17702[7]...'")
+fn explain_comparison(a: &str, b: &str) -> (std::cmp::Ordering, String) {
+    let ordering = a.cmp(b);
+
+    for (i, (ca, cb)) in a.chars().zip(b.chars()).enumerate() {
+        if ca != cb {
+            let prefix: String = a.chars().take(i).collect();
+            let cmp_symbol = match ordering {
+                std::cmp::Ordering::Greater => ">",
+                std::cmp::Ordering::Less => "<",
+                std::cmp::Ordering::Equal => "=",
+            };
+            return (
+                ordering,
+                format!("'{prefix}[{ca}]...' {cmp_symbol} '{prefix}[{cb}]...'"),
+            );
+        }
+    }
+
+    // Strings equal up to shorter length - compare by length
+    match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => (ordering, "Equal".to_string()),
+        std::cmp::Ordering::Greater => (ordering, format!("Length {} > {}", a.len(), b.len())),
+        std::cmp::Ordering::Less => (ordering, format!("Length {} < {}", a.len(), b.len())),
+    }
 }
 
 /// Parse a watermark into (partition_prefix, filename).
@@ -94,10 +123,20 @@ pub async fn list_files_above_watermark(
     } else {
         // List partitions and filter to >= watermark partition
         let partitions = list_partitions(storage).await?;
+        let total_partitions = partitions.len();
         let relevant_partitions: Vec<_> = partitions
             .into_iter()
             .filter(|p| p.as_str() >= watermark_partition.as_str())
             .collect();
+
+        let skipped = total_partitions - relevant_partitions.len();
+        if skipped > 0 {
+            debug!(
+                target = %config.target,
+                skipped_count = skipped,
+                "Skipped partitions before watermark"
+            );
+        }
 
         debug!(
             target = %config.target,
@@ -114,7 +153,17 @@ pub async fn list_files_above_watermark(
                 let filename = file.split('/').next_back().unwrap_or(&file);
 
                 if partition == watermark_partition {
-                    if filename > watermark_filename.as_str() {
+                    let dominated = filename <= watermark_filename.as_str();
+                    if dominated {
+                        let (_, explanation) = explain_comparison(filename, &watermark_filename);
+                        trace!(
+                            target = %config.target,
+                            file = %filename,
+                            watermark = %watermark_filename,
+                            reason = %explanation,
+                            "File filtered (at or before watermark)"
+                        );
+                    } else {
                         files.push(file);
                     }
                 } else {

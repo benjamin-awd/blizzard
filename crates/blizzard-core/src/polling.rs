@@ -46,6 +46,14 @@ pub trait PollingProcessor {
     ///
     /// Called after `prepare` returns `Some(state)` to do the actual work.
     async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error>;
+
+    /// Finalize the processor on shutdown.
+    ///
+    /// Called once when the polling loop exits to save any pending state.
+    /// Default implementation is a no-op.
+    async fn finalize(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// Run a polling loop with the given processor.
@@ -60,7 +68,7 @@ pub trait PollingProcessor {
 /// The `service` parameter identifies the service ("blizzard" or "penguin") for metrics.
 /// The `poll_jitter_secs` parameter adds random jitter (0 to N seconds) on each
 /// iteration to prevent thundering herd when multiple pipelines poll simultaneously.
-pub async fn run_polling_loop<P: PollingProcessor>(
+pub async fn run_polling_loop<P: PollingProcessor + Send>(
     processor: &mut P,
     poll_interval: Duration,
     poll_jitter_secs: u64,
@@ -79,7 +87,7 @@ pub async fn run_polling_loop<P: PollingProcessor>(
 
             _ = shutdown_clone.cancelled() => {
                 info!(target = name, "Shutdown requested during initialization");
-                return Ok(());
+                break;
             }
 
             result = async {
@@ -162,5 +170,141 @@ pub async fn run_polling_loop<P: PollingProcessor>(
         }
     }
 
+    // Finalize processor on shutdown (e.g., save checkpoints)
+    processor.finalize().await?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A mock error type for testing.
+    #[derive(Debug)]
+    struct MockError;
+
+    impl std::fmt::Display for MockError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "mock error")
+        }
+    }
+
+    impl std::error::Error for MockError {}
+
+    /// A mock processor that tracks method calls.
+    struct MockProcessor {
+        prepare_count: Arc<AtomicUsize>,
+        process_count: Arc<AtomicUsize>,
+        finalize_called: Arc<AtomicBool>,
+        /// If true, prepare() returns None (no work to do)
+        no_work: bool,
+    }
+
+    impl MockProcessor {
+        fn new(finalize_called: Arc<AtomicBool>) -> Self {
+            Self {
+                prepare_count: Arc::new(AtomicUsize::new(0)),
+                process_count: Arc::new(AtomicUsize::new(0)),
+                finalize_called,
+                no_work: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PollingProcessor for MockProcessor {
+        type State = ();
+        type Error = MockError;
+
+        async fn prepare(&mut self, _cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
+            self.prepare_count.fetch_add(1, Ordering::SeqCst);
+            if self.no_work { Ok(None) } else { Ok(Some(())) }
+        }
+
+        async fn process(&mut self, _state: Self::State) -> Result<IterationResult, Self::Error> {
+            self.process_count.fetch_add(1, Ordering::SeqCst);
+            Ok(IterationResult::ProcessedItems)
+        }
+
+        async fn finalize(&mut self) -> Result<(), Self::Error> {
+            self.finalize_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Test that finalize() is called when shutdown occurs during poll wait.
+    #[tokio::test]
+    async fn test_finalize_called_on_shutdown_during_poll_wait() {
+        let finalize_called = Arc::new(AtomicBool::new(false));
+        let mut processor = MockProcessor::new(finalize_called.clone());
+
+        let shutdown = CancellationToken::new();
+        let shutdown_trigger = shutdown.clone();
+
+        // Spawn the polling loop
+        let handle = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                run_polling_loop(
+                    &mut processor,
+                    Duration::from_secs(60), // Long poll interval
+                    0,                       // No jitter
+                    shutdown,
+                    "test",
+                    "test",
+                )
+                .await
+            }
+        });
+
+        // Give the loop time to start and enter poll wait
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Trigger shutdown
+        shutdown_trigger.cancel();
+
+        // Wait for the loop to exit
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("polling loop should exit within timeout")
+            .expect("task should not panic");
+
+        assert!(result.is_ok(), "polling loop should exit cleanly");
+        assert!(
+            finalize_called.load(Ordering::SeqCst),
+            "finalize() should be called on shutdown"
+        );
+    }
+
+    /// Test that finalize() is called when shutdown occurs during processing.
+    #[tokio::test]
+    async fn test_finalize_called_on_shutdown_during_processing() {
+        let finalize_called = Arc::new(AtomicBool::new(false));
+        let mut processor = MockProcessor::new(finalize_called.clone());
+        processor.no_work = false; // Return work so process() is called
+
+        let shutdown = CancellationToken::new();
+
+        // Cancel immediately - shutdown will be detected during processing race
+        shutdown.cancel();
+
+        let result = run_polling_loop(
+            &mut processor,
+            Duration::from_secs(60),
+            0,
+            shutdown,
+            "test",
+            "test",
+        )
+        .await;
+
+        assert!(result.is_ok(), "polling loop should exit cleanly");
+        assert!(
+            finalize_called.load(Ordering::SeqCst),
+            "finalize() should be called on shutdown"
+        );
+    }
 }
