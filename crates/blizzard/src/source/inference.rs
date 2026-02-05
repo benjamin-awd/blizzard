@@ -121,28 +121,41 @@ impl FieldTypeTracker {
     }
 
     /// Build an Arrow schema from tracked types.
-    /// Returns the schema and a list of field names that had type conflicts.
+    /// Returns the schema and a list of field paths that had type conflicts.
     fn build_schema(&self) -> (Schema, Vec<String>) {
-        let mut fields = Vec::new();
         let mut conflicts = Vec::new();
+        let schema = self.build_schema_inner("", &mut conflicts);
+        (schema, conflicts)
+    }
+
+    /// Build schema, collecting conflicts into the provided vec.
+    fn build_schema_inner(&self, prefix: &str, conflicts: &mut Vec<String>) -> Schema {
+        let mut fields = Vec::new();
 
         for (name, types) in &self.field_types {
-            let (data_type, has_conflict) = self.infer_data_type(name, types);
-            if has_conflict {
-                conflicts.push(name.clone());
-            }
+            let full_path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+
+            let data_type = self.infer_data_type(name, types, &full_path, conflicts);
             fields.push(Field::new(name, data_type, true));
         }
 
         // Sort fields for deterministic schema ordering
         fields.sort_by(|a, b| a.name().cmp(b.name()));
-
-        (Schema::new(fields), conflicts)
+        Schema::new(fields)
     }
 
     /// Infer Arrow DataType from observed JSON types.
-    /// Returns (DataType, has_conflict).
-    fn infer_data_type(&self, field_name: &str, types: &HashSet<JsonType>) -> (DataType, bool) {
+    fn infer_data_type(
+        &self,
+        field_name: &str,
+        types: &HashSet<JsonType>,
+        full_path: &str,
+        conflicts: &mut Vec<String>,
+    ) -> DataType {
         // Remove Null from consideration for type inference
         let non_null_types: HashSet<_> = types
             .iter()
@@ -151,13 +164,12 @@ impl FieldTypeTracker {
             .collect();
 
         if non_null_types.is_empty() {
-            // All nulls - default to Utf8
-            return (DataType::Utf8, false);
+            return DataType::Utf8;
         }
 
         if non_null_types.len() == 1 {
             let single_type = non_null_types.iter().next().unwrap();
-            return (self.map_single_type(field_name, *single_type), false);
+            return self.map_single_type(field_name, *single_type, full_path, conflicts);
         }
 
         // Check for numeric widening (Int + Float -> Float64)
@@ -165,15 +177,22 @@ impl FieldTypeTracker {
             && non_null_types.contains(&JsonType::Integer)
             && non_null_types.contains(&JsonType::Float)
         {
-            return (DataType::Float64, false);
+            return DataType::Float64;
         }
 
         // Multiple incompatible types - use Utf8
-        (DataType::Utf8, true)
+        conflicts.push(full_path.to_string());
+        DataType::Utf8
     }
 
     /// Map a single JsonType to Arrow DataType.
-    fn map_single_type(&self, field_name: &str, json_type: JsonType) -> DataType {
+    fn map_single_type(
+        &self,
+        field_name: &str,
+        json_type: JsonType,
+        full_path: &str,
+        conflicts: &mut Vec<String>,
+    ) -> DataType {
         match json_type {
             JsonType::Null => DataType::Utf8,
             JsonType::Boolean => DataType::Boolean,
@@ -182,20 +201,25 @@ impl FieldTypeTracker {
             JsonType::String => DataType::Utf8,
             JsonType::Object => {
                 if let Some(nested) = self.nested_trackers.get(field_name) {
-                    let (nested_schema, _) = nested.build_schema();
+                    let nested_schema = nested.build_schema_inner(full_path, conflicts);
                     DataType::Struct(nested_schema.fields)
                 } else {
-                    // No nested data tracked, use Utf8
                     DataType::Utf8
                 }
             }
-            JsonType::Array => self.build_array_type(field_name),
+            JsonType::Array => self.build_array_type(field_name, full_path, conflicts),
         }
     }
 
     /// Build Arrow List type from tracked array element types.
-    fn build_array_type(&self, field_name: &str) -> DataType {
+    fn build_array_type(
+        &self,
+        field_name: &str,
+        full_path: &str,
+        conflicts: &mut Vec<String>,
+    ) -> DataType {
         let elem_types = self.array_element_types.get(field_name);
+        let array_item_path = format!("{full_path}[]");
 
         let inner_type = match elem_types {
             None => DataType::Utf8,
@@ -213,7 +237,8 @@ impl FieldTypeTracker {
                     match single_type {
                         JsonType::Object => {
                             if let Some(nested) = self.array_nested_trackers.get(field_name) {
-                                let (nested_schema, _) = nested.build_schema();
+                                let nested_schema =
+                                    nested.build_schema_inner(&array_item_path, conflicts);
                                 DataType::Struct(nested_schema.fields)
                             } else {
                                 DataType::Utf8
@@ -232,6 +257,8 @@ impl FieldTypeTracker {
                 {
                     DataType::Float64
                 } else {
+                    // Array element type conflict
+                    conflicts.push(array_item_path);
                     DataType::Utf8
                 }
             }
@@ -941,6 +968,198 @@ mod tests {
         assert!(
             !is_type_conflict_error(&other_err),
             "Should not match non-JSON errors"
+        );
+    }
+
+    #[test]
+    fn test_nested_conflict_reports_full_path() {
+        // Verify that conflicts in nested fields report the full path
+        let mut tracker = FieldTypeTracker::default();
+
+        // Record 1: nested.value is a number
+        let record1: Value =
+            serde_json::from_str(r#"{"nested": {"value": 123, "stable": "ok"}}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        // Record 2: nested.value is a string (conflict!)
+        let record2: Value =
+            serde_json::from_str(r#"{"nested": {"value": "string", "stable": "ok"}}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "nested.value"),
+            "Should report nested conflict with full path. Got: {conflicts:?}"
+        );
+        assert!(
+            !conflicts.iter().any(|c| c == "nested.stable"),
+            "Should not report non-conflicting nested field"
+        );
+    }
+
+    #[test]
+    fn test_array_nested_conflict_reports_full_path() {
+        // Verify that conflicts in array element fields report the full path
+        let mut tracker = FieldTypeTracker::default();
+
+        // Record 1: items[].count is a number
+        let record1: Value =
+            serde_json::from_str(r#"{"items": [{"count": 1}, {"count": 2}]}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        // Record 2: items[].count is a string (conflict!)
+        let record2: Value = serde_json::from_str(r#"{"items": [{"count": "many"}]}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "items[].count"),
+            "Should report array nested conflict with full path. Got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_conflict_reports_full_path() {
+        // Verify conflicts 3+ levels deep report the full path
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value =
+            serde_json::from_str(r#"{"a": {"b": {"c": {"deep_field": 123}}}}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value =
+            serde_json::from_str(r#"{"a": {"b": {"c": {"deep_field": "string"}}}}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "a.b.c.deep_field"),
+            "Should report deeply nested conflict with full path. Got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn test_multiple_conflicts_at_different_levels() {
+        let mut tracker = FieldTypeTracker::default();
+
+        // Record with various fields
+        let record1: Value =
+            serde_json::from_str(r#"{"top": 1, "nested": {"mid": true, "deep": {"bottom": 100}}}"#)
+                .unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        // Conflicts at top, mid, and deep levels
+        let record2: Value = serde_json::from_str(
+            r#"{"top": "string", "nested": {"mid": "string", "deep": {"bottom": "string"}}}"#,
+        )
+        .unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "top"),
+            "Should report top-level conflict. Got: {conflicts:?}"
+        );
+        assert!(
+            conflicts.iter().any(|c| c == "nested.mid"),
+            "Should report mid-level conflict. Got: {conflicts:?}"
+        );
+        assert!(
+            conflicts.iter().any(|c| c == "nested.deep.bottom"),
+            "Should report deep-level conflict. Got: {conflicts:?}"
+        );
+        assert_eq!(conflicts.len(), 3, "Should have exactly 3 conflicts");
+    }
+
+    #[test]
+    fn test_array_element_type_conflict() {
+        // Array with mixed primitive types (not nested objects)
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value = serde_json::from_str(r#"{"tags": [1, 2, 3]}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value = serde_json::from_str(r#"{"tags": ["a", "b"]}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "tags[]"),
+            "Should report array element type conflict. Got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn test_nested_array_in_nested_object() {
+        // nested.items[].value has a conflict
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value =
+            serde_json::from_str(r#"{"outer": {"items": [{"value": 1}, {"value": 2}]}}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value =
+            serde_json::from_str(r#"{"outer": {"items": [{"value": "text"}]}}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.iter().any(|c| c == "outer.items[].value"),
+            "Should report nested array object field conflict. Got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn test_no_false_positives_for_compatible_types() {
+        // Int + Float should widen to Float64, not be a conflict
+        let mut tracker = FieldTypeTracker::default();
+
+        let record1: Value = serde_json::from_str(r#"{"num": 42, "nested": {"val": 1}}"#).unwrap();
+        if let Value::Object(obj) = record1 {
+            tracker.track_object(&obj);
+        }
+
+        let record2: Value =
+            serde_json::from_str(r#"{"num": 3.14, "nested": {"val": 2.5}}"#).unwrap();
+        if let Value::Object(obj) = record2 {
+            tracker.track_object(&obj);
+        }
+
+        let (_schema, conflicts) = tracker.build_schema();
+
+        assert!(
+            conflicts.is_empty(),
+            "Int+Float widening should not be reported as conflict. Got: {conflicts:?}"
         );
     }
 }
