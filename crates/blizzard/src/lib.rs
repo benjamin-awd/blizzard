@@ -20,6 +20,11 @@ pub mod storage {
     pub use blizzard_core::storage::*;
 }
 
+/// Re-export watermark module from blizzard-core for convenience
+pub mod watermark {
+    pub use blizzard_core::watermark::*;
+}
+
 // Re-export commonly used items
 pub use config::Config;
 pub use error::PipelineError;

@@ -18,8 +18,8 @@ use crate::storage::DatePrefixGenerator;
 pub mod listing;
 
 pub use listing::{
-    FileListingConfig, list_files_above_watermark, list_files_cold_start, list_partitions,
-    parse_watermark,
+    FileListingConfig, list_files_above_partition_watermarks, list_files_above_watermark,
+    list_files_cold_start, list_partitions, parse_watermark,
 };
 
 /// Generate date prefixes from a partition filter config.
@@ -41,8 +41,8 @@ pub use listing::{
 /// ```
 /// use blizzard_core::watermark::generate_prefixes;
 ///
-/// // Generate prefixes for the last 3 days
-/// let prefixes = generate_prefixes("date=%Y-%m-%d", 3);
+/// // Generate prefixes for lookback of 2 days (today + 2 days back = 3 prefixes)
+/// let prefixes = generate_prefixes("date=%Y-%m-%d", 2);
 /// assert_eq!(prefixes.len(), 3);
 /// ```
 pub fn generate_prefixes(prefix_template: &str, lookback: u32) -> Vec<String> {

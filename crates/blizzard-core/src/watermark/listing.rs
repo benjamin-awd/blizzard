@@ -3,7 +3,7 @@
 //! This module provides the core watermark listing functionality used by both
 //! blizzard (NDJSON files) and penguin (Parquet files).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
 use tracing::{debug, trace, warn};
@@ -235,6 +235,111 @@ pub async fn list_files_cold_start(
             list_all_files(storage, config).await
         }
     }
+}
+
+/// List files using per-partition watermarks for efficient filtering.
+///
+/// For each partition:
+/// - If partition has an entry in `partition_watermarks` → filter files > watermark
+/// - If partition has no entry → include all files (new partition)
+///
+/// This avoids re-scanning entire partitions when only a subset has new files,
+/// which is common with concurrent hour partitions (e.g., 2 active partitions
+/// receiving 1000+ files each).
+///
+/// # Arguments
+///
+/// * `storage` - Storage provider for the source directory
+/// * `partition_watermarks` - Per-partition watermarks (partition prefix → filename watermark)
+/// * `prefixes` - Optional partition prefixes to filter (only scan matching partitions)
+/// * `config` - File listing configuration (extension and target for logging)
+///
+/// # Returns
+///
+/// List of file paths (relative to storage root) above their partition watermarks,
+/// sorted lexicographically for deterministic ordering.
+pub async fn list_files_above_partition_watermarks(
+    storage: &StorageProvider,
+    partition_watermarks: &HashMap<String, String>,
+    prefixes: Option<&[String]>,
+    config: &FileListingConfig<'_>,
+) -> Result<Vec<String>, StorageError> {
+    debug!(
+        target = %config.target,
+        partition_count = partition_watermarks.len(),
+        prefix_filter = ?prefixes,
+        extension = %config.extension,
+        "Listing files with per-partition watermarks"
+    );
+
+    let mut files = Vec::new();
+
+    // Determine which partitions to scan
+    let partitions_to_scan: Vec<String> = match prefixes {
+        Some(prefixes) if !prefixes.is_empty() => {
+            // Use provided prefixes directly - only scan these partitions
+            prefixes.to_vec()
+        }
+        _ => {
+            // No prefix filter - list all partitions
+            list_partitions(storage).await?
+        }
+    };
+
+    for partition in partitions_to_scan {
+        let partition_files = match list_files_in_partition(storage, &partition, config).await {
+            Ok(files) => files,
+            Err(e) if e.is_not_found() => {
+                debug!(target = %config.target, partition = %partition, "Partition not found, skipping");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        // Check if we have a watermark for this partition
+        match partition_watermarks.get(&partition) {
+            Some(watermark_filename) => {
+                // Filter files > watermark for this partition
+                let mut count = 0;
+                for file in partition_files {
+                    let filename = file.split('/').next_back().unwrap_or(&file);
+                    if filename > watermark_filename.as_str() {
+                        files.push(file);
+                        count += 1;
+                    }
+                }
+                debug!(
+                    target = %config.target,
+                    partition = %partition,
+                    watermark = %watermark_filename,
+                    new_files = count,
+                    "Filtered partition by watermark"
+                );
+            }
+            None => {
+                // New partition - include all files
+                let count = partition_files.len();
+                files.extend(partition_files);
+                debug!(
+                    target = %config.target,
+                    partition = %partition,
+                    files = count,
+                    "New partition - including all files"
+                );
+            }
+        }
+    }
+
+    // Sort by path for deterministic ordering
+    files.sort();
+
+    debug!(
+        target = %config.target,
+        count = files.len(),
+        "Found files above partition watermarks"
+    );
+
+    Ok(files)
 }
 
 /// List all files with the configured extension recursively.
@@ -569,5 +674,152 @@ mod tests {
         assert!(partitions.contains(&"date=2026-01-27".to_string()));
         assert!(partitions.contains(&"date=2026-01-28".to_string()));
         assert!(!partitions.iter().any(|p| p.starts_with('_')));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_partition_watermarks() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two partitions simulating concurrent hour partitions
+        let partition1 = temp_dir.path().join("date=2026-01-28");
+        let partition2 = temp_dir.path().join("date=2026-01-29");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+
+        // Partition 1: files before and after watermark
+        std::fs::write(partition1.join("file1.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition1.join("file2.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition1.join("file3.ndjson.gz"), b"").unwrap();
+
+        // Partition 2: all files (no watermark for this partition)
+        std::fs::write(partition2.join("file1.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition2.join("file2.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Only partition1 has a watermark
+        let mut partition_watermarks = HashMap::new();
+        partition_watermarks.insert("date=2026-01-28".to_string(), "file2.ndjson.gz".to_string());
+
+        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+            .await
+            .unwrap();
+
+        // Should find:
+        // - file3 from partition1 (above watermark)
+        // - file1 and file2 from partition2 (new partition, no watermark)
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&"date=2026-01-28/file3.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2026-01-29/file1.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2026-01-29/file2.ndjson.gz".to_string()));
+        // Should NOT include files at or before watermark
+        assert!(!files.contains(&"date=2026-01-28/file1.ndjson.gz".to_string()));
+        assert!(!files.contains(&"date=2026-01-28/file2.ndjson.gz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_partition_watermarks_all_have_watermarks() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create two partitions both with watermarks
+        let partition1 = temp_dir.path().join("date=2026-01-28");
+        let partition2 = temp_dir.path().join("date=2026-01-29");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+
+        std::fs::write(partition1.join("1000-uuid.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition1.join("2000-uuid.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition2.join("1000-uuid.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition2.join("2000-uuid.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Both partitions have watermarks
+        let mut partition_watermarks = HashMap::new();
+        partition_watermarks.insert("date=2026-01-28".to_string(), "1000-uuid.ndjson.gz".to_string());
+        partition_watermarks.insert("date=2026-01-29".to_string(), "1000-uuid.ndjson.gz".to_string());
+
+        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+            .await
+            .unwrap();
+
+        // Should find file2 from each partition (above their respective watermarks)
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"date=2026-01-28/2000-uuid.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2026-01-29/2000-uuid.ndjson.gz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_partition_watermarks_empty() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let partition = temp_dir.path().join("date=2026-01-28");
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("file1.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Empty partition watermarks - should include all files from all partitions
+        let partition_watermarks = HashMap::new();
+
+        let files = list_files_above_partition_watermarks(&storage, &partition_watermarks, None, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "date=2026-01-28/file1.ndjson.gz");
+    }
+
+    #[tokio::test]
+    async fn test_list_files_above_partition_watermarks_with_prefix_filter() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create multiple partitions
+        let partition1 = temp_dir.path().join("date=2026-01-27");
+        let partition2 = temp_dir.path().join("date=2026-01-28");
+        let partition3 = temp_dir.path().join("date=2026-01-29");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+        std::fs::create_dir_all(&partition3).unwrap();
+
+        // Files in each partition
+        std::fs::write(partition1.join("old-file.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition2.join("file1.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition2.join("file2.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition3.join("file1.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Partition watermarks for partition2 only
+        let mut partition_watermarks = HashMap::new();
+        partition_watermarks.insert("date=2026-01-28".to_string(), "file1.ndjson.gz".to_string());
+
+        // Only scan partition2 and partition3 (prefix filter excludes partition1)
+        let prefixes = vec!["date=2026-01-28".to_string(), "date=2026-01-29".to_string()];
+
+        let files = list_files_above_partition_watermarks(
+            &storage,
+            &partition_watermarks,
+            Some(&prefixes),
+            &config,
+        )
+        .await
+        .unwrap();
+
+        // Should find:
+        // - file2 from partition2 (above watermark for that partition)
+        // - file1 from partition3 (no watermark, but included in prefixes)
+        // Should NOT include:
+        // - old-file from partition1 (excluded by prefix filter)
+        // - file1 from partition2 (at or below watermark)
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"date=2026-01-28/file2.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2026-01-29/file1.ndjson.gz".to_string()));
+        assert!(!files.contains(&"date=2026-01-27/old-file.ndjson.gz".to_string()));
+        assert!(!files.contains(&"date=2026-01-28/file1.ndjson.gz".to_string()));
     }
 }

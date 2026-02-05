@@ -13,6 +13,8 @@
 //! Files must be named such that lexicographic order matches chronological order
 //! (e.g., using timestamp prefixes or UUIDv7).
 
+use std::collections::HashMap;
+
 use blizzard_core::error::StorageError;
 use blizzard_core::storage::StorageProvider;
 use blizzard_core::watermark::{self, FileListingConfig};
@@ -48,6 +50,45 @@ pub async fn list_ndjson_files_above_watermark(
         target: pipeline,
     };
 
+    match watermark {
+        Some(wm) => watermark::list_files_above_watermark(storage, wm, &config).await,
+        None => watermark::list_files_cold_start(storage, prefixes, &config).await,
+    }
+}
+
+/// List NDJSON files using per-partition watermarks for efficient filtering.
+///
+/// When partition watermarks are available and non-empty, uses them for
+/// more efficient filtering of concurrent partitions. Falls back to the
+/// global watermark when partition watermarks are empty.
+///
+/// # Arguments
+///
+/// * `storage` - Storage provider for the source directory
+/// * `watermark` - Optional global high-watermark (for fallback)
+/// * `partition_watermarks` - Per-partition watermarks (partition → filename)
+/// * `prefixes` - Optional partition prefixes to scan (for cold start)
+/// * `pipeline` - Pipeline identifier for logging
+pub async fn list_ndjson_files_with_partition_watermarks(
+    storage: &StorageProvider,
+    watermark: Option<&str>,
+    partition_watermarks: Option<&HashMap<String, String>>,
+    prefixes: Option<&[String]>,
+    pipeline: &str,
+) -> Result<Vec<String>, StorageError> {
+    let config = FileListingConfig {
+        extension: NDJSON_EXTENSION,
+        target: pipeline,
+    };
+
+    // Use partition watermarks if available and non-empty
+    if let Some(pw) = partition_watermarks
+        && !pw.is_empty() {
+            return watermark::list_files_above_partition_watermarks(storage, pw, prefixes, &config)
+                .await;
+        }
+
+    // Fall back to global watermark logic
     match watermark {
         Some(wm) => watermark::list_files_above_watermark(storage, wm, &config).await,
         None => watermark::list_files_cold_start(storage, prefixes, &config).await,
