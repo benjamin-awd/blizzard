@@ -1,4 +1,4 @@
-C---
+---
 title: Delta Lake Commits
 description: How Penguin commits staged Parquet files to Delta Lake
 ---

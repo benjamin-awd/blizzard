@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://benjamin-awd.github.io/blizzard/sitemap-index.xml
