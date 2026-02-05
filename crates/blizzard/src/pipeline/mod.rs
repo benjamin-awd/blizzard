@@ -65,6 +65,7 @@ impl Pipeline {
                 self.key.clone(),
                 self.config,
                 self.context.storage_pool,
+                self.context.global_semaphore,
                 self.context.shutdown.clone(),
             ) => result?,
         };

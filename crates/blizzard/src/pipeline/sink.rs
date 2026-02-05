@@ -192,7 +192,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let upload_task = UploadTask::spawn(storage, 4, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
         let partition_extractor = PartitionExtractor::new(vec!["date".into()]);
         let writer_config = ParquetWriterConfig::default();
 
@@ -226,7 +226,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let upload_task = UploadTask::spawn(storage, 4, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
         let partition_extractor = PartitionExtractor::all();
         let writer_config = ParquetWriterConfig::default();
 

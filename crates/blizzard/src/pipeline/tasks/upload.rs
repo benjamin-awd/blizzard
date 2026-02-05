@@ -26,8 +26,9 @@
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -62,7 +63,12 @@ impl UploadTask {
     /// Spawn the uploader task.
     ///
     /// See module-level docs for why this doesn't take a shutdown token.
-    pub fn spawn(storage: StorageProviderRef, max_concurrent: usize, pipeline: String) -> Self {
+    pub fn spawn(
+        storage: StorageProviderRef,
+        max_concurrent: usize,
+        global_semaphore: Option<Arc<Semaphore>>,
+        pipeline: String,
+    ) -> Self {
         let (file_tx, file_rx) = mpsc::channel(max_concurrent);
         // Result channel is bounded - callers must poll try_recv() to drain results
         // during operation to prevent blocking the upload task.
@@ -73,6 +79,7 @@ impl UploadTask {
             result_tx,
             storage,
             max_concurrent,
+            global_semaphore,
             pipeline,
         ));
 
@@ -131,6 +138,7 @@ impl UploadTask {
         result_tx: mpsc::Sender<Result<UploadedFile, TableWriteError>>,
         storage: StorageProviderRef,
         max_concurrent: usize,
+        global_semaphore: Option<Arc<Semaphore>>,
         pipeline: String,
     ) {
         let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
@@ -217,7 +225,14 @@ impl UploadTask {
                         file.filename, active_uploads, max_concurrent
                     );
 
+                    let semaphore = global_semaphore.clone();
                     uploads.push(Box::pin(async move {
+                        // Acquire global semaphore permit if configured
+                        let _permit = if let Some(ref sem) = semaphore {
+                            Some(sem.acquire().await.expect("semaphore should not be closed"))
+                        } else {
+                            None
+                        };
                         (upload_file(storage, file, pipeline_clone).await, size)
                     }));
                 }
@@ -360,7 +375,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let upload_task = UploadTask::spawn(storage, 4, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
 
         // Send a file - this should succeed
         upload_task.send(test_file("file1.parquet")).await.unwrap();
@@ -388,7 +403,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let upload_task = UploadTask::spawn(storage, 2, "test".to_string());
+        let upload_task = UploadTask::spawn(storage, 2, None, "test".to_string());
 
         // Send multiple files
         for i in 0..5 {
@@ -425,7 +440,7 @@ mod tests {
         );
 
         // Use max_concurrent=1 to maximize pressure on the result channel.
-        let mut upload_task = UploadTask::spawn(storage, 1, "test".to_string());
+        let mut upload_task = UploadTask::spawn(storage, 1, None, "test".to_string());
 
         let file_count = 10;
 
@@ -480,7 +495,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let mut upload_task = UploadTask::spawn(storage, 4, "test".to_string());
+        let mut upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
 
         // Send files
         for i in 0..4 {
