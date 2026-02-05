@@ -101,7 +101,7 @@ impl Downloader {
         let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
         let mut files_since_save: usize = 0;
         let mut files_processed: usize = 0;
-        let mut util_timer = UtilizationTimer::new("processor");
+        let mut util_timer = UtilizationTimer::new(&self.pipeline_key);
 
         // Emit initial pending files count
         emit!(PendingFiles {

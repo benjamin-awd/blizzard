@@ -15,7 +15,6 @@ use tracing::{debug, warn};
 use blizzard_core::StorageProviderRef;
 use blizzard_core::emit;
 use blizzard_core::error::StorageError;
-use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::{ActiveDownloads, FileDownloadCompleted};
 
 use super::super::tracker::SourcedFile;
@@ -92,7 +91,6 @@ impl DownloadTask {
 
         let mut pending_iter = pending_files.into_iter();
         let mut active_downloads = 0;
-        let mut util_timer = UtilizationTimer::new("downloader");
 
         // Start initial downloads
         for sourced_file in pending_iter.by_ref().take(max_concurrent) {
@@ -107,10 +105,6 @@ impl DownloadTask {
                 }
             };
             let pipeline_clone = pipeline.clone();
-            // First download starts working state
-            if active_downloads == 0 {
-                util_timer.stop_wait();
-            }
             active_downloads += 1;
             emit!(ActiveDownloads {
                 count: active_downloads,
@@ -140,8 +134,6 @@ impl DownloadTask {
 
         // Process downloads and start new ones as they complete
         while let Some(result) = downloads.next().await {
-            util_timer.maybe_update();
-
             if shutdown.is_cancelled() {
                 debug!("[download] Shutdown requested, stopping downloads");
                 break;
@@ -152,11 +144,6 @@ impl DownloadTask {
                 count: active_downloads,
                 target: pipeline.clone(),
             });
-
-            // Update utilization state: waiting if no active downloads
-            if active_downloads == 0 {
-                util_timer.start_wait();
-            }
 
             // Send result to consumer (decompress+parse)
             let should_continue = match &result {
@@ -198,10 +185,6 @@ impl DownloadTask {
                     }
                 };
                 let pipeline_clone = pipeline.clone();
-                // Transition to working state when we have downloads
-                if active_downloads == 0 {
-                    util_timer.stop_wait();
-                }
                 active_downloads += 1;
                 emit!(ActiveDownloads {
                     count: active_downloads,
