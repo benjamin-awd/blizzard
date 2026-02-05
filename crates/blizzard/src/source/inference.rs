@@ -55,8 +55,8 @@ enum JsonType {
     Object,
 }
 
-impl JsonType {
-    fn from_value(value: &Value) -> Self {
+impl From<&Value> for JsonType {
+    fn from(value: &Value) -> Self {
         match value {
             Value::Null => JsonType::Null,
             Value::Bool(_) => JsonType::Bool,
@@ -82,7 +82,7 @@ struct ObservedTypes {
 
 impl ObservedTypes {
     fn observe(&mut self, value: &Value) {
-        let json_type = JsonType::from_value(value);
+        let json_type = JsonType::from(value);
 
         match value {
             Value::Null => {}
