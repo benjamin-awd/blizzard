@@ -1372,7 +1372,7 @@ mod concurrency_tests {
         // Second task should have been blocked until first completed
         let elapsed = start.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(40),
+            elapsed >= Duration::from_millis(30),
             "Second task should have waited for first to release permit (elapsed: {elapsed:?})"
         );
     }

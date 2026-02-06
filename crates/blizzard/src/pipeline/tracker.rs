@@ -6,6 +6,8 @@
 //!
 //! For multi-source pipelines, `MultiSourceTracker` aggregates per-source trackers.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use blizzard_core::StorageProviderRef;
 use blizzard_core::storage::list_ndjson_files_with_prefixes;
@@ -25,14 +27,6 @@ pub trait StateTracker: Send + Sync {
     /// Returns a message describing the initialization result for logging.
     async fn init(&mut self) -> Result<Option<String>, PipelineError>;
 
-    /// List pending files from storage, filtering out already-processed ones.
-    async fn list_pending(
-        &self,
-        storage: &StorageProviderRef,
-        prefixes: Option<&[String]>,
-        pipeline_key: &str,
-    ) -> Result<Vec<String>, PipelineError>;
-
     /// Mark a file as processed.
     fn mark_processed(&mut self, path: &str);
 
@@ -50,6 +44,69 @@ pub trait StateTracker: Send + Sync {
 
     /// Describe the mode (for logging).
     fn mode_name(&self) -> &'static str;
+
+    /// Capture a snapshot of this tracker's state for file discovery.
+    ///
+    /// Returns a lightweight snapshot that can be moved into a spawned task
+    /// to list pending files without borrowing the tracker.
+    fn discovery_snapshot(&self) -> DiscoverySnapshot;
+}
+
+/// Snapshot of a tracker's listing state for use in spawned discovery tasks.
+///
+/// Captures the data needed to list and filter pending files without borrowing
+/// the tracker. This allows the discovery task to run concurrently with
+/// file processing (which needs `&mut` access to the tracker for `mark_processed`).
+pub enum DiscoverySnapshot {
+    /// Watermark-based: list files above the watermark.
+    Watermark {
+        watermark: Option<String>,
+        partition_watermarks: HashMap<String, String>,
+    },
+    /// HashSet-based: list all files and exclude already-processed ones.
+    Processed {
+        processed_files: HashMap<String, ()>,
+    },
+}
+
+impl DiscoverySnapshot {
+    /// List pending files using this snapshot's filtering strategy.
+    pub async fn list_pending(
+        &self,
+        storage: &StorageProviderRef,
+        prefixes: Option<&[String]>,
+        pipeline_key: &str,
+    ) -> Result<Vec<String>, PipelineError> {
+        match self {
+            DiscoverySnapshot::Watermark {
+                watermark,
+                partition_watermarks,
+            } => {
+                let pw = if partition_watermarks.is_empty() {
+                    None
+                } else {
+                    Some(partition_watermarks)
+                };
+                list_ndjson_files_with_partition_watermarks(
+                    storage,
+                    watermark.as_deref(),
+                    pw,
+                    prefixes,
+                    pipeline_key,
+                )
+                .await
+                .map_err(Into::into)
+            }
+            DiscoverySnapshot::Processed { processed_files } => {
+                let all_files =
+                    list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key).await?;
+                Ok(all_files
+                    .into_iter()
+                    .filter(|f| !processed_files.contains_key(f))
+                    .collect())
+            }
+        }
+    }
 }
 
 /// Watermark-based state tracker that persists to storage.
@@ -82,24 +139,6 @@ impl StateTracker for WatermarkTracker {
         }
     }
 
-    async fn list_pending(
-        &self,
-        storage: &StorageProviderRef,
-        prefixes: Option<&[String]>,
-        pipeline_key: &str,
-    ) -> Result<Vec<String>, PipelineError> {
-        // Use partition watermarks for more efficient per-partition filtering
-        list_ndjson_files_with_partition_watermarks(
-            storage,
-            self.checkpoint_manager.watermark(),
-            Some(self.checkpoint_manager.partition_watermarks()),
-            prefixes,
-            pipeline_key,
-        )
-        .await
-        .map_err(Into::into)
-    }
-
     fn mark_processed(&mut self, path: &str) {
         self.checkpoint_manager.update_watermark(path);
     }
@@ -121,6 +160,13 @@ impl StateTracker for WatermarkTracker {
 
     fn mode_name(&self) -> &'static str {
         "watermark"
+    }
+
+    fn discovery_snapshot(&self) -> DiscoverySnapshot {
+        DiscoverySnapshot::Watermark {
+            watermark: self.checkpoint_manager.watermark().map(|s| s.to_string()),
+            partition_watermarks: self.checkpoint_manager.partition_watermarks().clone(),
+        }
     }
 }
 
@@ -152,16 +198,6 @@ impl StateTracker for HashMapTracker {
         Ok(None) // No persistent state to load
     }
 
-    async fn list_pending(
-        &self,
-        storage: &StorageProviderRef,
-        prefixes: Option<&[String]>,
-        pipeline_key: &str,
-    ) -> Result<Vec<String>, PipelineError> {
-        let all_files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key).await?;
-        Ok(self.source_state.filter_pending_files(all_files))
-    }
-
     fn mark_processed(&mut self, path: &str) {
         self.source_state.mark_finished(path);
     }
@@ -176,6 +212,12 @@ impl StateTracker for HashMapTracker {
 
     fn mode_name(&self) -> &'static str {
         "hashmap"
+    }
+
+    fn discovery_snapshot(&self) -> DiscoverySnapshot {
+        DiscoverySnapshot::Processed {
+            processed_files: self.source_state.files.clone(),
+        }
     }
 }
 
@@ -246,47 +288,6 @@ impl MultiSourceTracker {
         Ok(())
     }
 
-    /// List all pending files from all sources.
-    ///
-    /// Returns files tagged with their source name for proper routing during processing.
-    pub async fn list_all_pending(
-        &self,
-        storages: &IndexMap<String, StorageProviderRef>,
-        configs: &IndexMap<String, &SourceConfig>,
-    ) -> Result<Vec<SourcedFile>, PipelineError> {
-        let mut all_pending = Vec::new();
-
-        for (source_name, tracker) in &self.trackers {
-            let storage = storages
-                .get(source_name)
-                .ok_or_else(|| PipelineError::Config {
-                    source: ConfigError::Internal {
-                        message: format!("No storage provider for source '{source_name}'"),
-                    },
-                })?;
-
-            let config = configs
-                .get(source_name)
-                .ok_or_else(|| PipelineError::Config {
-                    source: ConfigError::Internal {
-                        message: format!("No config for source '{source_name}'"),
-                    },
-                })?;
-
-            let prefixes = config.date_prefixes();
-            let pending = tracker
-                .list_pending(storage, prefixes.as_deref(), &self.pipeline_key)
-                .await?;
-
-            all_pending.extend(pending.into_iter().map(|path| SourcedFile {
-                source_name: source_name.clone(),
-                path,
-            }));
-        }
-
-        Ok(all_pending)
-    }
-
     /// Mark a file as processed in the appropriate source tracker.
     pub fn mark_processed(&mut self, source_name: &str, path: &str) {
         if let Some(tracker) = self.trackers.get_mut(source_name) {
@@ -338,5 +339,226 @@ impl MultiSourceTracker {
     /// Get total tracked count across all sources.
     pub fn tracked_count(&self) -> usize {
         self.trackers.values().map(|t| t.tracked_count()).sum()
+    }
+
+    /// Build per-source discovery data for spawning a DiscoveryTask.
+    ///
+    /// Takes snapshots of each tracker's state and pairs them with the
+    /// corresponding storage provider and config prefixes.
+    pub fn discovery_sources(
+        &self,
+        storages: &IndexMap<String, StorageProviderRef>,
+        configs: &IndexMap<String, &SourceConfig>,
+    ) -> Result<IndexMap<String, DiscoverySource>, PipelineError> {
+        let mut sources = IndexMap::new();
+
+        for (source_name, tracker) in &self.trackers {
+            let storage = storages
+                .get(source_name)
+                .ok_or_else(|| PipelineError::Config {
+                    source: ConfigError::Internal {
+                        message: format!("No storage provider for source '{source_name}'"),
+                    },
+                })?
+                .clone();
+
+            let config = configs
+                .get(source_name)
+                .ok_or_else(|| PipelineError::Config {
+                    source: ConfigError::Internal {
+                        message: format!("No config for source '{source_name}'"),
+                    },
+                })?;
+
+            sources.insert(
+                source_name.clone(),
+                DiscoverySource {
+                    storage,
+                    snapshot: tracker.discovery_snapshot(),
+                    prefixes: config.date_prefixes(),
+                },
+            );
+        }
+
+        Ok(sources)
+    }
+}
+
+/// Per-source data needed by the discovery task.
+pub struct DiscoverySource {
+    /// Storage provider for listing files.
+    pub storage: StorageProviderRef,
+    /// Snapshot of the tracker's state for filtering.
+    pub snapshot: DiscoverySnapshot,
+    /// Optional date prefixes to narrow the listing.
+    pub prefixes: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn create_test_storage(temp_dir: &TempDir) -> StorageProviderRef {
+        Arc::new(
+            blizzard_core::storage::StorageProvider::for_url_with_options(
+                temp_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    /// Helper to create ndjson.gz files in a temp directory.
+    fn create_files(temp_dir: &TempDir, paths: &[&str]) {
+        for path in paths {
+            let full_path = temp_dir.path().join(path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full_path, b"").unwrap();
+        }
+    }
+
+    // =========================================================================
+    // DiscoverySnapshot::list_pending — Watermark variant
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_watermark_snapshot_filters_above_watermark() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(
+            &temp_dir,
+            &[
+                "date=2026-01-28/1738100100-a.ndjson.gz",
+                "date=2026-01-28/1738100200-b.ndjson.gz",
+                "date=2026-01-28/1738100300-c.ndjson.gz",
+            ],
+        );
+
+        let storage = create_test_storage(&temp_dir).await;
+        let snapshot = DiscoverySnapshot::Watermark {
+            watermark: Some("date=2026-01-28/1738100200-b.ndjson.gz".to_string()),
+            partition_watermarks: HashMap::new(),
+        };
+
+        let files = snapshot.list_pending(&storage, None, "test").await.unwrap();
+
+        assert_eq!(files, vec!["date=2026-01-28/1738100300-c.ndjson.gz"]);
+    }
+
+    #[tokio::test]
+    async fn test_watermark_snapshot_cold_start_returns_all() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(
+            &temp_dir,
+            &[
+                "date=2026-01-28/file1.ndjson.gz",
+                "date=2026-01-28/file2.ndjson.gz",
+            ],
+        );
+
+        let storage = create_test_storage(&temp_dir).await;
+        let snapshot = DiscoverySnapshot::Watermark {
+            watermark: None,
+            partition_watermarks: HashMap::new(),
+        };
+
+        let files = snapshot.list_pending(&storage, None, "test").await.unwrap();
+
+        assert_eq!(files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_watermark_snapshot_with_prefixes() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(
+            &temp_dir,
+            &[
+                "date=2026-01-27/old.ndjson.gz",
+                "date=2026-01-28/new.ndjson.gz",
+            ],
+        );
+
+        let storage = create_test_storage(&temp_dir).await;
+        let snapshot = DiscoverySnapshot::Watermark {
+            watermark: None,
+            partition_watermarks: HashMap::new(),
+        };
+
+        let prefixes = vec!["date=2026-01-28".to_string()];
+        let files = snapshot
+            .list_pending(&storage, Some(&prefixes), "test")
+            .await
+            .unwrap();
+
+        assert_eq!(files, vec!["date=2026-01-28/new.ndjson.gz"]);
+    }
+
+    // =========================================================================
+    // DiscoverySnapshot::list_pending — Processed (hashmap) variant
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_processed_snapshot_excludes_finished_files() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(
+            &temp_dir,
+            &[
+                "date=2026-01-28/file1.ndjson.gz",
+                "date=2026-01-28/file2.ndjson.gz",
+                "date=2026-01-28/file3.ndjson.gz",
+            ],
+        );
+
+        let storage = create_test_storage(&temp_dir).await;
+        let mut processed_files = HashMap::new();
+        processed_files.insert("date=2026-01-28/file1.ndjson.gz".to_string(), ());
+        processed_files.insert("date=2026-01-28/file3.ndjson.gz".to_string(), ());
+
+        let snapshot = DiscoverySnapshot::Processed { processed_files };
+
+        let files = snapshot.list_pending(&storage, None, "test").await.unwrap();
+
+        assert_eq!(files, vec!["date=2026-01-28/file2.ndjson.gz"]);
+    }
+
+    #[tokio::test]
+    async fn test_processed_snapshot_empty_returns_all() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(
+            &temp_dir,
+            &[
+                "date=2026-01-28/file1.ndjson.gz",
+                "date=2026-01-28/file2.ndjson.gz",
+            ],
+        );
+
+        let storage = create_test_storage(&temp_dir).await;
+        let snapshot = DiscoverySnapshot::Processed {
+            processed_files: HashMap::new(),
+        };
+
+        let files = snapshot.list_pending(&storage, None, "test").await.unwrap();
+
+        assert_eq!(files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_processed_snapshot_all_finished_returns_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        create_files(&temp_dir, &["date=2026-01-28/file1.ndjson.gz"]);
+
+        let storage = create_test_storage(&temp_dir).await;
+        let mut processed_files = HashMap::new();
+        processed_files.insert("date=2026-01-28/file1.ndjson.gz".to_string(), ());
+
+        let snapshot = DiscoverySnapshot::Processed { processed_files };
+
+        let files = snapshot.list_pending(&storage, None, "test").await.unwrap();
+
+        assert!(files.is_empty());
     }
 }

@@ -95,19 +95,19 @@ impl Downloader {
         ctx: &mut ProcessingContext<'_>,
         shutdown: CancellationToken,
         checkpoint_config: &IncrementalCheckpointConfig,
-        total_files: usize,
     ) -> Result<IterationResult, PipelineError> {
         let mut pending: VecDeque<ProcessedFile> = VecDeque::new();
         let mut files_since_save: usize = 0;
+        let mut files_downloaded: usize = 0;
         let mut files_processed: usize = 0;
         let mut util_timer = UtilizationTimer::new(&self.pipeline_key);
 
         // Track how many files have been spawned but not yet fully consumed.
         let mut files_in_flight: usize = 0;
 
-        // Emit initial pending files count
+        // Emit initial pending files count (0 — discovery is still running)
         emit!(PendingFiles {
-            count: total_files,
+            count: 0,
             target: self.pipeline_key.clone(),
         });
 
@@ -142,10 +142,10 @@ impl Downloader {
                 self.handle_processed_file(processed, ctx, &mut files_in_flight)
                     .await?;
 
-                // Update pending files count
+                // Update pending files count (discovered minus processed)
                 files_processed += 1;
                 emit!(PendingFiles {
-                    count: total_files.saturating_sub(files_processed),
+                    count: files_downloaded.saturating_sub(files_processed),
                     target: self.pipeline_key.clone(),
                 });
 
@@ -182,7 +182,12 @@ impl Downloader {
                             if files_in_flight == 0 {
                                 util_timer.stop_wait();
                             }
+                            files_downloaded += 1;
                             files_in_flight += 1;
+                            emit!(PendingFiles {
+                                count: files_downloaded.saturating_sub(files_processed),
+                                target: self.pipeline_key.clone(),
+                            });
                             pending.push_back(spawn_read_task(downloaded, &self.readers));
                         }
                         Some(Err(e)) => {
@@ -191,10 +196,11 @@ impl Downloader {
                                 .record_failure(&e.to_string(), FailureStage::Download)
                                 .await?;
 
-                            // Update pending files count for failed download
+                            // Count failed downloads for pending metric
+                            files_downloaded += 1;
                             files_processed += 1;
                             emit!(PendingFiles {
-                                count: total_files.saturating_sub(files_processed),
+                                count: files_downloaded.saturating_sub(files_processed),
                                 target: self.pipeline_key.clone(),
                             });
                         }
@@ -208,7 +214,11 @@ impl Downloader {
             }
         }
 
-        Ok(IterationResult::ProcessedItems)
+        if files_processed == 0 {
+            Ok(IterationResult::NoItems)
+        } else {
+            Ok(IterationResult::ProcessedItems)
+        }
     }
 
     /// Tick the checkpoint interval timer if it exists.
