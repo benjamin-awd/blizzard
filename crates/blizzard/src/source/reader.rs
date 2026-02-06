@@ -29,10 +29,6 @@ use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
 use super::traits::FileReader;
 
-/// Result of reading batches: `Break` if the consumer stopped early, `Continue`
-/// if all input was consumed. The payload is `(batch_count, total_records)`.
-type ReadFlow = ControlFlow<(usize, usize), (usize, usize)>;
-
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]
 pub struct NdjsonReaderConfig {
@@ -120,9 +116,7 @@ impl NdjsonReader {
         let (batch_count, total_records) = if self.config.coerce_objects_to_strings {
             self.read_with_coercion(buf_reader, path, on_batch)?
         } else {
-            match self.read_with_arrow(buf_reader, path, on_batch)? {
-                ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
-            }
+            self.read_with_arrow(buf_reader, path, on_batch)?
         };
 
         emit!(FileDecompressionCompleted {
@@ -139,15 +133,12 @@ impl NdjsonReader {
     }
 
     /// Read using Arrow's optimized JSON reader (standard mode).
-    ///
-    /// Invokes callback per batch. Returns `Break` if the callback signalled
-    /// early termination, `Continue` if all input was consumed.
     fn read_with_arrow<R: BufRead>(
         &self,
         reader: R,
         path: &str,
         on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
-    ) -> Result<ReadFlow, ReaderError> {
+    ) -> Result<(usize, usize), ReaderError> {
         let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
             .with_batch_size(self.config.batch_size)
             .with_strict_mode(false)
@@ -175,11 +166,11 @@ impl NdjsonReader {
             batch_count += 1;
 
             if on_batch(batch).is_break() {
-                return Ok(ControlFlow::Break((batch_count, total_records)));
+                return Ok((batch_count, total_records));
             }
         }
 
-        Ok(ControlFlow::Continue((batch_count, total_records)))
+        Ok((batch_count, total_records))
     }
 
     /// Read using serde_json preprocessing with object-to-string coercion.
