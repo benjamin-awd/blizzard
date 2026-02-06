@@ -28,6 +28,10 @@ use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
 use super::traits::FileReader;
 
+/// Result of reading batches: `Break` if the consumer stopped early, `Continue`
+/// if all input was consumed. The payload is `(batch_count, total_records)`.
+type ReadFlow = ControlFlow<(usize, usize), (usize, usize)>;
+
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]
 pub struct NdjsonReaderConfig {
@@ -115,7 +119,9 @@ impl NdjsonReader {
         let (batch_count, total_records) = if self.config.coerce_objects_to_strings {
             self.read_with_coercion(buf_reader, path, on_batch)?
         } else {
-            self.read_with_arrow(buf_reader, path, on_batch)?
+            match self.read_with_arrow(buf_reader, path, on_batch)? {
+                ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
+            }
         };
 
         emit!(FileDecompressionCompleted {
@@ -133,13 +139,14 @@ impl NdjsonReader {
 
     /// Read using Arrow's optimized JSON reader (standard mode).
     ///
-    /// Invokes callback per batch. Returns (batch_count, total_records).
+    /// Invokes callback per batch. Returns `Break` if the callback signalled
+    /// early termination, `Continue` if all input was consumed.
     fn read_with_arrow<R: BufRead>(
         &self,
         reader: R,
         path: &str,
         on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
-    ) -> Result<(usize, usize), ReaderError> {
+    ) -> Result<ReadFlow, ReaderError> {
         let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
             .with_batch_size(self.config.batch_size)
             .with_strict_mode(false)
@@ -167,11 +174,11 @@ impl NdjsonReader {
             batch_count += 1;
 
             if on_batch(batch).is_break() {
-                break;
+                return Ok(ControlFlow::Break((batch_count, total_records)));
             }
         }
 
-        Ok((batch_count, total_records))
+        Ok(ControlFlow::Continue((batch_count, total_records)))
     }
 
     /// Read using serde_json preprocessing with object-to-string coercion.
@@ -182,14 +189,16 @@ impl NdjsonReader {
     /// 3. Re-serializes and passes to Arrow's reader
     ///
     /// This is slower than direct Arrow reading but handles type conflicts.
-    /// Still collects lines for coercion preprocessing, then streams Arrow batches via callback.
+    /// Processes lines in `batch_size` chunks so memory stays bounded.
     fn read_with_coercion<R: BufRead>(
         &self,
         reader: R,
         path: &str,
         on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
     ) -> Result<(usize, usize), ReaderError> {
-        let mut coerced_lines: Vec<String> = Vec::new();
+        let mut chunk: Vec<String> = Vec::with_capacity(self.config.batch_size);
+        let mut batch_count = 0;
+        let mut total_records = 0;
 
         for (line_num, line_result) in reader.lines().enumerate() {
             let line = line_result.map_err(|e| ReaderError::ZstdDecompression {
@@ -223,13 +232,43 @@ impl NdjsonReader {
                 .build()
             })?;
 
-            coerced_lines.push(coerced_line);
+            chunk.push(coerced_line);
+
+            if chunk.len() >= self.config.batch_size {
+                let flow = self.flush_coerced_chunk(&chunk, path, on_batch)?;
+                let (bc, tr) = match flow {
+                    ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
+                };
+                batch_count += bc;
+                total_records += tr;
+                chunk.clear();
+                if flow.is_break() {
+                    return Ok((batch_count, total_records));
+                }
+            }
         }
 
-        // Join lines and pass to Arrow's reader, streaming batches via callback
-        let coerced_ndjson = coerced_lines.join("\n");
-        let cursor = Cursor::new(coerced_ndjson.as_bytes());
+        // Flush remaining lines
+        if !chunk.is_empty() {
+            let (bc, tr) = match self.flush_coerced_chunk(&chunk, path, on_batch)? {
+                ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
+            };
+            batch_count += bc;
+            total_records += tr;
+        }
 
+        Ok((batch_count, total_records))
+    }
+
+    /// Flush a chunk of coerced NDJSON lines through Arrow's reader.
+    fn flush_coerced_chunk(
+        &self,
+        chunk: &[String],
+        path: &str,
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<ReadFlow, ReaderError> {
+        let ndjson = chunk.join("\n");
+        let cursor = Cursor::new(ndjson.as_bytes());
         self.read_with_arrow(cursor, path, on_batch)
     }
 }
