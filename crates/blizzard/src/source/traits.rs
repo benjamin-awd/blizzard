@@ -2,32 +2,34 @@
 //!
 //! Provides extensibility for different file format readers through the FileReader trait.
 
+use std::ops::ControlFlow;
+
 use bytes::Bytes;
 use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
 
 use crate::error::ReaderError;
 
-/// Result of reading and parsing a file.
-#[derive(Debug)]
-pub struct ReadResult {
-    /// Parsed record batches.
-    pub batches: Vec<RecordBatch>,
-    /// Total number of records read.
-    pub total_records: usize,
-}
-
 /// Trait for file readers that convert raw bytes to Arrow RecordBatches.
 ///
 /// Implementations can support different file formats (NDJSON, CSV, etc.)
 /// while presenting a unified interface to the pipeline.
 pub trait FileReader: Send + Sync {
-    /// Read raw bytes and parse them into record batches.
+    /// Stream parsed batches via callback. Returns total records read.
+    ///
+    /// The callback returns `ControlFlow::Continue(())` to keep reading or
+    /// `ControlFlow::Break(())` to stop early (e.g. when the receiver is dropped).
     ///
     /// # Arguments
     /// * `data` - The raw file data (may be compressed)
     /// * `path` - File path (used for error messages and logging)
-    fn read(&self, data: Bytes, path: &str) -> Result<ReadResult, ReaderError>;
+    /// * `on_batch` - Callback invoked for each parsed batch
+    fn read_batches(
+        &self,
+        data: Bytes,
+        path: &str,
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<usize, ReaderError>;
 
     /// Get the schema used by this reader.
     fn schema(&self) -> &SchemaRef;

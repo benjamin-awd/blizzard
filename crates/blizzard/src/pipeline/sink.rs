@@ -4,13 +4,14 @@ use std::path::Path;
 
 use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
+use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use blizzard_core::metrics::events::{BatchesProcessed, BytesWritten, RecordsProcessed};
 use blizzard_core::{PartitionExtractor, emit};
 
 use super::tasks::UploadTask;
-use crate::error::PipelineError;
+use crate::error::{PipelineError, ReaderError};
 use crate::parquet::{ParquetWriter, ParquetWriterConfig};
 
 /// High-level sink that handles the full output path: serialization and storage.
@@ -58,22 +59,25 @@ impl Sink {
         Ok(())
     }
 
-    /// Process batches from a source file: extract partitions, write batches, persist rolled files.
+    /// Consume batches from a channel, writing each to parquet as it arrives.
     ///
     /// Returns the number of records written.
-    pub async fn write_file_batches(
+    pub async fn write_file_stream(
         &mut self,
         path: &str,
-        batches: Vec<RecordBatch>,
+        batch_rx: &mut mpsc::Receiver<Result<RecordBatch, ReaderError>>,
     ) -> Result<usize, PipelineError> {
         let partition_values = self.partition_extractor.extract(path);
         self.batch_writer.set_partition_context(partition_values)?;
 
-        let batch_count = batches.len();
-        let mut total_records = 0;
+        let mut batch_count: usize = 0;
+        let mut total_records: usize = 0;
 
-        for batch in batches {
+        while let Some(batch_result) = batch_rx.recv().await {
+            let batch = batch_result.map_err(|e| PipelineError::Reader { source: e })?;
+
             total_records += batch.num_rows();
+            batch_count += 1;
             self.batch_writer.write_batch(&batch)?;
         }
 
@@ -182,6 +186,17 @@ mod tests {
         .unwrap()
     }
 
+    /// Helper: send batches through a channel and return the receiver.
+    fn send_batches(batches: Vec<RecordBatch>) -> mpsc::Receiver<Result<RecordBatch, ReaderError>> {
+        let (tx, rx) = mpsc::channel(batches.len().max(1));
+        for batch in batches {
+            tx.try_send(Ok(batch)).unwrap();
+        }
+        // Drop tx so the receiver will see the channel close
+        drop(tx);
+        rx
+    }
+
     #[tokio::test]
     async fn test_sink_writer_extracts_partitions_and_writes() {
         let temp_dir = TempDir::new().unwrap();
@@ -205,9 +220,9 @@ mod tests {
         )
         .unwrap();
 
-        let batches = vec![test_batch(10)];
+        let mut rx = send_batches(vec![test_batch(10)]);
         let records = writer
-            .write_file_batches("date=2024-01-15/file.json", batches)
+            .write_file_stream("date=2024-01-15/file.json", &mut rx)
             .await
             .unwrap();
 
@@ -240,12 +255,14 @@ mod tests {
         .unwrap();
 
         // Write multiple files
+        let mut rx1 = send_batches(vec![test_batch(5)]);
         writer
-            .write_file_batches("file1.json", vec![test_batch(5)])
+            .write_file_stream("file1.json", &mut rx1)
             .await
             .unwrap();
+        let mut rx2 = send_batches(vec![test_batch(10)]);
         writer
-            .write_file_batches("file2.json", vec![test_batch(10)])
+            .write_file_stream("file2.json", &mut rx2)
             .await
             .unwrap();
 
