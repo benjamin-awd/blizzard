@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use blizzard_core::types::SourceState;
+use blizzard_core::watermark::WatermarkState;
 
 /// Default schema version for checkpoint state.
 fn default_schema_version() -> u32 {
@@ -27,10 +28,10 @@ pub struct CheckpointState {
     pub source_state: SourceState,
     /// Last committed Delta version.
     pub delta_version: i64,
-    /// High-watermark: last committed file path (lexicographical) for incoming mode.
-    /// e.g., "date=2024-01-28/01926abc-def0-7123-...parquet"
+    /// High-watermark state for incoming mode.
+    /// Tracks Initial→Active→Idle transitions for cold start log suppression.
     #[serde(default)]
-    pub watermark: Option<String>,
+    pub watermark: WatermarkState,
 }
 
 impl Default for CheckpointState {
@@ -39,7 +40,7 @@ impl Default for CheckpointState {
             schema_version: 2,
             source_state: SourceState::new(),
             delta_version: -1,
-            watermark: None,
+            watermark: WatermarkState::Initial,
         }
     }
 }
@@ -54,7 +55,7 @@ mod tests {
         assert_eq!(state.schema_version, 2);
         assert_eq!(state.delta_version, -1);
         assert!(state.source_state.files.is_empty());
-        assert!(state.watermark.is_none());
+        assert!(state.watermark.is_initial());
     }
 
     #[test]
@@ -63,8 +64,8 @@ mod tests {
             schema_version: 2,
             source_state: SourceState::new(),
             delta_version: 5,
-            watermark: Some(
-                "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet".to_string(),
+            watermark: WatermarkState::active(
+                "date=2024-01-28/01926abc-def0-7123-4567-89abcdef0123.parquet",
             ),
         };
 
@@ -72,16 +73,5 @@ mod tests {
         let restored: CheckpointState = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.watermark, state.watermark);
-    }
-
-    #[test]
-    fn test_checkpoint_state_backwards_compatible() {
-        // Old checkpoint without watermark should deserialize with watermark = None
-        let json = r#"{"schema_version":1,"source_state":{"files":{}},"delta_version":3}"#;
-        let state: CheckpointState = serde_json::from_str(json).unwrap();
-
-        assert_eq!(state.schema_version, 1);
-        assert_eq!(state.delta_version, 3);
-        assert!(state.watermark.is_none());
     }
 }

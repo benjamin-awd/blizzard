@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 use blizzard_core::FinishedFile;
 use blizzard_core::metrics::events::{CheckpointAge, SourceStateFiles};
 use blizzard_core::types::SourceState;
+use blizzard_core::watermark::WatermarkState;
 
 use crate::error::DeltaError;
 use crate::sink::TableSink;
@@ -40,8 +41,8 @@ macro_rules! emit {
 struct CheckpointStateInner {
     source_state: SourceState,
     delta_version: i64,
-    /// High-watermark for incoming mode.
-    watermark: Option<String>,
+    /// High-watermark state for incoming mode.
+    watermark: WatermarkState,
 }
 
 /// A coordinator that manages checkpoint state for atomic commits.
@@ -64,7 +65,7 @@ impl CheckpointCoordinator {
             state: Arc::new(Mutex::new(CheckpointStateInner {
                 source_state: SourceState::new(),
                 delta_version: -1,
-                watermark: None,
+                watermark: WatermarkState::Initial,
             })),
             last_checkpoint: Arc::new(Mutex::new(Instant::now())),
             commits_since_delta_checkpoint: Arc::new(Mutex::new(0)),
@@ -86,7 +87,7 @@ impl CheckpointCoordinator {
             count: file_count,
             target: self.table.clone(),
         });
-        if let Some(ref wm) = state.watermark {
+        if let Some(wm) = state.watermark.path() {
             info!(target = %self.table, watermark = %wm, "Restored watermark from checkpoint");
         }
     }
@@ -132,17 +133,27 @@ impl CheckpointCoordinator {
         }
     }
 
-    /// Get the current watermark.
-    pub async fn watermark(&self) -> Option<String> {
-        let state = self.state.lock().await;
-        state.watermark.clone()
+    /// Mark the watermark as idle (no new files found).
+    ///
+    /// Transitions Active→Idle. Has no effect if already Idle or Initial.
+    pub async fn mark_idle(&self) {
+        let mut state = self.state.lock().await;
+        if state.watermark.mark_idle() {
+            debug!(target = %self.table, "Watermark marked idle");
+        }
     }
 
-    /// Update the watermark to the given path.
+    /// Get the current watermark path, if any.
+    pub async fn watermark(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        state.watermark.path().map(String::from)
+    }
+
+    /// Update the watermark to the given path (sets Active state).
     pub async fn update_watermark(&self, watermark: String) {
         let mut state = self.state.lock().await;
         debug!(target = %self.table, new_watermark = %watermark, "Updating watermark");
-        state.watermark = Some(watermark);
+        state.watermark.set_active(watermark);
     }
 
     /// Restore checkpoint state from the table's transaction log.
@@ -296,6 +307,10 @@ impl CheckpointManager for CheckpointCoordinator {
         CheckpointCoordinator::update_watermark(self, watermark).await;
     }
 
+    async fn mark_idle(&self) {
+        CheckpointCoordinator::mark_idle(self).await;
+    }
+
     async fn mark_file_finished(&self, path: &str) {
         CheckpointCoordinator::mark_file_finished(self, path).await;
     }
@@ -436,7 +451,7 @@ mod tests {
             schema_version: 2,
             source_state: SourceState::new(),
             delta_version: 5,
-            watermark: Some("date=2026-01-28/checkpoint-file.parquet".to_string()),
+            watermark: WatermarkState::active("date=2026-01-28/checkpoint-file.parquet"),
         };
 
         // Create sink with committed paths AND a checkpoint
@@ -484,7 +499,7 @@ mod tests {
             schema_version: 2,
             source_state,
             delta_version: 5,
-            watermark: Some("date=2024-01-28/uuid.parquet".to_string()),
+            watermark: WatermarkState::active("date=2024-01-28/uuid.parquet"),
         };
 
         let json = serde_json::to_string(&state).unwrap();
@@ -496,7 +511,7 @@ mod tests {
         assert!(restored.source_state.is_file_finished("file2.ndjson.gz"));
         assert_eq!(
             restored.watermark,
-            Some("date=2024-01-28/uuid.parquet".to_string())
+            WatermarkState::active("date=2024-01-28/uuid.parquet")
         );
     }
 
@@ -516,5 +531,56 @@ mod tests {
         assert_eq!(captured.delta_version, 5);
         assert!(captured.source_state.is_file_finished("file1.ndjson.gz"));
         assert!(captured.source_state.is_file_finished("file2.ndjson.gz"));
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_mark_idle_and_reactivate() {
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        // Initially no watermark
+        assert!(coordinator.watermark().await.is_none());
+
+        // Set active watermark
+        coordinator
+            .update_watermark("date=2026-01-28/file1.parquet".to_string())
+            .await;
+        assert_eq!(
+            coordinator.watermark().await.as_deref(),
+            Some("date=2026-01-28/file1.parquet")
+        );
+
+        // Mark idle — watermark path should be preserved
+        coordinator.mark_idle().await;
+        assert_eq!(
+            coordinator.watermark().await.as_deref(),
+            Some("date=2026-01-28/file1.parquet")
+        );
+
+        // Captured state should reflect Idle
+        let captured = coordinator.capture_state().await;
+        assert!(captured.watermark.is_idle());
+
+        // Reactivate with new path
+        coordinator
+            .update_watermark("date=2026-01-29/file2.parquet".to_string())
+            .await;
+        let captured = coordinator.capture_state().await;
+        assert!(captured.watermark.is_active());
+        assert_eq!(
+            coordinator.watermark().await.as_deref(),
+            Some("date=2026-01-29/file2.parquet")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_mark_idle_initial_is_noop() {
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        // mark_idle on Initial state should be a no-op
+        coordinator.mark_idle().await;
+        assert!(coordinator.watermark().await.is_none());
+
+        let captured = coordinator.capture_state().await;
+        assert!(captured.watermark.is_initial());
     }
 }

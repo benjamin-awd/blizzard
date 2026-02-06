@@ -11,6 +11,7 @@ use std::sync::Arc;
 use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
 use blizzard_core::types::SourceState;
+use blizzard_core::watermark::WatermarkState;
 use penguin::SchemaEvolutionMode;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::schema::infer_schema_from_first_file;
@@ -50,7 +51,7 @@ async fn test_checkpoint_commit_and_recovery() {
         schema_version: 2,
         source_state: source_state1,
         delta_version: 0,
-        watermark: None,
+        watermark: WatermarkState::Initial,
     };
 
     delta_sink
@@ -75,7 +76,7 @@ async fn test_checkpoint_commit_and_recovery() {
         schema_version: 2,
         source_state: source_state2,
         delta_version: delta_sink.version(),
-        watermark: None,
+        watermark: WatermarkState::Initial,
     };
 
     delta_sink
@@ -295,7 +296,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         schema_version: 2,
         source_state: SourceState::new(),
         delta_version: 0,
-        watermark: None,
+        watermark: WatermarkState::Initial,
     };
 
     delta_sink
@@ -605,7 +606,7 @@ async fn test_schema_evolution_allows_type_widening() {
         schema_version: 2,
         source_state: SourceState::new(),
         delta_version: 0,
-        watermark: None,
+        watermark: WatermarkState::Initial,
     };
 
     delta_sink

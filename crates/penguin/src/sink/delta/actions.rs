@@ -91,6 +91,7 @@ pub fn create_txn_action(
 mod tests {
     use super::*;
     use blizzard_core::types::SourceState;
+    use blizzard_core::watermark::WatermarkState;
     use std::collections::HashMap;
 
     #[test]
@@ -175,7 +176,7 @@ mod tests {
             schema_version: 2,
             source_state,
             delta_version: 5,
-            watermark: None,
+            watermark: WatermarkState::Initial,
         };
 
         let action = create_txn_action(&checkpoint, 42).unwrap();
@@ -200,7 +201,7 @@ mod tests {
             schema_version: 2,
             source_state,
             delta_version: 10,
-            watermark: Some("date=2024-01-28/uuid.parquet".to_string()),
+            watermark: WatermarkState::active("date=2024-01-28/uuid.parquet"),
         };
 
         // Create Txn action

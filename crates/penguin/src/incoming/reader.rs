@@ -85,10 +85,11 @@ impl IncomingReader {
         &self,
         watermark: Option<&str>,
         committed_paths: &HashSet<String>,
+        cold_start: bool,
     ) -> Result<Vec<IncomingFile>, IncomingError> {
         let files = match watermark {
             Some(wm) => self.list_files_above_watermark(wm).await?,
-            None => self.list_files_cold_start().await?,
+            None => self.list_files_cold_start(cold_start).await?,
         };
 
         // Filter out already committed files
@@ -142,7 +143,12 @@ impl IncomingReader {
     /// List files during cold start (no watermark).
     ///
     /// Uses partition filter if configured, otherwise scans all files.
-    async fn list_files_cold_start(&self) -> Result<Vec<IncomingFile>, IncomingError> {
+    /// On the very first poll (`cold_start=true`), logs at `info!` level;
+    /// subsequent polls log at `debug!` to avoid persistent log noise.
+    async fn list_files_cold_start(
+        &self,
+        cold_start: bool,
+    ) -> Result<Vec<IncomingFile>, IncomingError> {
         let prefixes = self.generate_cold_start_prefixes();
 
         let config = FileListingConfig {
@@ -152,17 +158,32 @@ impl IncomingReader {
 
         match &prefixes {
             Some(p) if !p.is_empty() => {
-                info!(
-                    target = %self.table,
-                    prefixes = ?p,
-                    "Cold start: scanning partitions with filter"
-                );
+                if cold_start {
+                    info!(
+                        target = %self.table,
+                        prefixes = ?p,
+                        "Cold start: scanning partitions with filter"
+                    );
+                } else {
+                    debug!(
+                        target = %self.table,
+                        prefixes = ?p,
+                        "Cold start: scanning partitions with filter"
+                    );
+                }
             }
             _ => {
-                info!(
-                    target = %self.table,
-                    "Cold start: scanning all files (no filter configured)"
-                );
+                if cold_start {
+                    info!(
+                        target = %self.table,
+                        "Cold start: scanning all files (no filter configured)"
+                    );
+                } else {
+                    debug!(
+                        target = %self.table,
+                        "Cold start: scanning all files (no filter configured)"
+                    );
+                }
             }
         }
 
@@ -251,8 +272,9 @@ impl FileReader for IncomingReader {
         &self,
         watermark: Option<&str>,
         committed_paths: &HashSet<String>,
+        cold_start: bool,
     ) -> Result<Vec<IncomingFile>, IncomingError> {
-        IncomingReader::list_uncommitted_files(self, watermark, committed_paths).await
+        IncomingReader::list_uncommitted_files(self, watermark, committed_paths, cold_start).await
     }
 
     async fn read_file_metadata(
@@ -375,7 +397,7 @@ mod tests {
         assert!(!partitions.iter().any(|p| p.starts_with('_')));
 
         // List all files (cold start without filter)
-        let files = reader.list_files_cold_start().await.unwrap();
+        let files = reader.list_files_cold_start(true).await.unwrap();
         assert_eq!(files.len(), 3);
 
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();

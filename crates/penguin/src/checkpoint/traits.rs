@@ -34,6 +34,9 @@ pub trait CheckpointManager: Send + Sync {
     /// Update the watermark to the given path.
     async fn update_watermark(&self, watermark: String);
 
+    /// Mark the watermark as idle (no new files found above current watermark).
+    async fn mark_idle(&self);
+
     /// Mark a source file as finished.
     async fn mark_file_finished(&self, path: &str);
 
