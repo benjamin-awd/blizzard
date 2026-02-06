@@ -344,12 +344,8 @@ fn coerce_object_fields_to_strings(obj: &mut serde_json::Map<String, Value>, sch
 fn coerce_value_for_field(value: &mut Value, data_type: &DataType) {
     match data_type {
         DataType::Utf8 | DataType::LargeUtf8 => {
-            // If the value is not already a string (or null), stringify it
-            match value {
-                Value::String(_) | Value::Null => {}
-                Value::Number(n) => *value = Value::String(n.to_string()),
-                Value::Bool(b) => *value = Value::String(b.to_string()),
-                Value::Object(_) | Value::Array(_) => *value = Value::String(value.to_string()),
+            if !matches!(value, Value::String(_) | Value::Null) {
+                *value = Value::String(value.to_string());
             }
         }
         DataType::Struct(fields) => {
