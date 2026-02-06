@@ -290,10 +290,11 @@ impl PollingProcessor for Processor {
         // List uncommitted files
         let uncommitted = self
             .file_reader
-            .list_uncommitted_files(watermark.as_deref(), &committed_paths)
+            .list_uncommitted_files(watermark.as_deref(), &committed_paths, cold_start)
             .await?;
 
         if uncommitted.is_empty() {
+            self.checkpoint_coordinator.mark_idle().await;
             return Ok(None);
         }
 

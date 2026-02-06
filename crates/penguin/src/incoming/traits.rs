@@ -24,6 +24,7 @@ pub trait FileReader: Send + Sync {
     /// # Arguments
     /// * `watermark` - Optional watermark path; only files after this are returned
     /// * `committed_paths` - Set of already committed file paths to exclude
+    /// * `cold_start` - Whether this is the very first poll (controls log level for cold start scans)
     ///
     /// # Returns
     /// A list of uncommitted files, or an error if listing fails.
@@ -31,6 +32,7 @@ pub trait FileReader: Send + Sync {
         &self,
         watermark: Option<&str>,
         committed_paths: &HashSet<String>,
+        cold_start: bool,
     ) -> Result<Vec<IncomingFile>, IncomingError>;
 
     /// Read metadata from a file and create a FinishedFile.
