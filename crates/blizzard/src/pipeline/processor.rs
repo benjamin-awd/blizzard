@@ -193,14 +193,11 @@ impl<'a> ConfigResolver<'a> {
         let coerce_objects = self.config.schema.should_coerce_conflicts_to_utf8();
 
         for (source_name, source_config) in &self.config.sources {
-            let reader_config = if coerce_objects {
-                NdjsonReaderConfig::with_coercion(
-                    source_config.batch_size,
-                    source_config.compression,
-                )
-            } else {
-                NdjsonReaderConfig::new(source_config.batch_size, source_config.compression)
-            };
+            let mut reader_config =
+                NdjsonReaderConfig::new(source_config.batch_size, source_config.compression);
+            if coerce_objects {
+                reader_config = reader_config.coerce_objects_to_strings();
+            }
             let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
                 schema.clone(),
                 reader_config,
