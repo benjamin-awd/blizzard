@@ -130,7 +130,9 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
 
-            // Process pending files before accepting new downloads
+            // Process pending files (writes are serial for Parquet ordering).
+            // handle_processed_file uses select! to also accept downloads
+            // while writing, so decompression overlaps with sink writes.
             if let Some(processed) = pending.pop_front() {
                 util_timer.maybe_update();
 
@@ -139,8 +141,16 @@ impl Downloader {
                     util_timer.start_wait();
                 }
 
-                self.handle_processed_file(processed, ctx, &mut files_in_flight)
-                    .await?;
+                self.handle_processed_file(
+                    processed,
+                    &mut download_task,
+                    &mut pending,
+                    ctx,
+                    &mut files_in_flight,
+                    &mut files_downloaded,
+                    &mut files_processed,
+                )
+                .await?;
 
                 // Update pending files count (discovered minus processed)
                 files_processed += 1;
@@ -258,6 +268,9 @@ impl Downloader {
     /// Handle a processed file result.
     ///
     /// Consumes batches from the streaming channel and writes them to the sink.
+    /// Uses `select!` to also accept incoming downloads while processing, so
+    /// decompression of the next files runs concurrently on the blocking thread
+    /// pool while the current file's batches are written.
     ///
     /// # Watermark Advancement Atomicity
     ///
@@ -269,17 +282,26 @@ impl Downloader {
     ///
     /// If any sink write fails, the error propagates and the watermark is
     /// never updated. On restart, the file will be reprocessed.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_processed_file(
         &self,
         processed: ProcessedFile,
+        download_task: &mut DownloadTask,
+        pending: &mut VecDeque<ProcessedFile>,
         ctx: &mut ProcessingContext<'_>,
         files_in_flight: &mut usize,
+        files_downloaded: &mut usize,
+        files_processed: &mut usize,
     ) -> Result<(), PipelineError> {
         let ProcessedFile {
             source_name,
             path,
             mut batch_rx,
         } = processed;
+
+        // Track whether the download channel has closed so we don't busy-loop
+        // on recv() returning None repeatedly.
+        let mut downloads_done = false;
 
         // IMPORTANT: Sink writes must succeed before watermark update.
         // The `?` ensures atomicity - if write fails, watermark stays put.
@@ -289,11 +311,57 @@ impl Downloader {
             let mut batch_count: usize = 0;
             let mut total_records: usize = 0;
 
-            while let Some(batch_result) = batch_rx.recv().await {
-                let batch = batch_result.map_err(|e| PipelineError::Reader { source: e })?;
-                total_records += batch.num_rows();
-                batch_count += 1;
-                ctx.sink.write_batch(&batch).await?;
+            loop {
+                tokio::select! {
+                    biased;
+
+                    // Accept downloads while processing batches. Spawning
+                    // read tasks here lets decompression run on the blocking
+                    // thread pool concurrently with the current file's writes.
+                    result = download_task.rx.recv(),
+                        if !downloads_done && *files_in_flight < self.max_in_flight =>
+                    {
+                        match result {
+                            Some(Ok(downloaded)) => {
+                                *files_downloaded += 1;
+                                *files_in_flight += 1;
+                                emit!(PendingFiles {
+                                    count: files_downloaded.saturating_sub(*files_processed),
+                                    target: self.pipeline_key.clone(),
+                                });
+                                pending.push_back(spawn_read_task(downloaded, &self.readers));
+                            }
+                            Some(Err(e)) => {
+                                warn!(target = %self.pipeline_key, error = %e, "Download failed");
+                                ctx.failure_tracker
+                                    .record_failure(&e.to_string(), FailureStage::Download)
+                                    .await?;
+                                *files_downloaded += 1;
+                                *files_processed += 1;
+                                emit!(PendingFiles {
+                                    count: files_downloaded.saturating_sub(*files_processed),
+                                    target: self.pipeline_key.clone(),
+                                });
+                            }
+                            None => {
+                                downloads_done = true;
+                            }
+                        }
+                    }
+
+                    // Process next batch from the current file
+                    batch_result = batch_rx.recv() => {
+                        match batch_result {
+                            Some(result) => {
+                                let batch = result.map_err(|e| PipelineError::Reader { source: e })?;
+                                total_records += batch.num_rows();
+                                batch_count += 1;
+                                ctx.sink.write_batch(&batch).await?;
+                            }
+                            None => break,
+                        }
+                    }
+                }
             }
 
             ctx.sink.end_file(&path, batch_count, total_records).await?;
