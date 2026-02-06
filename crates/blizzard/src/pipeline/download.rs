@@ -252,12 +252,12 @@ impl Downloader {
     /// # Watermark Advancement Atomicity
     ///
     /// The watermark is only advanced after successful sink writes. This is
-    /// guaranteed by the `?` operator on `write_file_stream()`:
+    /// guaranteed by the `?` operator on `write_batch()` / `end_file()`:
     ///
-    /// 1. `write_file_stream()` must succeed first
+    /// 1. All batch writes must succeed first
     /// 2. Only then does `mark_processed()` advance the watermark
     ///
-    /// If the sink write fails, the error propagates and the watermark is
+    /// If any sink write fails, the error propagates and the watermark is
     /// never updated. On restart, the file will be reprocessed.
     async fn handle_processed_file(
         &self,
@@ -271,9 +271,25 @@ impl Downloader {
             mut batch_rx,
         } = processed;
 
-        // IMPORTANT: Sink write must succeed before watermark update.
+        // IMPORTANT: Sink writes must succeed before watermark update.
         // The `?` ensures atomicity - if write fails, watermark stays put.
-        let write_result = ctx.sink.write_file_stream(&path, &mut batch_rx).await;
+        let write_result = async {
+            ctx.sink.start_file(&path)?;
+
+            let mut batch_count: usize = 0;
+            let mut total_records: usize = 0;
+
+            while let Some(batch_result) = batch_rx.recv().await {
+                let batch = batch_result.map_err(|e| PipelineError::Reader { source: e })?;
+                total_records += batch.num_rows();
+                batch_count += 1;
+                ctx.sink.write_batch(&batch).await?;
+            }
+
+            ctx.sink.end_file(&path, batch_count, total_records).await?;
+            Ok::<(), PipelineError>(())
+        }
+        .await;
 
         // Decrement before propagating errors so the slot is freed either way.
         *files_in_flight = files_in_flight.saturating_sub(1);

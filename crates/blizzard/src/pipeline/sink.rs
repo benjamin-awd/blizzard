@@ -4,14 +4,13 @@ use std::path::Path;
 
 use deltalake::arrow::array::RecordBatch;
 use deltalake::arrow::datatypes::SchemaRef;
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use blizzard_core::metrics::events::{BatchesProcessed, BytesWritten, RecordsProcessed};
 use blizzard_core::{PartitionExtractor, emit};
 
 use super::tasks::UploadTask;
-use crate::error::{PipelineError, ReaderError};
+use crate::error::PipelineError;
 use crate::parquet::{ParquetWriter, ParquetWriterConfig};
 
 /// High-level sink that handles the full output path: serialization and storage.
@@ -59,28 +58,38 @@ impl Sink {
         Ok(())
     }
 
-    /// Consume batches from a channel, writing each to parquet as it arrives.
-    ///
-    /// Returns the number of records written.
-    pub async fn write_file_stream(
-        &mut self,
-        path: &str,
-        batch_rx: &mut mpsc::Receiver<Result<RecordBatch, ReaderError>>,
-    ) -> Result<usize, PipelineError> {
+    /// Set partition context for the next source file.
+    pub fn start_file(&mut self, path: &str) -> Result<(), PipelineError> {
         let partition_values = self.partition_extractor.extract(path);
         self.batch_writer.set_partition_context(partition_values)?;
+        Ok(())
+    }
 
-        let mut batch_count: usize = 0;
-        let mut total_records: usize = 0;
+    /// Write a single batch. Internally handles row-group flushing and
+    /// file rolling. Queues any rolled files for upload.
+    pub async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), PipelineError> {
+        self.batch_writer.write_batch(batch)?;
 
-        while let Some(batch_result) = batch_rx.recv().await {
-            let batch = batch_result.map_err(|e| PipelineError::Reader { source: e })?;
+        // Drain completed uploads to prevent channel backpressure
+        self.drain_upload_results()?;
 
-            total_records += batch.num_rows();
-            batch_count += 1;
-            self.batch_writer.write_batch(&batch)?;
+        // Queue any rolled files for upload
+        let finished = self.batch_writer.take_finished_files();
+        for file in finished {
+            self.upload_task.send(file).await?;
         }
 
+        Ok(())
+    }
+
+    /// Emit per-file metrics, drain completed uploads, queue finished files.
+    /// Called after all batches for a source file have been written.
+    pub async fn end_file(
+        &mut self,
+        path: &str,
+        batch_count: usize,
+        total_records: usize,
+    ) -> Result<(), PipelineError> {
         emit!(RecordsProcessed {
             count: total_records as u64,
             target: self.pipeline_id.clone(),
@@ -111,7 +120,7 @@ impl Sink {
             self.upload_task.send(file).await?;
         }
 
-        Ok(total_records)
+        Ok(())
     }
 
     /// Finalize the writer and wait for all uploads to complete.
@@ -186,17 +195,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Helper: send batches through a channel and return the receiver.
-    fn send_batches(batches: Vec<RecordBatch>) -> mpsc::Receiver<Result<RecordBatch, ReaderError>> {
-        let (tx, rx) = mpsc::channel(batches.len().max(1));
-        for batch in batches {
-            tx.try_send(Ok(batch)).unwrap();
-        }
-        // Drop tx so the receiver will see the channel close
-        drop(tx);
-        rx
-    }
-
     #[tokio::test]
     async fn test_sink_writer_extracts_partitions_and_writes() {
         let temp_dir = TempDir::new().unwrap();
@@ -220,13 +218,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut rx = send_batches(vec![test_batch(10)]);
-        let records = writer
-            .write_file_stream("date=2024-01-15/file.json", &mut rx)
-            .await
-            .unwrap();
+        let path = "date=2024-01-15/file.json";
+        let batch = test_batch(10);
 
-        assert_eq!(records, 10);
+        writer.start_file(path).unwrap();
+        writer.write_batch(&batch).await.unwrap();
+        writer.end_file(path, 1, 10).await.unwrap();
 
         writer.finalize().await.unwrap();
     }
@@ -255,16 +252,13 @@ mod tests {
         .unwrap();
 
         // Write multiple files
-        let mut rx1 = send_batches(vec![test_batch(5)]);
-        writer
-            .write_file_stream("file1.json", &mut rx1)
-            .await
-            .unwrap();
-        let mut rx2 = send_batches(vec![test_batch(10)]);
-        writer
-            .write_file_stream("file2.json", &mut rx2)
-            .await
-            .unwrap();
+        writer.start_file("file1.json").unwrap();
+        writer.write_batch(&test_batch(5)).await.unwrap();
+        writer.end_file("file1.json", 1, 5).await.unwrap();
+
+        writer.start_file("file2.json").unwrap();
+        writer.write_batch(&test_batch(10)).await.unwrap();
+        writer.end_file("file2.json", 1, 10).await.unwrap();
 
         writer.finalize().await.unwrap();
 
