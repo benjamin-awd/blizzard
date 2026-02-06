@@ -88,7 +88,6 @@ impl NdjsonReader {
         path: &str,
         on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
     ) -> Result<usize, ReaderError> {
-        // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
             target: self.pipeline.clone(),
@@ -97,7 +96,6 @@ impl NdjsonReader {
         let start = Instant::now();
         let compressed_len = compressed.len();
 
-        // Create a streaming reader using the compression codec.
         let codec = self.config.compression.codec();
         let reader =
             codec
@@ -107,7 +105,6 @@ impl NdjsonReader {
                     source: std::io::Error::other(e.message),
                 })?;
 
-        // Wrap in BufReader for efficient reading
         let buf_reader = BufReader::new(reader);
 
         let (batch_count, total_records) = if self.config.coerce_objects_to_strings {
@@ -207,7 +204,6 @@ impl NdjsonReader {
                 .build()
             })?;
 
-            // Coerce objects/arrays to strings for Utf8 fields
             if let Value::Object(ref mut obj) = value {
                 coerce_object_fields_to_strings(obj, &self.schema);
             }
@@ -225,7 +221,6 @@ impl NdjsonReader {
             }
         }
 
-        // Flush remaining values
         if !chunk.is_empty() {
             let batch = values_to_record_batch(&chunk, &self.schema, path)?;
             total_records += batch.num_rows();
@@ -337,7 +332,6 @@ fn coerce_value_for_field(value: &mut Value, data_type: &DataType) {
             }
         }
         DataType::Struct(fields) => {
-            // Recurse into struct fields
             if let Value::Object(obj) = value {
                 for field in fields.iter() {
                     if let Some(nested_value) = obj.get_mut(field.name()) {
@@ -347,16 +341,13 @@ fn coerce_value_for_field(value: &mut Value, data_type: &DataType) {
             }
         }
         DataType::List(field) | DataType::LargeList(field) => {
-            // Recurse into list elements
             if let Value::Array(arr) = value {
                 for elem in arr.iter_mut() {
                     coerce_value_for_field(elem, field.data_type());
                 }
             }
         }
-        _ => {
-            // Other types don't need coercion
-        }
+        _ => {}
     }
 }
 
