@@ -3,11 +3,10 @@
 //! Coordinates the download -> parse -> write pipeline with backpressure
 //! and failure handling. Supports multiple sources merging into a single sink.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use indexmap::IndexMap;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +21,7 @@ use blizzard_core::metrics::events::{
 use blizzard_core::polling::IterationResult;
 
 use super::sink::Sink;
-use super::tasks::{DownloadTask, ProcessFuture, ProcessedFile, spawn_read_task};
+use super::tasks::{DownloadTask, ProcessedFile, spawn_read_task};
 use super::tracker::MultiSourceTracker;
 use crate::config::CheckpointConfig;
 use crate::dlq::FailureTracker;
@@ -98,10 +97,13 @@ impl Downloader {
         checkpoint_config: &IncrementalCheckpointConfig,
         total_files: usize,
     ) -> Result<IterationResult, PipelineError> {
-        let mut processing: FuturesUnordered<ProcessFuture> = FuturesUnordered::new();
+        let mut pending: VecDeque<ProcessedFile> = VecDeque::new();
         let mut files_since_save: usize = 0;
         let mut files_processed: usize = 0;
         let mut util_timer = UtilizationTimer::new(&self.pipeline_key);
+
+        // Track how many files have been spawned but not yet fully consumed.
+        let mut files_in_flight: usize = 0;
 
         // Emit initial pending files count
         emit!(PendingFiles {
@@ -120,7 +122,7 @@ impl Downloader {
 
         loop {
             emit!(DecompressionQueueDepth {
-                count: processing.len(),
+                count: files_in_flight,
                 target: self.pipeline_key.clone(),
             });
             emit!(SourceStateFiles {
@@ -128,6 +130,37 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
 
+            // Process pending files before accepting new downloads
+            if let Some(processed) = pending.pop_front() {
+                util_timer.maybe_update();
+
+                // Update utilization state: waiting if no active processing
+                if files_in_flight == 0 {
+                    util_timer.start_wait();
+                }
+
+                self.handle_processed_file(processed, ctx, &mut files_in_flight)
+                    .await?;
+
+                // Update pending files count
+                files_processed += 1;
+                emit!(PendingFiles {
+                    count: total_files.saturating_sub(files_processed),
+                    target: self.pipeline_key.clone(),
+                });
+
+                // Track files for incremental checkpoint
+                if checkpoint_config.enabled {
+                    files_since_save += 1;
+                    if files_since_save >= checkpoint_config.interval_files {
+                        self.try_incremental_save(ctx.multi_tracker, &mut files_since_save)
+                            .await;
+                    }
+                }
+                continue;
+            }
+
+            // No pending files — wait for downloads, shutdown, or checkpoint
             tokio::select! {
                 biased;
 
@@ -137,46 +170,20 @@ impl Downloader {
                     return Ok(IterationResult::Shutdown);
                 }
 
-                Some(result) = processing.next(), if !processing.is_empty() => {
-                    util_timer.maybe_update();
-
-                    // Update utilization state: waiting if no active processing
-                    if processing.is_empty() {
-                        util_timer.start_wait();
-                    }
-
-                    self.handle_processed_file(result, ctx).await?;
-
-                    // Update pending files count
-                    files_processed += 1;
-                    emit!(PendingFiles {
-                        count: total_files.saturating_sub(files_processed),
-                        target: self.pipeline_key.clone(),
-                    });
-
-                    // Track files for incremental checkpoint
-                    if checkpoint_config.enabled {
-                        files_since_save += 1;
-                        if files_since_save >= checkpoint_config.interval_files {
-                            self.try_incremental_save(ctx.multi_tracker, &mut files_since_save).await;
-                        }
-                    }
-                }
-
                 // Time-based checkpoint save
                 _ = Self::tick_checkpoint(&mut checkpoint_interval), if checkpoint_config.enabled && files_since_save > 0 => {
                     self.try_incremental_save(ctx.multi_tracker, &mut files_since_save).await;
                 }
 
-                result = download_task.rx.recv(), if processing.len() < self.max_in_flight => {
+                result = download_task.rx.recv(), if files_in_flight < self.max_in_flight => {
                     match result {
                         Some(Ok(downloaded)) => {
                             // Transition to working state when we have processing tasks
-                            if processing.is_empty() {
+                            if files_in_flight == 0 {
                                 util_timer.stop_wait();
                             }
-                            let future = spawn_read_task(downloaded, &self.readers);
-                            processing.push(future);
+                            files_in_flight += 1;
+                            pending.push_back(spawn_read_task(downloaded, &self.readers));
                         }
                         Some(Err(e)) => {
                             warn!(target = %self.pipeline_key, error = %e, "Download failed");
@@ -192,7 +199,7 @@ impl Downloader {
                             });
                         }
                         None => {
-                            if processing.is_empty() {
+                            if files_in_flight == 0 && pending.is_empty() {
                                 break;
                             }
                         }
@@ -240,43 +247,43 @@ impl Downloader {
 
     /// Handle a processed file result.
     ///
+    /// Consumes batches from the streaming channel and writes them to the sink.
+    ///
     /// # Watermark Advancement Atomicity
     ///
     /// The watermark is only advanced after successful sink writes. This is
-    /// guaranteed by the `?` operator on `write_file_batches()`:
+    /// guaranteed by the `?` operator on `write_file_stream()`:
     ///
-    /// 1. `write_file_batches()` must succeed first
+    /// 1. `write_file_stream()` must succeed first
     /// 2. Only then does `mark_processed()` advance the watermark
     ///
     /// If the sink write fails, the error propagates and the watermark is
     /// never updated. On restart, the file will be reprocessed.
     async fn handle_processed_file(
         &self,
-        result: Result<ProcessedFile, PipelineError>,
+        processed: ProcessedFile,
         ctx: &mut ProcessingContext<'_>,
+        files_in_flight: &mut usize,
     ) -> Result<(), PipelineError> {
-        match result {
-            Ok(ProcessedFile {
-                source_name,
-                path,
-                batches,
-            }) => {
-                // IMPORTANT: Sink write must succeed before watermark update.
-                // The `?` ensures atomicity - if write fails, watermark stays put.
-                ctx.sink.write_file_batches(&path, batches).await?;
-                ctx.multi_tracker.mark_processed(&source_name, &path);
-                emit!(FileProcessed {
-                    status: FileStatus::Success,
-                    target: self.pipeline_key.clone(),
-                });
-            }
-            Err(e) => {
-                warn!(target = %self.pipeline_key, error = %e, "File processing failed");
-                ctx.failure_tracker
-                    .record_failure(&e.to_string(), FailureStage::Parse)
-                    .await?;
-            }
-        }
+        let ProcessedFile {
+            source_name,
+            path,
+            mut batch_rx,
+        } = processed;
+
+        // IMPORTANT: Sink write must succeed before watermark update.
+        // The `?` ensures atomicity - if write fails, watermark stays put.
+        let write_result = ctx.sink.write_file_stream(&path, &mut batch_rx).await;
+
+        // Decrement before propagating errors so the slot is freed either way.
+        *files_in_flight = files_in_flight.saturating_sub(1);
+
+        write_result?;
+        ctx.multi_tracker.mark_processed(&source_name, &path);
+        emit!(FileProcessed {
+            status: FileStatus::Success,
+            target: self.pipeline_key.clone(),
+        });
         Ok(())
     }
 }

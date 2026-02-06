@@ -10,6 +10,7 @@
 //!   contains an object and sometimes a string.
 
 use std::io::{BufRead, BufReader, Cursor};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,7 +26,7 @@ use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError};
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
-use super::traits::{FileReader, ReadResult};
+use super::traits::FileReader;
 
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]
@@ -80,17 +81,15 @@ impl NdjsonReader {
         }
     }
 
-    /// Read compressed data and parse it into record batches.
+    /// Read compressed data and stream parsed batches via callback.
     ///
-    /// This method uses streaming decompression to avoid loading the entire
-    /// decompressed file into memory:
-    /// 1. Creates a streaming decompressor based on the configured compression format
-    /// 2. Parses NDJSON content into Arrow RecordBatches as data is decompressed
-    ///
-    /// # Arguments
-    /// * `compressed` - The compressed file data
-    /// * `path` - File path (used for error messages and logging)
-    fn read_internal(&self, compressed: &Bytes, path: &str) -> Result<ReadResult, ReaderError> {
+    /// Returns the total number of records read.
+    fn read_internal_streaming(
+        &self,
+        compressed: &Bytes,
+        path: &str,
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<usize, ReaderError> {
         // Emit bytes read metric
         emit!(BytesRead {
             bytes: compressed.len() as u64,
@@ -113,12 +112,10 @@ impl NdjsonReader {
         // Wrap in BufReader for efficient reading
         let buf_reader = BufReader::new(reader);
 
-        let (batches, total_records) = if self.config.coerce_objects_to_strings {
-            // Use serde_json-based reader with object-to-string coercion
-            self.read_with_coercion(buf_reader, path)?
+        let (batch_count, total_records) = if self.config.coerce_objects_to_strings {
+            self.read_with_coercion(buf_reader, path, on_batch)?
         } else {
-            // Use Arrow's optimized JSON reader
-            self.read_with_arrow(buf_reader, path)?
+            self.read_with_arrow(buf_reader, path, on_batch)?
         };
 
         emit!(FileDecompressionCompleted {
@@ -128,24 +125,21 @@ impl NdjsonReader {
 
         debug!(
             "Streamed and parsed {} bytes -> {} batches ({} records) from {}",
-            compressed_len,
-            batches.len(),
-            total_records,
-            path
+            compressed_len, batch_count, total_records, path
         );
 
-        Ok(ReadResult {
-            batches,
-            total_records,
-        })
+        Ok(total_records)
     }
 
     /// Read using Arrow's optimized JSON reader (standard mode).
+    ///
+    /// Invokes callback per batch. Returns (batch_count, total_records).
     fn read_with_arrow<R: BufRead>(
         &self,
         reader: R,
         path: &str,
-    ) -> Result<(Vec<RecordBatch>, usize), ReaderError> {
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<(usize, usize), ReaderError> {
         let json_reader = ReaderBuilder::new(Arc::clone(&self.schema))
             .with_batch_size(self.config.batch_size)
             .with_strict_mode(false)
@@ -157,7 +151,7 @@ impl NdjsonReader {
                 .build()
             })?;
 
-        let mut batches = Vec::new();
+        let mut batch_count = 0;
         let mut total_records = 0;
 
         for batch_result in json_reader {
@@ -170,10 +164,14 @@ impl NdjsonReader {
             })?;
 
             total_records += batch.num_rows();
-            batches.push(batch);
+            batch_count += 1;
+
+            if on_batch(batch).is_break() {
+                break;
+            }
         }
 
-        Ok((batches, total_records))
+        Ok((batch_count, total_records))
     }
 
     /// Read using serde_json preprocessing with object-to-string coercion.
@@ -184,11 +182,13 @@ impl NdjsonReader {
     /// 3. Re-serializes and passes to Arrow's reader
     ///
     /// This is slower than direct Arrow reading but handles type conflicts.
+    /// Still collects lines for coercion preprocessing, then streams Arrow batches via callback.
     fn read_with_coercion<R: BufRead>(
         &self,
         reader: R,
         path: &str,
-    ) -> Result<(Vec<RecordBatch>, usize), ReaderError> {
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<(usize, usize), ReaderError> {
         let mut coerced_lines: Vec<String> = Vec::new();
 
         for (line_num, line_result) in reader.lines().enumerate() {
@@ -226,18 +226,22 @@ impl NdjsonReader {
             coerced_lines.push(coerced_line);
         }
 
-        // Join lines and pass to Arrow's reader
+        // Join lines and pass to Arrow's reader, streaming batches via callback
         let coerced_ndjson = coerced_lines.join("\n");
         let cursor = Cursor::new(coerced_ndjson.as_bytes());
 
-        // Now use Arrow's optimized reader on the coerced data
-        self.read_with_arrow(cursor, path)
+        self.read_with_arrow(cursor, path, on_batch)
     }
 }
 
 impl FileReader for NdjsonReader {
-    fn read(&self, data: Bytes, path: &str) -> Result<ReadResult, ReaderError> {
-        self.read_internal(&data, path)
+    fn read_batches(
+        &self,
+        data: Bytes,
+        path: &str,
+        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+    ) -> Result<usize, ReaderError> {
+        self.read_internal_streaming(&data, path, on_batch)
     }
 
     fn schema(&self) -> &SchemaRef {
@@ -309,6 +313,20 @@ mod tests {
             .map(|(name, dt)| Field::new(name, dt, true))
             .collect();
         Arc::new(Schema::new(arrow_fields))
+    }
+
+    /// Helper: collect all batches from read_batches into a Vec.
+    fn collect_batches(
+        reader: &NdjsonReader,
+        bytes: Bytes,
+        path: &str,
+    ) -> Result<(Vec<RecordBatch>, usize), ReaderError> {
+        let mut batches = Vec::new();
+        let total = reader.read_batches(bytes, path, &mut |batch| {
+            batches.push(batch);
+            ControlFlow::Continue(())
+        })?;
+        Ok((batches, total))
     }
 
     #[test]
@@ -486,12 +504,12 @@ mod tests {
         let reader = NdjsonReader::new(schema, config, "test".to_string());
 
         let bytes = Bytes::from(ndjson);
-        let result = reader.read(bytes, "test.ndjson").unwrap();
+        let (batches, total_records) = collect_batches(&reader, bytes, "test.ndjson").unwrap();
 
-        assert_eq!(result.total_records, 2);
-        assert_eq!(result.batches.len(), 1);
+        assert_eq!(total_records, 2);
+        assert_eq!(batches.len(), 1);
 
-        let batch = &result.batches[0];
+        let batch = &batches[0];
         assert_eq!(batch.num_rows(), 2);
 
         // Check that the data column contains strings
@@ -527,7 +545,7 @@ mod tests {
         let reader = NdjsonReader::new(schema, config, "test".to_string());
 
         let bytes = Bytes::from(ndjson);
-        let result = reader.read(bytes, "test.ndjson");
+        let result = collect_batches(&reader, bytes, "test.ndjson");
 
         // Should fail because Arrow can't read object into Utf8
         assert!(result.is_err(), "Should fail without coercion");
