@@ -9,13 +9,14 @@
 //!   then uses Arrow's reader. This handles cases where the same field sometimes
 //!   contains an object and sometimes a string.
 
-use std::io::{BufRead, BufReader, Cursor};
+use std::io::{BufRead, BufReader};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use deltalake::arrow::array::RecordBatch;
+use deltalake::arrow::array::{ArrayRef, RecordBatch};
+use deltalake::arrow::compute::cast;
 use deltalake::arrow::datatypes::{DataType, SchemaRef};
 use deltalake::arrow::json::ReaderBuilder;
 use serde_json::Value;
@@ -186,9 +187,9 @@ impl NdjsonReader {
     /// This mode:
     /// 1. Parses each JSON line with serde_json
     /// 2. Coerces objects/arrays to JSON strings for Utf8 fields
-    /// 3. Re-serializes and passes to Arrow's reader
+    /// 3. Builds Arrow arrays directly from the coerced Values
     ///
-    /// This is slower than direct Arrow reading but handles type conflicts.
+    /// This avoids the re-serialize + re-parse round-trip of the old approach.
     /// Processes lines in `batch_size` chunks so memory stays bounded.
     fn read_with_coercion<R: BufRead>(
         &self,
@@ -196,7 +197,7 @@ impl NdjsonReader {
         path: &str,
         on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
     ) -> Result<(usize, usize), ReaderError> {
-        let mut chunk: Vec<String> = Vec::with_capacity(self.config.batch_size);
+        let mut chunk: Vec<Value> = Vec::with_capacity(self.config.batch_size);
         let mut batch_count = 0;
         let mut total_records = 0;
 
@@ -223,53 +224,28 @@ impl NdjsonReader {
                 coerce_object_fields_to_strings(obj, &self.schema);
             }
 
-            // Re-serialize the coerced value
-            let coerced_line = serde_json::to_string(&value).map_err(|e| {
-                JsonDecodeSnafu {
-                    path: path.to_string(),
-                    message: format!("line {}: failed to re-serialize: {}", line_num + 1, e),
-                }
-                .build()
-            })?;
-
-            chunk.push(coerced_line);
+            chunk.push(value);
 
             if chunk.len() >= self.config.batch_size {
-                let flow = self.flush_coerced_chunk(&chunk, path, on_batch)?;
-                let (bc, tr) = match flow {
-                    ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
-                };
-                batch_count += bc;
-                total_records += tr;
+                let batch = values_to_record_batch(&chunk, &self.schema, path)?;
+                total_records += batch.num_rows();
+                batch_count += 1;
                 chunk.clear();
-                if flow.is_break() {
+                if on_batch(batch).is_break() {
                     return Ok((batch_count, total_records));
                 }
             }
         }
 
-        // Flush remaining lines
+        // Flush remaining values
         if !chunk.is_empty() {
-            let (bc, tr) = match self.flush_coerced_chunk(&chunk, path, on_batch)? {
-                ControlFlow::Continue(counts) | ControlFlow::Break(counts) => counts,
-            };
-            batch_count += bc;
-            total_records += tr;
+            let batch = values_to_record_batch(&chunk, &self.schema, path)?;
+            total_records += batch.num_rows();
+            batch_count += 1;
+            let _ = on_batch(batch);
         }
 
         Ok((batch_count, total_records))
-    }
-
-    /// Flush a chunk of coerced NDJSON lines through Arrow's reader.
-    fn flush_coerced_chunk(
-        &self,
-        chunk: &[String],
-        path: &str,
-        on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
-    ) -> Result<ReadFlow, ReaderError> {
-        let ndjson = chunk.join("\n");
-        let cursor = Cursor::new(ndjson.as_bytes());
-        self.read_with_arrow(cursor, path, on_batch)
     }
 }
 
@@ -286,6 +262,66 @@ impl FileReader for NdjsonReader {
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }
+}
+
+// ============================================================================
+// Direct Value → RecordBatch conversion (via serde_arrow)
+// ============================================================================
+
+/// Build a `RecordBatch` directly from parsed `serde_json::Value` objects.
+///
+/// Uses `serde_arrow` to serialize the Value tree into Arrow arrays, then
+/// post-processes with `cast` for any type mismatches (serde_arrow uses fixed
+/// types like `Int64` and `LargeUtf8` that may differ from the target schema).
+///
+/// This eliminates the re-serialize + re-parse round-trip of the old approach.
+fn values_to_record_batch(
+    values: &[Value],
+    schema: &SchemaRef,
+    path: &str,
+) -> Result<RecordBatch, ReaderError> {
+    let batch = serde_arrow::to_record_batch(schema.fields(), &values).map_err(|e| {
+        JsonDecodeSnafu {
+            path: path.to_string(),
+            message: format!("serde_arrow: {e}"),
+        }
+        .build()
+    })?;
+
+    // Post-process: serde_arrow may produce different concrete types than the
+    // target schema (e.g., LargeUtf8 instead of Utf8, Int64 for all integers).
+    // Use Arrow's cast kernel to reconcile.
+    let columns: Vec<ArrayRef> = batch
+        .columns()
+        .iter()
+        .zip(schema.fields())
+        .map(|(col, field)| {
+            if col.data_type() == field.data_type() {
+                Ok(col.clone())
+            } else {
+                cast(col, field.data_type()).map_err(|e| {
+                    JsonDecodeSnafu {
+                        path: path.to_string(),
+                        message: format!(
+                            "failed to cast '{}' from {:?} to {:?}: {e}",
+                            field.name(),
+                            col.data_type(),
+                            field.data_type()
+                        ),
+                    }
+                    .build()
+                })
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
+        JsonDecodeSnafu {
+            path: path.to_string(),
+            message: format!("failed to build record batch: {e}"),
+        }
+        .build()
+    })
 }
 
 // ============================================================================

@@ -16,10 +16,10 @@ use deltalake::parquet::arrow::parquet_to_arrow_schema;
 use deltalake::parquet::file::reader::{FileReader, SerializedFileReader};
 use tracing::{debug, warn};
 
+use blizzard_core::schema::coerce_schema;
 use blizzard_core::{FinishedFile, StorageProvider};
 
 use crate::error::SchemaError;
-use crate::schema::evolution::coerce_schema;
 
 /// Maximum number of files to try when inferring schema.
 ///

@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod partition;
 pub mod polling;
 pub mod resource;
+pub mod schema;
 pub mod signal;
 pub mod storage;
 pub mod topology;
