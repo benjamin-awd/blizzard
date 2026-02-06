@@ -19,6 +19,12 @@ blizzard-core = { path = "crates/blizzard-core" }
 # Delta Lake
 deltalake = { version = "0.30", default-features = false, features = ["s3", "gcs"] }
 
+# Arrow (schema types only — used by blizzard-core for shared coercion logic)
+arrow-schema = "57"
+
+# Arrow serialization (Value → RecordBatch without re-parse round-trip)
+serde_arrow = { version = "0.13", features = ["arrow-57"] }
+
 # Object storage
 object_store = { version = "0.12.5", default-features = false, features = ["aws", "gcp", "azure", "fs"] }
 

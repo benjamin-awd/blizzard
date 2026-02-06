@@ -12,7 +12,7 @@ use std::io::{BufRead, Cursor};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use deltalake::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, TimeUnit};
+use deltalake::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use deltalake::arrow::error::ArrowError;
 use deltalake::arrow::json::reader::infer_json_schema;
 use serde_json::Value;
@@ -432,68 +432,7 @@ fn decompress(bytes: &Bytes, compression: CompressionFormat) -> Result<Vec<u8>, 
         .map_err(|e| InferenceError::Decompression { message: e.message })
 }
 
-/// Coerce schema to be Delta Lake compatible.
-///
-/// Delta Lake requires timestamp precision to be microseconds.
-fn coerce_schema(schema: &Schema) -> SchemaRef {
-    let fields: Vec<FieldRef> = schema
-        .fields()
-        .iter()
-        .map(|f| coerce_field(f.clone()))
-        .collect();
-
-    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
-}
-
-/// Coerce a field to be Delta Lake compatible.
-fn coerce_field(field: FieldRef) -> FieldRef {
-    match field.data_type() {
-        // Coerce timestamp precision to microseconds
-        DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Millisecond, tz) => {
-            Arc::new(Field::new(
-                field.name(),
-                DataType::Timestamp(TimeUnit::Microsecond, tz.clone()),
-                field.is_nullable(),
-            ))
-        }
-        // Recursively coerce List inner types
-        DataType::List(inner) => {
-            let coerced_inner = coerce_field(inner.clone());
-            if Arc::ptr_eq(&coerced_inner, inner) {
-                field
-            } else {
-                Arc::new(Field::new(
-                    field.name(),
-                    DataType::List(coerced_inner),
-                    field.is_nullable(),
-                ))
-            }
-        }
-        // Recursively coerce Struct field types
-        DataType::Struct(fields) => {
-            let coerced_fields: Vec<FieldRef> =
-                fields.iter().map(|f| coerce_field(f.clone())).collect();
-
-            // Check if any field changed
-            let any_changed = coerced_fields
-                .iter()
-                .zip(fields.iter())
-                .any(|(c, o)| !Arc::ptr_eq(c, o));
-
-            if any_changed {
-                Arc::new(Field::new(
-                    field.name(),
-                    DataType::Struct(coerced_fields.into()),
-                    field.is_nullable(),
-                ))
-            } else {
-                field
-            }
-        }
-        // All other types pass through unchanged
-        _ => field,
-    }
-}
+use blizzard_core::schema::coerce_schema;
 
 #[cfg(test)]
 mod tests {
@@ -577,75 +516,6 @@ mod tests {
         let bytes = Bytes::new();
         let result = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_coerce_timestamp_to_microseconds() {
-        use deltalake::arrow::datatypes::TimeUnit;
-
-        let schema = Schema::new(vec![
-            Field::new(
-                "ts_ns",
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-                true,
-            ),
-            Field::new(
-                "ts_ms",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
-            Field::new(
-                "ts_us",
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                true,
-            ),
-        ]);
-
-        let coerced = coerce_schema(&schema);
-
-        // All timestamps should be coerced to microseconds
-        assert_eq!(
-            coerced.field(0).data_type(),
-            &DataType::Timestamp(TimeUnit::Microsecond, None)
-        );
-        assert_eq!(
-            coerced.field(1).data_type(),
-            &DataType::Timestamp(TimeUnit::Microsecond, None)
-        );
-        assert_eq!(
-            coerced.field(2).data_type(),
-            &DataType::Timestamp(TimeUnit::Microsecond, None)
-        );
-    }
-
-    #[test]
-    fn test_coerce_nested_timestamp() {
-        use deltalake::arrow::datatypes::TimeUnit;
-
-        let schema = Schema::new(vec![Field::new(
-            "data",
-            DataType::Struct(
-                vec![Arc::new(Field::new(
-                    "ts",
-                    DataType::Timestamp(TimeUnit::Nanosecond, None),
-                    true,
-                ))]
-                .into(),
-            ),
-            true,
-        )]);
-
-        let coerced = coerce_schema(&schema);
-
-        match coerced.field(0).data_type() {
-            DataType::Struct(fields) => {
-                assert_eq!(
-                    fields[0].data_type(),
-                    &DataType::Timestamp(TimeUnit::Microsecond, None)
-                );
-            }
-            other => panic!("Expected Struct, got {other:?}"),
-        }
     }
 
     // ========================================================================
