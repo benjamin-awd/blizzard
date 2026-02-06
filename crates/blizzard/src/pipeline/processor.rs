@@ -24,8 +24,8 @@ use blizzard_core::{
 
 use super::download::{Downloader, IncrementalCheckpointConfig, ProcessingContext};
 use super::sink::Sink;
-use super::tasks::{DownloadTask, UploadTask};
-use super::tracker::{HashMapTracker, MultiSourceTracker, SourcedFile, WatermarkTracker};
+use super::tasks::{DiscoveryTask, DownloadTask, UploadTask};
+use super::tracker::{HashMapTracker, MultiSourceTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{MB, PipelineConfig, PipelineKey, SourceConfig};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
@@ -274,22 +274,23 @@ struct Iteration {
     sink: Sink,
     downloader: Downloader,
     download_task: DownloadTask,
+    discovery_handle: tokio::task::JoinHandle<Result<usize, PipelineError>>,
     checkpoint_config: IncrementalCheckpointConfig,
-    total_files: usize,
 }
 
 impl Iteration {
     /// Create a new iteration with all per-iteration components.
+    ///
+    /// Takes a `DiscoveryTask` whose channel is passed to the `DownloadTask`,
+    /// forming the pipeline: discovery → download → parse → write.
     fn new(
-        pending_files: Vec<SourcedFile>,
+        discovery_task: DiscoveryTask,
         ctx: &ProcessorContext,
         config: &PipelineConfig,
         shutdown: CancellationToken,
         global_semaphore: Option<Arc<Semaphore>>,
         key: &str,
     ) -> Result<Self, PipelineError> {
-        let total_files = pending_files.len();
-
         // Build rolling policies from config
         let mut rolling_policies = vec![RollingPolicy::SizeLimit(config.sink.file_size_mb * MB)];
         if let Some(secs) = config.sink.rollover_timeout_secs {
@@ -318,8 +319,9 @@ impl Iteration {
             key.to_string(),
         )?;
 
+        // Feed discovery channel into download task
         let download_task = DownloadTask::spawn(
-            pending_files,
+            discovery_task.rx,
             ctx.source_storages.clone(),
             shutdown,
             config.max_concurrent_files,
@@ -346,18 +348,21 @@ impl Iteration {
             sink,
             downloader,
             download_task,
+            discovery_handle: discovery_task.handle,
             checkpoint_config,
-            total_files,
         })
     }
 
     /// Run the iteration: download, parse, and write files.
+    ///
+    /// Returns the iteration result, the sink (for finalization), and the
+    /// total number of files discovered.
     async fn run(
         mut self,
         multi_tracker: &mut MultiSourceTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
-    ) -> Result<(IterationResult, Sink), PipelineError> {
+    ) -> Result<(IterationResult, Sink, usize), PipelineError> {
         let mut ctx = ProcessingContext {
             sink: &mut self.sink,
             multi_tracker,
@@ -370,12 +375,18 @@ impl Iteration {
                 &mut ctx,
                 shutdown,
                 &self.checkpoint_config,
-                self.total_files,
             )
-            .await;
+            .await?;
 
-        // Return the sink so the processor can finalize it
-        Ok((result?, self.sink))
+        // Wait for discovery to complete and get total files discovered.
+        // Discovery should already be done by the time all downloads finish,
+        // so this join is typically instant.
+        let discovery_count = self
+            .discovery_handle
+            .await
+            .map_err(|e| PipelineError::TaskJoin { source: e })??;
+
+        Ok((result, self.sink, discovery_count))
     }
 }
 
@@ -439,8 +450,7 @@ impl Processor {
         storage_pool: Option<StoragePoolRef>,
         global_semaphore: Option<Arc<Semaphore>>,
         shutdown: CancellationToken,
-    ) -> Result<impl PollingProcessor<State = Vec<SourcedFile>, Error = PipelineError>, PipelineError>
-    {
+    ) -> Result<impl PollingProcessor<State = (), Error = PipelineError>, PipelineError> {
         let resolver = ConfigResolver::new(key.clone(), &config, storage_pool);
         let resolved = resolver.resolve().await?;
         Ok(PipelineOrchestrator::new(
@@ -455,10 +465,26 @@ impl Processor {
 
 #[async_trait]
 impl PollingProcessor for PipelineOrchestrator {
-    type State = Vec<SourcedFile>;
+    type State = ();
     type Error = PipelineError;
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
+        if cold_start {
+            let configs: IndexMap<String, &SourceConfig> = self
+                .config
+                .sources
+                .iter()
+                .map(|(k, v)| (k.clone(), v))
+                .collect();
+            self.multi_tracker.init_all(&configs).await?;
+        }
+
+        // Always proceed to process — discovery runs there and returns
+        // NoItems if nothing is found.
+        Ok(Some(()))
+    }
+
+    async fn process(&mut self, _state: Self::State) -> Result<IterationResult, Self::Error> {
         let configs: IndexMap<String, &SourceConfig> = self
             .config
             .sources
@@ -466,50 +492,20 @@ impl PollingProcessor for PipelineOrchestrator {
             .map(|(k, v)| (k.clone(), v))
             .collect();
 
-        if cold_start {
-            self.multi_tracker.init_all(&configs).await?;
-        }
-
-        let pending_files = self
+        // Take discovery snapshots from trackers before spawning
+        let discovery_sources = self
             .multi_tracker
-            .list_all_pending(&self.ctx.source_storages, &configs)
-            .await?;
+            .discovery_sources(&self.ctx.source_storages, &configs)?;
 
-        if pending_files.is_empty() {
-            // Mark all trackers as idle when no new files are found.
-            // This distinguishes between "no files exist" vs "files filtered by watermark".
-            self.multi_tracker.mark_all_idle();
-            return Ok(None);
-        }
-
-        emit!(FilesDiscovered {
-            count: pending_files.len() as u64,
-            target: self.key.id().to_string(),
-        });
-
-        // Build per-source file counts for logging
-        let mut source_counts: IndexMap<&str, usize> = IndexMap::new();
-        for file in &pending_files {
-            *source_counts.entry(file.source_name.as_str()).or_default() += 1;
-        }
-        let breakdown: Vec<_> = source_counts
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-
-        info!(
-            target = %self.key,
-            files = pending_files.len(),
-            breakdown = %breakdown.join(", "),
-            "Found files to process"
+        // Spawn discovery task — streams files through a channel
+        let discovery_task = DiscoveryTask::spawn(
+            discovery_sources,
+            self.shutdown.clone(),
+            self.key.id().to_string(),
         );
 
-        Ok(Some(pending_files))
-    }
-
-    async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
         let iteration = Iteration::new(
-            state,
+            discovery_task,
             &self.ctx,
             &self.config,
             self.shutdown.clone(),
@@ -517,13 +513,24 @@ impl PollingProcessor for PipelineOrchestrator {
             self.key.id(),
         )?;
 
-        let (result, sink) = iteration
+        let (result, sink, discovery_count) = iteration
             .run(
                 &mut self.multi_tracker,
                 &mut self.failure_tracker,
                 self.shutdown.clone(),
             )
             .await?;
+
+        // Emit discovery metric now that we know the total
+        if discovery_count > 0 {
+            emit!(FilesDiscovered {
+                count: discovery_count as u64,
+                target: self.key.id().to_string(),
+            });
+        } else {
+            // No files discovered — mark trackers idle
+            self.multi_tracker.mark_all_idle();
+        }
 
         // Finalize iteration: flush sink, DLQ, and save state
         sink.finalize().await?;

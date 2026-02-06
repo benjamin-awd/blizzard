@@ -3,6 +3,7 @@
 //! These tasks are spawned by the main pipeline to handle I/O-bound work
 //! concurrently while the main loop processes files.
 
+mod discovery;
 mod download;
 mod upload;
 
@@ -16,6 +17,7 @@ use tracing::warn;
 use crate::error::ReaderError;
 use crate::source::FileReader;
 
+pub(super) use discovery::DiscoveryTask;
 pub(super) use download::{DownloadTask, DownloadedFile};
 pub(super) use upload::UploadTask;
 
