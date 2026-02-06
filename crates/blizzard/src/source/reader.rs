@@ -54,13 +54,10 @@ impl NdjsonReaderConfig {
         }
     }
 
-    /// Create a new reader configuration with object-to-string coercion enabled.
-    pub fn with_coercion(batch_size: usize, compression: CompressionFormat) -> Self {
-        Self {
-            batch_size,
-            compression,
-            coerce_objects_to_strings: true,
-        }
+    /// Enable object-to-string coercion for Utf8 fields.
+    pub fn coerce_objects_to_strings(mut self) -> Self {
+        self.coerce_objects_to_strings = true;
+        self
     }
 }
 
@@ -562,7 +559,8 @@ mod tests {
         let ndjson = r#"{"id": 1, "data": {"nested": "value"}}
 {"id": 2, "data": "plain string"}"#;
 
-        let config = NdjsonReaderConfig::with_coercion(1000, CompressionFormat::None);
+        let config =
+            NdjsonReaderConfig::new(1000, CompressionFormat::None).coerce_objects_to_strings();
         let reader = NdjsonReader::new(schema, config, "test".to_string());
 
         let bytes = Bytes::from(ndjson);
