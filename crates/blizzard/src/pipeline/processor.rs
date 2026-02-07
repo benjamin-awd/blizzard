@@ -22,9 +22,11 @@ use blizzard_core::{
     PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
 };
 
-use super::download::{Downloader, IncrementalCheckpointConfig, ProcessingContext};
+use super::download::{
+    Downloader, IncrementalCheckpointConfig, ProcessingContext, SinkWorkerChannels,
+};
 use super::sink::Sink;
-use super::tasks::{DiscoveryTask, DownloadTask, UploadTask};
+use super::tasks::{DiscoveryTask, DownloadTask, ProcessedFile, UploadTask, run_sink_worker};
 use super::tracker::{HashMapTracker, MultiSourceTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{MB, PipelineConfig, PipelineKey, SourceConfig};
@@ -269,9 +271,12 @@ pub(super) struct ResolvedConfig {
 /// Encapsulates the state and logic for a single processing iteration.
 ///
 /// Created fresh for each iteration, isolating per-iteration components
-/// (writer, downloader, download task) from the long-lived processor state.
+/// (workers, downloader, download task) from the long-lived processor state.
 struct Iteration {
-    sink: Sink,
+    /// Channels for communicating with sink workers.
+    worker_channels: SinkWorkerChannels,
+    /// Join handles for sink worker tasks (for waiting on finalization).
+    worker_handles: Vec<tokio::task::JoinHandle<()>>,
     downloader: Downloader,
     download_task: DownloadTask,
     discovery_handle: tokio::task::JoinHandle<Result<usize, PipelineError>>,
@@ -282,7 +287,7 @@ impl Iteration {
     /// Create a new iteration with all per-iteration components.
     ///
     /// Takes a `DiscoveryTask` whose channel is passed to the `DownloadTask`,
-    /// forming the pipeline: discovery → download → parse → write.
+    /// forming the pipeline: discovery → download → parse → N sink workers.
     fn new(
         discovery_task: DiscoveryTask,
         ctx: &ProcessorContext,
@@ -291,6 +296,8 @@ impl Iteration {
         global_semaphore: Option<Arc<Semaphore>>,
         key: &str,
     ) -> Result<Self, PipelineError> {
+        let sink_parallelism = config.sink_parallelism;
+
         // Build rolling policies from config
         let mut rolling_policies = vec![RollingPolicy::SizeLimit(config.sink.file_size_mb * MB)];
         if let Some(secs) = config.sink.rollover_timeout_secs {
@@ -301,23 +308,47 @@ impl Iteration {
             .with_file_size_mb(config.sink.file_size_mb)
             .with_row_group_size_bytes(config.sink.row_group_size_bytes)
             .with_compression(config.sink.compression)
-            .with_rolling_policies(rolling_policies);
+            .with_rolling_policies(rolling_policies.clone());
 
-        // Spawn upload task for concurrent uploads
-        let upload_task = UploadTask::spawn(
-            ctx.destination_storage.clone(),
-            config.sink.max_concurrent_uploads,
-            global_semaphore.clone(),
-            key.to_string(),
-        );
+        // Spawn N sink workers, each with its own Sink (own ParquetWriter + UploadTask)
+        let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut file_txs = Vec::with_capacity(sink_parallelism);
+        let mut worker_handles = Vec::with_capacity(sink_parallelism);
 
-        let sink = Sink::new(
-            ctx.schema.clone(),
-            writer_config,
-            upload_task,
-            ctx.partition_extractor.clone(),
-            key.to_string(),
-        )?;
+        for _ in 0..sink_parallelism {
+            let upload_task = UploadTask::spawn(
+                ctx.destination_storage.clone(),
+                config.sink.max_concurrent_uploads,
+                global_semaphore.clone(),
+                key.to_string(),
+            );
+
+            let sink = Sink::new(
+                ctx.schema.clone(),
+                writer_config.clone(),
+                upload_task,
+                ctx.partition_extractor.clone(),
+                key.to_string(),
+            )?;
+
+            // Bounded channel with capacity 1: workers pull files on demand,
+            // providing natural backpressure to the distributor.
+            let (file_tx, file_rx) = tokio::sync::mpsc::channel::<ProcessedFile>(1);
+            let worker_result_tx = result_tx.clone();
+
+            let handle = tokio::spawn(run_sink_worker(sink, file_rx, worker_result_tx));
+
+            file_txs.push(file_tx);
+            worker_handles.push(handle);
+        }
+
+        // Drop the original result_tx — workers hold the clones
+        drop(result_tx);
+
+        let worker_channels = SinkWorkerChannels {
+            file_txs,
+            result_rx,
+        };
 
         // Feed discovery channel into download task
         let download_task = DownloadTask::spawn(
@@ -329,7 +360,7 @@ impl Iteration {
             key.to_string(),
         );
 
-        let max_in_flight = config.max_concurrent_files * 2;
+        let max_in_flight = config.max_concurrent_files.min(8);
         let downloader = Downloader::new(ctx.readers.clone(), max_in_flight, key.to_string());
 
         // Get checkpoint config from first source that uses watermark
@@ -345,7 +376,8 @@ impl Iteration {
             });
 
         Ok(Self {
-            sink,
+            worker_channels,
+            worker_handles,
             downloader,
             download_task,
             discovery_handle: discovery_task.handle,
@@ -353,18 +385,16 @@ impl Iteration {
         })
     }
 
-    /// Run the iteration: download, parse, and write files.
+    /// Run the iteration: download, parse, and write files via sink workers.
     ///
-    /// Returns the iteration result, the sink (for finalization), and the
-    /// total number of files discovered.
+    /// Returns the iteration result and the total number of files discovered.
     async fn run(
-        mut self,
+        self,
         multi_tracker: &mut MultiSourceTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
-    ) -> Result<(IterationResult, Sink, usize), PipelineError> {
+    ) -> Result<(IterationResult, usize), PipelineError> {
         let mut ctx = ProcessingContext {
-            sink: &mut self.sink,
             multi_tracker,
             failure_tracker,
         };
@@ -373,6 +403,7 @@ impl Iteration {
             .run(
                 self.download_task,
                 &mut ctx,
+                self.worker_channels,
                 shutdown,
                 &self.checkpoint_config,
             )
@@ -386,7 +417,16 @@ impl Iteration {
             .await
             .map_err(|e| PipelineError::TaskJoin { source: e })??;
 
-        Ok((result, self.sink, discovery_count))
+        // Wait for all sink workers to finalize (flush + upload remaining files).
+        // Workers exit when their file_tx senders are dropped (which happens
+        // when SinkWorkerChannels is dropped at end of Downloader::run).
+        for handle in self.worker_handles {
+            handle
+                .await
+                .map_err(|e| PipelineError::TaskJoin { source: e })?;
+        }
+
+        Ok((result, discovery_count))
     }
 }
 
@@ -513,7 +553,7 @@ impl PollingProcessor for PipelineOrchestrator {
             self.key.id(),
         )?;
 
-        let (result, sink, discovery_count) = iteration
+        let (result, discovery_count) = iteration
             .run(
                 &mut self.multi_tracker,
                 &mut self.failure_tracker,
@@ -532,8 +572,8 @@ impl PollingProcessor for PipelineOrchestrator {
             self.multi_tracker.mark_all_idle();
         }
 
-        // Finalize iteration: flush sink, DLQ, and save state
-        sink.finalize().await?;
+        // Finalize iteration: DLQ and save state
+        // (Sink finalization happens inside each worker task)
         self.failure_tracker.finalize_dlq().await;
 
         if let Err(e) = self.multi_tracker.save_all().await {
