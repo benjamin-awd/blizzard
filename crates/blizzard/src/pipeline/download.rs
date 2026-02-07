@@ -1,13 +1,14 @@
 //! Download processing orchestration.
 //!
 //! Coordinates the download -> parse -> write pipeline with backpressure
-//! and failure handling. Supports multiple sources merging into a single sink.
+//! and failure handling. Supports multiple sources merging into parallel sinks.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
+use tokio::sync::mpsc;
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -20,8 +21,9 @@ use blizzard_core::metrics::events::{
 };
 use blizzard_core::polling::IterationResult;
 
-use super::sink::Sink;
-use super::tasks::{DownloadTask, ProcessedFile, spawn_read_task};
+use super::tasks::{
+    CompletedFile, CompletionTracker, DownloadTask, ProcessedFile, spawn_read_task,
+};
 use super::tracker::MultiSourceTracker;
 use crate::config::CheckpointConfig;
 use crate::dlq::FailureTracker;
@@ -52,15 +54,22 @@ impl IncrementalCheckpointConfig {
 
 /// Context holding mutable references needed during download processing.
 pub(super) struct ProcessingContext<'a> {
-    pub sink: &'a mut Sink,
     pub multi_tracker: &'a mut MultiSourceTracker,
     pub failure_tracker: &'a mut FailureTracker,
+}
+
+/// Channels for communicating with sink workers.
+pub(super) struct SinkWorkerChannels {
+    /// Senders to distribute files to workers (one per worker).
+    pub file_txs: Vec<mpsc::Sender<ProcessedFile>>,
+    /// Receiver for completion results from all workers.
+    pub result_rx: mpsc::UnboundedReceiver<Result<CompletedFile, (CompletedFile, PipelineError)>>,
 }
 
 /// Orchestrates the download -> parse -> write pipeline.
 ///
 /// Manages concurrent downloads and parsing with backpressure,
-/// coordinating between the file downloader, reader, and sink writer.
+/// coordinating between the file downloader, reader, and sink workers.
 /// Supports multiple sources with different compression formats.
 pub(super) struct Downloader {
     /// Per-source readers (compression may differ between sources).
@@ -84,8 +93,8 @@ impl Downloader {
 
     /// Run the download processing loop.
     ///
-    /// Consumes downloads from the downloader, spawns read tasks, writes results
-    /// to the sink, and tracks state/failures.
+    /// Consumes downloads from the downloader, spawns read tasks, distributes
+    /// them to sink workers round-robin, and tracks state/failures.
     ///
     /// When `checkpoint_config.enabled` is true, saves checkpoints periodically
     /// based on file count and time interval to prevent progress loss on crash.
@@ -93,6 +102,7 @@ impl Downloader {
         &self,
         mut download_task: DownloadTask,
         ctx: &mut ProcessingContext<'_>,
+        mut workers: SinkWorkerChannels,
         shutdown: CancellationToken,
         checkpoint_config: &IncrementalCheckpointConfig,
     ) -> Result<IterationResult, PipelineError> {
@@ -101,9 +111,14 @@ impl Downloader {
         let mut files_downloaded: usize = 0;
         let mut files_processed: usize = 0;
         let mut util_timer = UtilizationTimer::new(&self.pipeline_key);
+        let mut completion_tracker = CompletionTracker::new();
 
         // Track how many files have been spawned but not yet fully consumed.
         let mut files_in_flight: usize = 0;
+
+        // Round-robin index for distributing files to workers
+        let num_workers = workers.file_txs.len();
+        let mut next_worker: usize = 0;
 
         // Emit initial pending files count (0 — discovery is still running)
         emit!(PendingFiles {
@@ -130,47 +145,28 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
 
-            // Process pending files (writes are serial for Parquet ordering).
-            // handle_processed_file uses select! to also accept downloads
-            // while writing, so decompression overlaps with sink writes.
+            // Distribute pending files to workers (round-robin).
             if let Some(processed) = pending.pop_front() {
                 util_timer.maybe_update();
 
-                // Update utilization state: waiting if no active processing
                 if files_in_flight == 0 {
                     util_timer.start_wait();
                 }
 
-                self.handle_processed_file(
-                    processed,
-                    &mut download_task,
-                    &mut pending,
-                    ctx,
-                    &mut files_in_flight,
-                    &mut files_downloaded,
-                    &mut files_processed,
-                )
-                .await?;
+                completion_tracker.assign(&processed.source_name, &processed.path);
 
-                // Update pending files count (discovered minus processed)
-                files_processed += 1;
-                emit!(PendingFiles {
-                    count: files_downloaded.saturating_sub(files_processed),
-                    target: self.pipeline_key.clone(),
-                });
+                // Round-robin send to the next worker. The bounded channel
+                // provides natural backpressure if this worker is busy.
+                workers.file_txs[next_worker]
+                    .send(processed)
+                    .await
+                    .map_err(|_| PipelineError::ChannelClosed)?;
+                next_worker = (next_worker + 1) % num_workers;
 
-                // Track files for incremental checkpoint
-                if checkpoint_config.enabled {
-                    files_since_save += 1;
-                    if files_since_save >= checkpoint_config.interval_files {
-                        self.try_incremental_save(ctx.multi_tracker, &mut files_since_save)
-                            .await;
-                    }
-                }
                 continue;
             }
 
-            // No pending files — wait for downloads, shutdown, or checkpoint
+            // No pending files — wait for downloads, completions, shutdown, or checkpoint
             tokio::select! {
                 biased;
 
@@ -178,6 +174,63 @@ impl Downloader {
                     info!(target = %self.pipeline_key, "Shutdown requested during processing");
                     download_task.abort();
                     return Ok(IterationResult::Shutdown);
+                }
+
+                // Collect completions from sink workers
+                Some(result) = workers.result_rx.recv() => {
+                    files_in_flight = files_in_flight.saturating_sub(1);
+
+                    match result {
+                        Ok(completed) => {
+                            if files_in_flight == 0 {
+                                util_timer.stop_wait();
+                            }
+
+                            completion_tracker.mark_completed(&completed.path);
+
+                            // Advance watermark for contiguous completions
+                            for (source, path) in completion_tracker.drain_contiguous() {
+                                ctx.multi_tracker.mark_processed(&source, &path);
+                            }
+
+                            emit!(FileProcessed {
+                                status: FileStatus::Success,
+                                target: self.pipeline_key.clone(),
+                            });
+                        }
+                        Err((completed, error)) => {
+                            warn!(
+                                target = %self.pipeline_key,
+                                path = %completed.path,
+                                error = %error,
+                                "Sink worker failed to process file"
+                            );
+                            // Mark completed to unblock contiguous drain —
+                            // the file will be reprocessed on restart since
+                            // its watermark was never advanced.
+                            completion_tracker.mark_completed(&completed.path);
+                            completion_tracker.drain_contiguous();
+
+                            ctx.failure_tracker
+                                .record_failure(&error.to_string(), FailureStage::Upload)
+                                .await?;
+                        }
+                    }
+
+                    files_processed += 1;
+                    emit!(PendingFiles {
+                        count: files_downloaded.saturating_sub(files_processed),
+                        target: self.pipeline_key.clone(),
+                    });
+
+                    // Track files for incremental checkpoint
+                    if checkpoint_config.enabled {
+                        files_since_save += 1;
+                        if files_since_save >= checkpoint_config.interval_files {
+                            self.try_incremental_save(ctx.multi_tracker, &mut files_since_save)
+                                .await;
+                        }
+                    }
                 }
 
                 // Time-based checkpoint save
@@ -263,121 +316,5 @@ impl Downloader {
                 );
             }
         }
-    }
-
-    /// Handle a processed file result.
-    ///
-    /// Consumes batches from the streaming channel and writes them to the sink.
-    /// Uses `select!` to also accept incoming downloads while processing, so
-    /// decompression of the next files runs concurrently on the blocking thread
-    /// pool while the current file's batches are written.
-    ///
-    /// # Watermark Advancement Atomicity
-    ///
-    /// The watermark is only advanced after successful sink writes. This is
-    /// guaranteed by the `?` operator on `write_batch()` / `end_file()`:
-    ///
-    /// 1. All batch writes must succeed first
-    /// 2. Only then does `mark_processed()` advance the watermark
-    ///
-    /// If any sink write fails, the error propagates and the watermark is
-    /// never updated. On restart, the file will be reprocessed.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_processed_file(
-        &self,
-        processed: ProcessedFile,
-        download_task: &mut DownloadTask,
-        pending: &mut VecDeque<ProcessedFile>,
-        ctx: &mut ProcessingContext<'_>,
-        files_in_flight: &mut usize,
-        files_downloaded: &mut usize,
-        files_processed: &mut usize,
-    ) -> Result<(), PipelineError> {
-        let ProcessedFile {
-            source_name,
-            path,
-            mut batch_rx,
-        } = processed;
-
-        // Track whether the download channel has closed so we don't busy-loop
-        // on recv() returning None repeatedly.
-        let mut downloads_done = false;
-
-        // IMPORTANT: Sink writes must succeed before watermark update.
-        // The `?` ensures atomicity - if write fails, watermark stays put.
-        let write_result = async {
-            ctx.sink.start_file(&path)?;
-
-            let mut batch_count: usize = 0;
-            let mut total_records: usize = 0;
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    // Accept downloads while processing batches. Spawning
-                    // read tasks here lets decompression run on the blocking
-                    // thread pool concurrently with the current file's writes.
-                    result = download_task.rx.recv(),
-                        if !downloads_done && *files_in_flight < self.max_in_flight =>
-                    {
-                        match result {
-                            Some(Ok(downloaded)) => {
-                                *files_downloaded += 1;
-                                *files_in_flight += 1;
-                                emit!(PendingFiles {
-                                    count: files_downloaded.saturating_sub(*files_processed),
-                                    target: self.pipeline_key.clone(),
-                                });
-                                pending.push_back(spawn_read_task(downloaded, &self.readers));
-                            }
-                            Some(Err(e)) => {
-                                warn!(target = %self.pipeline_key, error = %e, "Download failed");
-                                ctx.failure_tracker
-                                    .record_failure(&e.to_string(), FailureStage::Download)
-                                    .await?;
-                                *files_downloaded += 1;
-                                *files_processed += 1;
-                                emit!(PendingFiles {
-                                    count: files_downloaded.saturating_sub(*files_processed),
-                                    target: self.pipeline_key.clone(),
-                                });
-                            }
-                            None => {
-                                downloads_done = true;
-                            }
-                        }
-                    }
-
-                    // Process next batch from the current file
-                    batch_result = batch_rx.recv() => {
-                        match batch_result {
-                            Some(result) => {
-                                let batch = result.map_err(|e| PipelineError::Reader { source: e })?;
-                                total_records += batch.num_rows();
-                                batch_count += 1;
-                                ctx.sink.write_batch(&batch).await?;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-
-            ctx.sink.end_file(&path, batch_count, total_records).await?;
-            Ok::<(), PipelineError>(())
-        }
-        .await;
-
-        // Decrement before propagating errors so the slot is freed either way.
-        *files_in_flight = files_in_flight.saturating_sub(1);
-
-        write_result?;
-        ctx.multi_tracker.mark_processed(&source_name, &path);
-        emit!(FileProcessed {
-            status: FileStatus::Success,
-            target: self.pipeline_key.clone(),
-        });
-        Ok(())
     }
 }

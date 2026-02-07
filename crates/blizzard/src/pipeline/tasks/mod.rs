@@ -7,6 +7,7 @@ mod discovery;
 mod download;
 mod upload;
 
+use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use indexmap::IndexMap;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::error::ReaderError;
+use crate::error::{PipelineError, ReaderError};
 use crate::source::FileReader;
 
 pub(super) use discovery::DiscoveryTask;
@@ -86,6 +87,108 @@ pub(super) fn spawn_read_task(
         source_name,
         path,
         batch_rx,
+    }
+}
+
+/// Result of processing a file through a sink worker.
+pub(super) struct CompletedFile {
+    pub path: String,
+}
+
+/// Tracks files assigned to sink workers and drains only contiguous completions.
+///
+/// Watermarks use lexicographic max, so out-of-order completion could skip files
+/// on crash. This tracker ensures the watermark only advances to the highest
+/// contiguous completion point.
+pub(super) struct CompletionTracker {
+    /// Assigned files in order: (source_name, path, completed).
+    assigned: VecDeque<(String, String, bool)>,
+}
+
+impl CompletionTracker {
+    pub fn new() -> Self {
+        Self {
+            assigned: VecDeque::new(),
+        }
+    }
+
+    /// Record that a file has been assigned to a worker.
+    pub fn assign(&mut self, source_name: &str, path: &str) {
+        self.assigned
+            .push_back((source_name.to_string(), path.to_string(), false));
+    }
+
+    /// Mark a file as completed by path.
+    pub fn mark_completed(&mut self, path: &str) {
+        for entry in self.assigned.iter_mut() {
+            if entry.1 == path {
+                entry.2 = true;
+                return;
+            }
+        }
+    }
+
+    /// Drain contiguous completed files from the front.
+    ///
+    /// Returns an iterator of (source_name, path) for files that can safely
+    /// have their watermarks advanced.
+    pub fn drain_contiguous(&mut self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        while let Some((_, _, true)) = self.assigned.front() {
+            let (source, path, _) = self.assigned.pop_front().unwrap();
+            result.push((source, path));
+        }
+        result
+    }
+}
+
+/// Run a sink worker that processes files from its channel.
+///
+/// Each worker owns a `Sink` and processes files sequentially from its input
+/// channel, sending completion results back through the result channel.
+pub(super) async fn run_sink_worker(
+    mut sink: super::sink::Sink,
+    mut file_rx: mpsc::Receiver<ProcessedFile>,
+    result_tx: mpsc::UnboundedSender<Result<CompletedFile, (CompletedFile, PipelineError)>>,
+) {
+    while let Some(processed) = file_rx.recv().await {
+        let _source_name = processed.source_name;
+        let path = processed.path;
+        let mut batch_rx = processed.batch_rx;
+
+        let write_result = async {
+            sink.start_file(&path)?;
+
+            let mut batch_count: usize = 0;
+            let mut total_records: usize = 0;
+
+            while let Some(result) = batch_rx.recv().await {
+                let batch = result.map_err(|e| PipelineError::Reader { source: e })?;
+                total_records += batch.num_rows();
+                batch_count += 1;
+                sink.write_batch(&batch).await?;
+            }
+
+            sink.end_file(&path, batch_count, total_records).await?;
+            Ok::<(), PipelineError>(())
+        }
+        .await;
+
+        let completed = CompletedFile { path: path.clone() };
+
+        let msg = match write_result {
+            Ok(()) => Ok(completed),
+            Err(e) => Err((completed, e)),
+        };
+
+        if result_tx.send(msg).is_err() {
+            break;
+        }
+    }
+
+    // Finalize this worker's sink (flush remaining data, wait for uploads)
+    if let Err(e) = sink.finalize().await {
+        warn!(error = %e, "Sink worker finalization failed");
     }
 }
 
@@ -248,5 +351,52 @@ mod tests {
         }
         assert_eq!(received, 20);
         assert_eq!(batches_delivered.load(Ordering::SeqCst), 20);
+    }
+
+    #[test]
+    fn test_completion_tracker_drains_contiguous() {
+        let mut tracker = CompletionTracker::new();
+        tracker.assign("src", "a.json");
+        tracker.assign("src", "b.json");
+        tracker.assign("src", "c.json");
+
+        // Complete out of order: c, then a
+        tracker.mark_completed("c.json");
+        assert!(tracker.drain_contiguous().is_empty());
+
+        tracker.mark_completed("a.json");
+        let drained = tracker.drain_contiguous();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].1, "a.json");
+
+        // Now complete b — both b and c should drain
+        tracker.mark_completed("b.json");
+        let drained = tracker.drain_contiguous();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].1, "b.json");
+        assert_eq!(drained[1].1, "c.json");
+    }
+
+    #[test]
+    fn test_completion_tracker_empty() {
+        let mut tracker = CompletionTracker::new();
+        assert!(tracker.drain_contiguous().is_empty());
+    }
+
+    #[test]
+    fn test_completion_tracker_all_in_order() {
+        let mut tracker = CompletionTracker::new();
+        tracker.assign("src", "a.json");
+        tracker.assign("src", "b.json");
+
+        tracker.mark_completed("a.json");
+        let drained = tracker.drain_contiguous();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].1, "a.json");
+
+        tracker.mark_completed("b.json");
+        let drained = tracker.drain_contiguous();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].1, "b.json");
     }
 }

@@ -72,6 +72,10 @@ fn default_max_concurrent_files() -> usize {
     4
 }
 
+fn default_sink_parallelism() -> usize {
+    4
+}
+
 fn default_poll_interval() -> u64 {
     60
 }
@@ -304,6 +308,9 @@ pub struct PipelineConfig {
     /// Maximum concurrent file downloads across all sources.
     #[serde(default = "default_max_concurrent_files")]
     pub max_concurrent_files: usize,
+    /// Number of parallel sink workers for concurrent file writing.
+    #[serde(default = "default_sink_parallelism")]
+    pub sink_parallelism: usize,
     /// Error handling configuration.
     #[serde(default)]
     pub error_handling: ErrorHandlingConfig,
