@@ -360,7 +360,7 @@ impl Iteration {
             key.to_string(),
         );
 
-        let max_in_flight = config.max_concurrent_files.min(8);
+        let max_in_flight = config.max_concurrent_files;
         let downloader = Downloader::new(ctx.readers.clone(), max_in_flight, key.to_string());
 
         // Get checkpoint config from first source that uses watermark

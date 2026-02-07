@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::time::Interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -145,7 +145,9 @@ impl Downloader {
                 target: self.pipeline_key.clone(),
             });
 
-            // Distribute pending files to workers (round-robin).
+            // Try to dispatch pending files to any worker with capacity.
+            // Prefers round-robin order but skips full workers to avoid
+            // head-of-line blocking where one slow worker stalls the pipeline.
             if let Some(processed) = pending.pop_front() {
                 util_timer.maybe_update();
 
@@ -153,17 +155,32 @@ impl Downloader {
                     util_timer.start_wait();
                 }
 
-                completion_tracker.assign(&processed.source_name, &processed.path);
-
-                // Round-robin send to the next worker. The bounded channel
-                // provides natural backpressure if this worker is busy.
-                workers.file_txs[next_worker]
-                    .send(processed)
-                    .await
-                    .map_err(|_| PipelineError::ChannelClosed)?;
-                next_worker = (next_worker + 1) % num_workers;
-
-                continue;
+                let source_name = processed.source_name.clone();
+                let path = processed.path.clone();
+                let mut file = Some(processed);
+                for i in 0..num_workers {
+                    let idx = (next_worker + i) % num_workers;
+                    match workers.file_txs[idx].try_send(file.take().unwrap()) {
+                        Ok(()) => {
+                            completion_tracker.assign(&source_name, &path);
+                            next_worker = (idx + 1) % num_workers;
+                            break;
+                        }
+                        Err(TrySendError::Full(returned)) => {
+                            file = Some(returned);
+                        }
+                        Err(TrySendError::Closed(_)) => {
+                            return Err(PipelineError::ChannelClosed);
+                        }
+                    }
+                }
+                if file.is_none() {
+                    // Successfully dispatched
+                    continue;
+                }
+                // All workers full — push back and fall through to select!
+                // to process completions or accept new downloads.
+                pending.push_front(file.unwrap());
             }
 
             // No pending files — wait for downloads, completions, shutdown, or checkpoint
