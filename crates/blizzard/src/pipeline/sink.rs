@@ -59,17 +59,21 @@ impl Sink {
     }
 
     /// Set partition context for the next source file.
-    pub fn start_file(&mut self, path: &str, source: &str) -> Result<(), PipelineError> {
+    pub async fn start_file(&mut self, path: &str, source: &str) -> Result<(), PipelineError> {
         self.batch_writer.set_source(source);
         let partition_values = self.partition_extractor.extract(path);
-        self.batch_writer.set_partition_context(partition_values)?;
+        // Partition changes trigger roll_file() which compresses/closes the current
+        // parquet writer — offload to avoid blocking the tokio runtime.
+        tokio::task::block_in_place(|| self.batch_writer.set_partition_context(partition_values))?;
         Ok(())
     }
 
     /// Write a single batch. Internally handles row-group flushing and
     /// file rolling. Queues any rolled files for upload.
     pub async fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), PipelineError> {
-        self.batch_writer.write_batch(batch)?;
+        // Parquet encoding and compression (especially row-group flushes and file
+        // rolls) are CPU-intensive — offload to avoid blocking the tokio runtime.
+        tokio::task::block_in_place(|| self.batch_writer.write_batch(batch))?;
 
         // Drain completed uploads to prevent channel backpressure
         self.drain_upload_results()?;
@@ -129,7 +133,7 @@ impl Sink {
         // Drain any pending results before closing
         self.drain_upload_results()?;
 
-        let finished_files = self.batch_writer.close()?;
+        let finished_files = tokio::task::block_in_place(|| self.batch_writer.close())?;
         let final_file_count = finished_files.len();
 
         // Queue remaining files for upload
@@ -176,7 +180,7 @@ mod tests {
 
     use crate::test_util::{test_batch, test_schema};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_sink_writer_extracts_partitions_and_writes() {
         let temp_dir = TempDir::new().unwrap();
         let dest_uri = temp_dir.path().to_str().unwrap();
@@ -212,14 +216,14 @@ mod tests {
         let path = "date=2024-01-15/file.json";
         let batch = test_batch(10);
 
-        writer.start_file(path, "test-source").unwrap();
+        writer.start_file(path, "test-source").await.unwrap();
         writer.write_batch(&batch).await.unwrap();
         writer.end_file(path, 1, 10).await.unwrap();
 
         writer.finalize().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_sink_writer_writes_multiple_files() {
         let temp_dir = TempDir::new().unwrap();
         let dest_uri = temp_dir.path().to_str().unwrap();
@@ -253,11 +257,17 @@ mod tests {
         .unwrap();
 
         // Write multiple files
-        writer.start_file("file1.json", "test-source").unwrap();
+        writer
+            .start_file("file1.json", "test-source")
+            .await
+            .unwrap();
         writer.write_batch(&test_batch(5)).await.unwrap();
         writer.end_file("file1.json", 1, 5).await.unwrap();
 
-        writer.start_file("file2.json", "test-source").unwrap();
+        writer
+            .start_file("file2.json", "test-source")
+            .await
+            .unwrap();
         writer.write_batch(&test_batch(10)).await.unwrap();
         writer.end_file("file2.json", 1, 10).await.unwrap();
 

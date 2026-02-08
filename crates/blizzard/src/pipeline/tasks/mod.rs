@@ -168,7 +168,7 @@ pub(super) async fn run_sink_worker(
         let mut batch_rx = processed.batch_rx;
 
         let write_result = async {
-            sink.start_file(&path, &source_name)?;
+            sink.start_file(&path, &source_name).await?;
 
             let mut batch_count: usize = 0;
             let mut total_records: usize = 0;
