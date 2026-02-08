@@ -58,6 +58,9 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 
+[features]
+tokio-console = ["blizzard-core/tokio-console"]
+
 [lints]
 workspace = true
 

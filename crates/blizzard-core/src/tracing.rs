@@ -20,8 +20,12 @@ pub fn init_tracing() {
     // Use rate-limited layer to prevent log spam
     let rate_limited = tracing_limit::RateLimitedLayer::new(fmt_layer);
 
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(rate_limited)
-        .with(env_filter)
-        .init();
+        .with(env_filter);
+
+    #[cfg(feature = "tokio-console")]
+    let registry = registry.with(console_subscriber::spawn());
+
+    registry.init();
 }

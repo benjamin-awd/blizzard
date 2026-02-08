@@ -6,7 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+tokio-console = ["console-subscriber", "tokio/tracing"]
+
 [dependencies]
+# Profiling
+console-subscriber = { workspace = true, optional = true }
+
 # Object storage
 object_store = { workspace = true }
 
