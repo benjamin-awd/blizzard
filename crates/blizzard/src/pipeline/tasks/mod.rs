@@ -400,3 +400,168 @@ mod tests {
         assert_eq!(drained[0].1, "b.json");
     }
 }
+
+#[cfg(test)]
+mod discovery_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use indexmap::IndexMap;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
+
+    use super::DiscoveryTask;
+    use crate::pipeline::tracker::{DiscoverySnapshot, DiscoverySource};
+
+    async fn create_test_storage(temp_dir: &TempDir) -> blizzard_core::StorageProviderRef {
+        Arc::new(
+            blizzard_core::storage::StorageProvider::for_url_with_options(
+                temp_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    fn create_files(temp_dir: &TempDir, paths: &[&str]) {
+        for path in paths {
+            let full_path = temp_dir.path().join(path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full_path, b"").unwrap();
+        }
+    }
+
+    /// Discovery with multiple sources finds files from all sources
+    /// and returns the correct total count.
+    #[tokio::test]
+    async fn test_discovery_multiple_sources() {
+        let dir_a = TempDir::new().unwrap();
+        create_files(&dir_a, &["a1.ndjson.gz", "a2.ndjson.gz"]);
+        let storage_a = create_test_storage(&dir_a).await;
+
+        let dir_b = TempDir::new().unwrap();
+        create_files(&dir_b, &["b1.ndjson.gz", "b2.ndjson.gz", "b3.ndjson.gz"]);
+        let storage_b = create_test_storage(&dir_b).await;
+
+        let mut sources = IndexMap::new();
+        sources.insert(
+            "source_a".to_string(),
+            DiscoverySource {
+                storage: storage_a,
+                snapshot: DiscoverySnapshot::Processed {
+                    processed_files: HashMap::new(),
+                },
+                prefixes: None,
+            },
+        );
+        sources.insert(
+            "source_b".to_string(),
+            DiscoverySource {
+                storage: storage_b,
+                snapshot: DiscoverySnapshot::Processed {
+                    processed_files: HashMap::new(),
+                },
+                prefixes: None,
+            },
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut task = DiscoveryTask::spawn(sources, shutdown, "test".to_string());
+
+        let mut received = Vec::new();
+        while let Some(file) = task.rx.recv().await {
+            received.push(file);
+        }
+
+        let total = task.handle.await.unwrap().unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(received.len(), 5);
+
+        let from_a: Vec<_> = received
+            .iter()
+            .filter(|f| f.source_name == "source_a")
+            .collect();
+        let from_b: Vec<_> = received
+            .iter()
+            .filter(|f| f.source_name == "source_b")
+            .collect();
+        assert_eq!(from_a.len(), 2);
+        assert_eq!(from_b.len(), 3);
+    }
+
+    /// Discovery with zero sources completes immediately with count 0.
+    #[tokio::test]
+    async fn test_discovery_no_sources() {
+        let sources = IndexMap::new();
+        let shutdown = CancellationToken::new();
+        let mut task = DiscoveryTask::spawn(sources, shutdown, "test".to_string());
+
+        assert!(task.rx.recv().await.is_none());
+        let total = task.handle.await.unwrap().unwrap();
+        assert_eq!(total, 0);
+    }
+
+    /// Pre-cancelled shutdown token causes discovery to return 0 files.
+    #[tokio::test]
+    async fn test_discovery_shutdown_skips_listing() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &["file.ndjson.gz"]);
+        let storage = create_test_storage(&dir).await;
+
+        let mut sources = IndexMap::new();
+        sources.insert(
+            "src".to_string(),
+            DiscoverySource {
+                storage,
+                snapshot: DiscoverySnapshot::Processed {
+                    processed_files: HashMap::new(),
+                },
+                prefixes: None,
+            },
+        );
+
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let mut task = DiscoveryTask::spawn(sources, shutdown, "test".to_string());
+
+        let mut received = Vec::new();
+        while let Some(file) = task.rx.recv().await {
+            received.push(file);
+        }
+
+        let total = task.handle.await.unwrap().unwrap();
+        assert_eq!(total, 0);
+        assert!(received.is_empty());
+    }
+
+    /// Channel closes properly when discovery finishes.
+    #[tokio::test]
+    async fn test_discovery_channel_closes_on_completion() {
+        let dir = TempDir::new().unwrap();
+        create_files(&dir, &["f.ndjson.gz"]);
+        let storage = create_test_storage(&dir).await;
+
+        let mut sources = IndexMap::new();
+        sources.insert(
+            "src".to_string(),
+            DiscoverySource {
+                storage,
+                snapshot: DiscoverySnapshot::Processed {
+                    processed_files: HashMap::new(),
+                },
+                prefixes: None,
+            },
+        );
+
+        let shutdown = CancellationToken::new();
+        let mut task = DiscoveryTask::spawn(sources, shutdown, "test".to_string());
+
+        while task.rx.recv().await.is_some() {}
+        let total = task.handle.await.unwrap().unwrap();
+        assert_eq!(total, 1);
+    }
+}
