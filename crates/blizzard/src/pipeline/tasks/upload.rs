@@ -38,7 +38,26 @@ use blizzard_core::metrics::events::{
 };
 use blizzard_core::{FinishedFile, StorageProviderRef};
 
+use crate::config::SinkConfig;
 use crate::error::TableWriteError;
+
+/// Configuration for multipart uploads (sizes in bytes).
+#[derive(Debug, Clone)]
+pub struct MultipartConfig {
+    pub part_size: usize,
+    pub min_multipart_size: usize,
+    pub max_concurrent_parts: usize,
+}
+
+impl MultipartConfig {
+    pub fn from_sink_config(config: &SinkConfig) -> Self {
+        Self {
+            part_size: config.part_size_mb * blizzard_core::MB,
+            min_multipart_size: config.min_multipart_size_mb * blizzard_core::MB,
+            max_concurrent_parts: config.max_concurrent_parts,
+        }
+    }
+}
 
 /// Future type for upload operations. Returns result and the file size for queue tracking.
 type UploadFuture =
@@ -67,6 +86,7 @@ impl UploadTask {
         max_concurrent: usize,
         global_semaphore: Option<Arc<Semaphore>>,
         pipeline: String,
+        multipart_config: MultipartConfig,
     ) -> Self {
         let (file_tx, file_rx) = mpsc::channel(max_concurrent);
         // Result channel is bounded - callers must poll try_recv() to drain results
@@ -80,6 +100,7 @@ impl UploadTask {
             max_concurrent,
             global_semaphore,
             pipeline,
+            multipart_config,
         ));
 
         Self {
@@ -139,6 +160,7 @@ impl UploadTask {
         max_concurrent: usize,
         global_semaphore: Option<Arc<Semaphore>>,
         pipeline: String,
+        multipart_config: MultipartConfig,
     ) {
         let mut uploads: FuturesUnordered<UploadFuture> = FuturesUnordered::new();
         let mut active_uploads: usize = 0;
@@ -219,6 +241,7 @@ impl UploadTask {
                     );
 
                     let semaphore = global_semaphore.clone();
+                    let mp_config = multipart_config.clone();
                     uploads.push(Box::pin(async move {
                         // Acquire global semaphore permit if configured
                         let _permit = match &semaphore {
@@ -231,7 +254,7 @@ impl UploadTask {
                             },
                             None => None,
                         };
-                        (upload_file(storage, file, pipeline_clone).await, size)
+                        (upload_file(storage, file, pipeline_clone, &mp_config).await, size)
                     }));
                 }
             }
@@ -296,10 +319,14 @@ impl UploadTask {
 }
 
 /// Upload a file to storage asynchronously.
+///
+/// Uses multipart upload for files at or above the configured threshold,
+/// falling back to single PUT with content-type for smaller files.
 async fn upload_file(
     storage: StorageProviderRef,
     file: FinishedFile,
     pipeline: String,
+    multipart_config: &MultipartConfig,
 ) -> Result<UploadedFile, TableWriteError> {
     use object_store::PutPayload;
     use snafu::ResultExt;
@@ -310,13 +337,24 @@ async fn upload_file(
     let record_count = file.record_count;
 
     if let Some(bytes) = file.bytes {
-        storage
-            .put_parquet(
-                &object_store::path::Path::from(filename.as_str()),
-                PutPayload::from(bytes),
-            )
-            .await
-            .context(crate::error::WriteSnafu)?;
+        let path = object_store::path::Path::from(filename.as_str());
+        if size >= multipart_config.min_multipart_size {
+            storage
+                .put_multipart_bytes(
+                    &path,
+                    bytes,
+                    multipart_config.part_size,
+                    multipart_config.min_multipart_size,
+                    multipart_config.max_concurrent_parts,
+                )
+                .await
+                .context(crate::error::WriteSnafu)?;
+        } else {
+            storage
+                .put_parquet(&path, PutPayload::from(bytes))
+                .await
+                .context(crate::error::WriteSnafu)?;
+        }
     }
 
     emit!(ParquetFileWritten {
@@ -375,7 +413,17 @@ mod tests {
                 .unwrap(),
         );
 
-        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
+        let upload_task = UploadTask::spawn(
+            storage,
+            4,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
 
         // Send a file - this should succeed
         upload_task.send(test_file("file1.parquet")).await.unwrap();
@@ -403,7 +451,17 @@ mod tests {
                 .unwrap(),
         );
 
-        let upload_task = UploadTask::spawn(storage, 2, None, "test".to_string());
+        let upload_task = UploadTask::spawn(
+            storage,
+            2,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
 
         // Send multiple files
         for i in 0..5 {
@@ -440,7 +498,17 @@ mod tests {
         );
 
         // Use max_concurrent=1 to maximize pressure on the result channel.
-        let mut upload_task = UploadTask::spawn(storage, 1, None, "test".to_string());
+        let mut upload_task = UploadTask::spawn(
+            storage,
+            1,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
 
         let file_count = 10;
 
@@ -495,7 +563,17 @@ mod tests {
                 .unwrap(),
         );
 
-        let mut upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
+        let mut upload_task = UploadTask::spawn(
+            storage,
+            4,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
 
         // Send files
         for i in 0..4 {

@@ -20,7 +20,7 @@ use crate::source::FileReader;
 
 pub(super) use discovery::DiscoveryTask;
 pub(super) use download::{DownloadTask, DownloadedFile};
-pub(super) use upload::UploadTask;
+pub(super) use upload::{MultipartConfig, UploadTask};
 
 /// Result of spawning a read task: metadata + a channel of streaming batches.
 pub(super) struct ProcessedFile {

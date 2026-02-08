@@ -167,6 +167,7 @@ impl Sink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::tasks::MultipartConfig;
     use blizzard_core::StorageProvider;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -184,7 +185,17 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
+        let upload_task = UploadTask::spawn(
+            storage,
+            4,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
         let partition_extractor = PartitionExtractor::new(vec!["date".into()]);
         let writer_config = ParquetWriterConfig::default();
 
@@ -217,7 +228,17 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let upload_task = UploadTask::spawn(storage, 4, None, "test".to_string());
+        let upload_task = UploadTask::spawn(
+            storage,
+            4,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
         let partition_extractor = PartitionExtractor::all();
         let writer_config = ParquetWriterConfig::default();
 

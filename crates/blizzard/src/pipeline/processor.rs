@@ -27,7 +27,9 @@ use super::download::{
     Downloader, IncrementalCheckpointConfig, ProcessingContext, SinkWorkerChannels,
 };
 use super::sink::Sink;
-use super::tasks::{DiscoveryTask, DownloadTask, ProcessedFile, UploadTask, run_sink_worker};
+use super::tasks::{
+    DiscoveryTask, DownloadTask, MultipartConfig, ProcessedFile, UploadTask, run_sink_worker,
+};
 use super::tracker::{HashMapTracker, MultiSourceTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
 use crate::config::{MB, PipelineConfig, PipelineKey};
@@ -329,6 +331,7 @@ impl Iteration {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut file_txs = Vec::with_capacity(sink_parallelism);
         let mut worker_handles = Vec::with_capacity(sink_parallelism);
+        let multipart_config = MultipartConfig::from_sink_config(&config.sink);
 
         for _ in 0..sink_parallelism {
             let upload_task = UploadTask::spawn(
@@ -336,6 +339,7 @@ impl Iteration {
                 config.sink.max_concurrent_uploads,
                 global_semaphore.clone(),
                 key.to_string(),
+                multipart_config.clone(),
             );
 
             let sink = Sink::new(

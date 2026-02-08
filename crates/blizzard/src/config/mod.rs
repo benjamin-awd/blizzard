@@ -178,10 +178,31 @@ pub struct SinkConfig {
     /// Provides an upper bound on file age, ensuring data is committed regularly
     /// even during continuous high-throughput writes.
     pub rollover_timeout_secs: Option<u64>,
+    /// Part size for multipart uploads in MB.
+    #[serde(default = "default_part_size_mb")]
+    pub part_size_mb: usize,
+    /// Minimum file size to use multipart upload in MB.
+    #[serde(default = "default_min_multipart_size_mb")]
+    pub min_multipart_size_mb: usize,
+    /// Maximum concurrent parts per multipart upload.
+    #[serde(default = "default_max_concurrent_parts")]
+    pub max_concurrent_parts: usize,
 }
 
 fn default_max_concurrent_uploads() -> usize {
     4
+}
+
+fn default_part_size_mb() -> usize {
+    10
+}
+
+fn default_min_multipart_size_mb() -> usize {
+    100
+}
+
+fn default_max_concurrent_parts() -> usize {
+    8
 }
 
 fn default_file_size_mb() -> usize {
