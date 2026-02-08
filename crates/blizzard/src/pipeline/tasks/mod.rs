@@ -163,12 +163,12 @@ pub(super) async fn run_sink_worker(
     result_tx: mpsc::UnboundedSender<Result<CompletedFile, (CompletedFile, PipelineError)>>,
 ) {
     while let Some(processed) = file_rx.recv().await {
-        let _source_name = processed.source_name;
+        let source_name = processed.source_name;
         let path = processed.path;
         let mut batch_rx = processed.batch_rx;
 
         let write_result = async {
-            sink.start_file(&path)?;
+            sink.start_file(&path, &source_name)?;
 
             let mut batch_count: usize = 0;
             let mut total_records: usize = 0;

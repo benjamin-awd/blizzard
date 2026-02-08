@@ -181,6 +181,8 @@ pub struct ParquetWriter {
     current_partition_values: HashMap<String, String>,
     /// Pipeline identifier for metrics labeling.
     pipeline: String,
+    /// Current source name for logging context.
+    current_source: String,
 }
 
 impl ParquetWriter {
@@ -215,6 +217,7 @@ impl ParquetWriter {
             finished_files: Vec::new(),
             current_partition_values: partition_values,
             pipeline,
+            current_source: String::new(),
         })
     }
 
@@ -338,6 +341,7 @@ impl ParquetWriter {
         if should_roll {
             tracing::info!(
                 target = %self.pipeline,
+                source = %self.current_source,
                 "Rolling file due to policy: current_size={} ({:.2} MB), records={}, first_write={:?} ago, last_write={:?} ago",
                 current_size,
                 current_size as f64 / 1024.0 / 1024.0,
@@ -440,6 +444,11 @@ impl ParquetWriter {
     /// Take finished files without closing.
     pub fn take_finished_files(&mut self) -> Vec<FinishedFile> {
         std::mem::take(&mut self.finished_files)
+    }
+
+    /// Set the current source name for logging context.
+    pub fn set_source(&mut self, source: &str) {
+        self.current_source = source.to_string();
     }
 
     /// Get the current file size in bytes (including in-progress data).

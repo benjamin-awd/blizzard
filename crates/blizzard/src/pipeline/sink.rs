@@ -59,7 +59,8 @@ impl Sink {
     }
 
     /// Set partition context for the next source file.
-    pub fn start_file(&mut self, path: &str) -> Result<(), PipelineError> {
+    pub fn start_file(&mut self, path: &str, source: &str) -> Result<(), PipelineError> {
+        self.batch_writer.set_source(source);
         let partition_values = self.partition_extractor.extract(path);
         self.batch_writer.set_partition_context(partition_values)?;
         Ok(())
@@ -211,7 +212,7 @@ mod tests {
         let path = "date=2024-01-15/file.json";
         let batch = test_batch(10);
 
-        writer.start_file(path).unwrap();
+        writer.start_file(path, "test-source").unwrap();
         writer.write_batch(&batch).await.unwrap();
         writer.end_file(path, 1, 10).await.unwrap();
 
@@ -252,11 +253,11 @@ mod tests {
         .unwrap();
 
         // Write multiple files
-        writer.start_file("file1.json").unwrap();
+        writer.start_file("file1.json", "test-source").unwrap();
         writer.write_batch(&test_batch(5)).await.unwrap();
         writer.end_file("file1.json", 1, 5).await.unwrap();
 
-        writer.start_file("file2.json").unwrap();
+        writer.start_file("file2.json", "test-source").unwrap();
         writer.write_batch(&test_batch(10)).await.unwrap();
         writer.end_file("file2.json", 1, 10).await.unwrap();
 
