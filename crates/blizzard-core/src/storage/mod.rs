@@ -678,7 +678,7 @@ pub async fn list_ndjson_files_with_limit(
                             }
                         }
                         Err(e) => {
-                            if !e.to_string().contains("not found") {
+                            if !matches!(e, object_store::Error::NotFound { .. }) {
                                 return Err(StorageError::ObjectStore { source: e });
                             }
                         }
@@ -747,7 +747,7 @@ pub async fn list_ndjson_files_with_prefixes(
                         }
                         Err(e) => {
                             // Not found errors during listing are fine (empty prefix)
-                            if !e.to_string().contains("not found") {
+                            if !matches!(e, object_store::Error::NotFound { .. }) {
                                 return Err(StorageError::ObjectStore { source: e });
                             }
                         }
