@@ -253,7 +253,7 @@ impl MultiSourceTracker {
     /// Initialize all source trackers on cold start.
     pub async fn init_all(
         &mut self,
-        configs: &IndexMap<String, &SourceConfig>,
+        configs: &IndexMap<String, SourceConfig>,
     ) -> Result<(), PipelineError> {
         for (source_name, tracker) in &mut self.trackers {
             let config = configs.get(source_name);
@@ -348,7 +348,7 @@ impl MultiSourceTracker {
     pub fn discovery_sources(
         &self,
         storages: &IndexMap<String, StorageProviderRef>,
-        configs: &IndexMap<String, &SourceConfig>,
+        configs: &IndexMap<String, SourceConfig>,
     ) -> Result<IndexMap<String, DiscoverySource>, PipelineError> {
         let mut sources = IndexMap::new();
 

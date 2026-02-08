@@ -29,7 +29,7 @@ use super::sink::Sink;
 use super::tasks::{DiscoveryTask, DownloadTask, ProcessedFile, UploadTask, run_sink_worker};
 use super::tracker::{HashMapTracker, MultiSourceTracker, WatermarkTracker};
 use crate::checkpoint::CheckpointManager;
-use crate::config::{MB, PipelineConfig, PipelineKey, SourceConfig};
+use crate::config::{MB, PipelineConfig, PipelineKey};
 use crate::dlq::{DeadLetterQueue, FailureTracker};
 use crate::error::{ConfigError, PipelineError, StorageSnafu};
 use crate::parquet::{ParquetWriterConfig, RollingPolicy};
@@ -510,13 +510,7 @@ impl PollingProcessor for PipelineOrchestrator {
 
     async fn prepare(&mut self, cold_start: bool) -> Result<Option<Self::State>, Self::Error> {
         if cold_start {
-            let configs: IndexMap<String, &SourceConfig> = self
-                .config
-                .sources
-                .iter()
-                .map(|(k, v)| (k.clone(), v))
-                .collect();
-            self.multi_tracker.init_all(&configs).await?;
+            self.multi_tracker.init_all(&self.config.sources).await?;
         }
 
         // Always proceed to process — discovery runs there and returns
@@ -525,17 +519,10 @@ impl PollingProcessor for PipelineOrchestrator {
     }
 
     async fn process(&mut self, _state: Self::State) -> Result<IterationResult, Self::Error> {
-        let configs: IndexMap<String, &SourceConfig> = self
-            .config
-            .sources
-            .iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect();
-
         // Take discovery snapshots from trackers before spawning
         let discovery_sources = self
             .multi_tracker
-            .discovery_sources(&self.ctx.source_storages, &configs)?;
+            .discovery_sources(&self.ctx.source_storages, &self.config.sources)?;
 
         // Spawn discovery task — streams files through a channel
         let discovery_task = DiscoveryTask::spawn(
