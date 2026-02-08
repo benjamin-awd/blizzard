@@ -35,7 +35,7 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 async-trait = "0.1"
 
 # Decompression
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 zstd = { version = "0.13", default-features = false }
 
 # Serialization
