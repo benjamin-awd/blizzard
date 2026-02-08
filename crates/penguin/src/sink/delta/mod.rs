@@ -520,13 +520,25 @@ mod tests {
     fn test_is_table_not_found_delta_operation() {
         use deltalake::DeltaTableError;
 
-        // Test with a "not found" error message
+        // NotATable variant should be detected
         let err = DeltaError::DeltaOperation {
-            source: DeltaTableError::NotATable("Table not found".to_string()),
+            source: DeltaTableError::NotATable("no snapshot found".to_string()),
         };
         assert!(err.is_table_not_found());
 
-        // Test with other error types
+        // NotInitialized variant should be detected
+        let err = DeltaError::DeltaOperation {
+            source: DeltaTableError::NotInitialized,
+        };
+        assert!(err.is_table_not_found());
+
+        // Other DeltaTableError variants should not match
+        let err = DeltaError::DeltaOperation {
+            source: DeltaTableError::Generic("some error".to_string()),
+        };
+        assert!(!err.is_table_not_found());
+
+        // Non-DeltaOperation variants should not match
         let err = DeltaError::UrlParse {
             url: "invalid".to_string(),
         };

@@ -100,16 +100,11 @@ impl DeltaError {
     /// Check if this error indicates that the table was not found.
     pub fn is_table_not_found(&self) -> bool {
         match self {
-            DeltaError::DeltaOperation { source } => {
-                // Check for common "not found" patterns in the error message
-                let msg = source.to_string().to_lowercase();
-                msg.contains("not found")
-                    || msg.contains("no such file")
-                    || msg.contains("does not exist")
-                    || msg.contains("no log files")
-                    || msg.contains("no files in log")
-                    || msg.contains("not a table")
-            }
+            DeltaError::DeltaOperation { source } => matches!(
+                source,
+                deltalake::DeltaTableError::NotATable(_)
+                    | deltalake::DeltaTableError::NotInitialized
+            ),
             _ => false,
         }
     }
