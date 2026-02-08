@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::StreamExt;
+use futures::future::join_all;
 use tracing::{debug, trace, warn};
 
 use crate::error::StorageError;
@@ -192,8 +193,15 @@ pub async fn list_files_above_watermark_with_prefixes(
             "Scanning partitions >= watermark"
         );
 
-        for partition in partitions_to_scan {
-            let partition_files = match list_files_in_partition(storage, &partition, config).await {
+        let partition_results = join_all(
+            partitions_to_scan
+                .iter()
+                .map(|partition| list_files_in_partition(storage, partition, config)),
+        )
+        .await;
+
+        for (partition, result) in partitions_to_scan.iter().zip(partition_results) {
+            let partition_files = match result {
                 Ok(files) => files,
                 Err(e) if e.is_not_found() => {
                     // Partition doesn't exist (common with prefix filters)
@@ -208,7 +216,7 @@ pub async fn list_files_above_watermark_with_prefixes(
                 // For partitions after watermark, include all files
                 let filename = file.split('/').next_back().unwrap_or(&file);
 
-                if partition == watermark_partition {
+                if *partition == watermark_partition {
                     let dominated = filename <= watermark_filename.as_str();
                     if dominated {
                         let (_, explanation) = explain_comparison(filename, &watermark_filename);
@@ -267,10 +275,16 @@ pub async fn list_files_cold_start(
                 prefix_count = prefixes.len(),
                 "Cold start: scanning partitions with filter"
             );
-            let mut files = Vec::new();
+            let results = join_all(
+                prefixes
+                    .iter()
+                    .map(|prefix| list_files_in_partition(storage, prefix, config)),
+            )
+            .await;
 
-            for prefix in prefixes {
-                match list_files_in_partition(storage, prefix, config).await {
+            let mut files = Vec::new();
+            for (prefix, result) in prefixes.iter().zip(results) {
+                match result {
                     Ok(partition_files) => files.extend(partition_files),
                     Err(e) if e.is_not_found() => {
                         debug!(target = %config.target, prefix = %prefix, "Prefix not found, skipping");
