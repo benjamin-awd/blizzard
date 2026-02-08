@@ -766,7 +766,7 @@
               }
             ]
           },
-          "unit": "ops"
+          "unit": "none"
         },
         "overrides": []
       },
@@ -1939,7 +1939,7 @@
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
-            "fillOpacity": 80,
+            "fillOpacity": 30,
             "gradientMode": "none",
             "hideFrom": {
               "legend": false,
@@ -2561,8 +2561,10 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
+          "editorMode": "code",
           "expr": "sum by (stage) (rate(blizzard_files_failed_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{stage}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -3444,5 +3446,5 @@
   "timezone": "browser",
   "title": "[SYS] Blizzard",
   "uid": "blizzard-ingestion",
-  "version": 39
+  "version": 41
 }
