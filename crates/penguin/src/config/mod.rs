@@ -193,13 +193,6 @@ impl Mergeable for Config {
 }
 
 impl Config {
-    /// Load configuration from a file.
-    pub fn from_file(path: &str) -> Result<Self, ConfigError> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile { source })?;
-        Self::parse(&contents)
-    }
-
     /// Iterate over all tables with their keys.
     pub fn tables(&self) -> impl Iterator<Item = (&TableKey, &TableConfig)> {
         self.tables.iter()

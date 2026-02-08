@@ -29,6 +29,13 @@ pub trait Mergeable: Sized + Default + DeserializeOwned {
     /// Validate the configuration.
     fn validate(&self) -> Result<(), ConfigError>;
 
+    /// Load configuration from a file path.
+    fn from_file(path: &str) -> Result<Self, ConfigError> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile { source })?;
+        Self::parse(&contents)
+    }
+
     /// Parse configuration from a YAML string with env interpolation and validation.
     fn parse(contents: &str) -> Result<Self, ConfigError> {
         // Interpolate environment variables
