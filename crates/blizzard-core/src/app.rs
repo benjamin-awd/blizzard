@@ -3,15 +3,63 @@
 //! This module provides the `AppConfig` trait and `Application` struct
 //! to standardize startup logic across blizzard and penguin applications.
 
+use std::fs;
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{CliArgs, ConfigPath, Mergeable};
 use crate::error::ConfigError;
 use crate::topology::{Pipeline, PipelineContext, run_pipelines};
 use crate::tracing::init_tracing;
+
+/// Detect the CPU limit from Linux cgroup files.
+///
+/// Returns the number of whole CPUs available, or `None` if not running
+/// in a cgroup-limited environment (e.g., local development).
+fn detect_cpu_limit() -> Option<usize> {
+    // cgroups v2: /sys/fs/cgroup/cpu.max contains "$MAX $PERIOD" (e.g., "300000 100000" = 3 CPUs)
+    if let Some(cpus) = detect_cgroupv2() {
+        return Some(cpus);
+    }
+    // cgroups v1: separate quota and period files
+    if let Some(cpus) = detect_cgroupv1() {
+        return Some(cpus);
+    }
+    None
+}
+
+fn detect_cgroupv2() -> Option<usize> {
+    let content = fs::read_to_string("/sys/fs/cgroup/cpu.max").ok()?;
+    let mut parts = content.split_whitespace();
+    let max = parts.next()?;
+    if max == "max" {
+        return None; // unlimited
+    }
+    let max: usize = max.parse().ok()?;
+    let period: usize = parts.next()?.parse().ok()?;
+    let cpus = max / period;
+    if cpus > 0 { Some(cpus) } else { Some(1) }
+}
+
+fn detect_cgroupv1() -> Option<usize> {
+    let quota: isize = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if quota < 0 {
+        return None; // unlimited
+    }
+    let period: usize = fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let cpus = quota.cast_unsigned() / period;
+    if cpus > 0 { Some(cpus) } else { Some(1) }
+}
 
 /// Trait for application configurations that can be loaded and run.
 ///
@@ -88,7 +136,27 @@ impl<C: AppConfig> Application<C> {
     fn execute(self) -> ExitCode {
         self.config.log_startup_info();
 
-        let runtime = match tokio::runtime::Runtime::new() {
+        let global = Mergeable::global(&self.config);
+        let worker_threads = global.runtime_worker_threads.or_else(detect_cpu_limit);
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        match (global.runtime_worker_threads, worker_threads) {
+            (Some(threads), _) => {
+                info!("Tokio runtime worker threads: {threads} (from config)");
+                builder.worker_threads(threads);
+            }
+            (None, Some(threads)) => {
+                info!("Tokio runtime worker threads: {threads} (detected from cgroup CPU limit)");
+                builder.worker_threads(threads);
+            }
+            (None, None) => {
+                warn!(
+                    "No cgroup CPU limit detected, using Tokio default (host core count). \
+                     Consider setting global.runtime_worker_threads in containerized environments."
+                );
+            }
+        }
+        let runtime = match builder.build() {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("Failed to create tokio runtime: {e}");

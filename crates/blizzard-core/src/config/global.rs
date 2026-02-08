@@ -69,6 +69,18 @@ pub struct GlobalConfig {
     /// Default: 30 seconds.
     #[serde(default = "default_poll_jitter_secs")]
     pub poll_jitter_secs: u64,
+
+    /// Number of Tokio runtime worker threads.
+    ///
+    /// When set, limits the Tokio runtime to this many worker threads.
+    /// This is important in containerized environments where the default
+    /// (number of CPU cores on the host) may exceed the container's CPU
+    /// limit, causing CFS throttling.
+    ///
+    /// If `None` (the default), Tokio uses its default behavior (core
+    /// count, or the `TOKIO_WORKER_THREADS` environment variable).
+    #[serde(default)]
+    pub runtime_worker_threads: Option<usize>,
 }
 
 impl Default for GlobalConfig {
@@ -77,6 +89,7 @@ impl Default for GlobalConfig {
             total_concurrency: None,
             connection_pooling: default_true(),
             poll_jitter_secs: default_poll_jitter_secs(),
+            runtime_worker_threads: None,
         }
     }
 }
@@ -99,6 +112,9 @@ impl GlobalConfig {
     pub fn merge_from(&mut self, other: &Self) {
         if other.total_concurrency.is_some() {
             self.total_concurrency = other.total_concurrency;
+        }
+        if other.runtime_worker_threads.is_some() {
+            self.runtime_worker_threads = other.runtime_worker_threads;
         }
         // Always take explicit values for non-Option fields
         self.connection_pooling = other.connection_pooling;
@@ -197,6 +213,7 @@ poll_jitter_secs: 45
             total_concurrency: Some(16),
             connection_pooling: false,
             poll_jitter_secs: 60,
+            runtime_worker_threads: Some(4),
         };
         config.merge_from(&other);
         assert_eq!(config.total_concurrency, Some(16));
