@@ -452,16 +452,27 @@ mod tests {
 
     const TEST_PIPELINE: &str = "test";
 
+    /// Infer schema from uncompressed NDJSON records with conflict coercion enabled.
+    fn infer_ndjson(records: &[&str]) -> SchemaRef {
+        let bytes = make_ndjson(records);
+        infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap()
+    }
+
+    /// Assert that a field in the schema has the expected data type.
+    fn assert_field_type(schema: &SchemaRef, field: &str, expected: &DataType) {
+        assert_eq!(
+            schema.field_with_name(field).unwrap().data_type(),
+            expected,
+            "Expected field '{field}' to have type {expected:?}"
+        );
+    }
+
     #[test]
     fn test_infer_basic_types() {
-        let bytes = make_ndjson(&[
+        let schema = infer_ndjson(&[
             r#"{"id": 1, "name": "Alice", "active": true, "score": 95.5}"#,
             r#"{"id": 2, "name": "Bob", "active": false, "score": 87.0}"#,
         ]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
         assert_eq!(schema.fields().len(), 4);
         assert!(schema.field_with_name("id").is_ok());
         assert!(schema.field_with_name("name").is_ok());
@@ -471,29 +482,20 @@ mod tests {
 
     #[test]
     fn test_infer_nested_object() {
-        let bytes = make_ndjson(&[r#"{"id": 1, "meta": {"key": "value", "count": 42}}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let meta_field = schema.field_with_name("meta").unwrap();
-        match meta_field.data_type() {
-            DataType::Struct(fields) => {
-                assert_eq!(fields.len(), 2);
-            }
+        let schema = infer_ndjson(&[r#"{"id": 1, "meta": {"key": "value", "count": 42}}"#]);
+        match schema.field_with_name("meta").unwrap().data_type() {
+            DataType::Struct(fields) => assert_eq!(fields.len(), 2),
             other => panic!("Expected Struct type, got {other:?}"),
         }
     }
 
     #[test]
     fn test_infer_array_type() {
-        let bytes = make_ndjson(&[r#"{"tags": ["a", "b", "c"]}"#, r#"{"tags": ["d"]}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let tags_field = schema.field_with_name("tags").unwrap();
-        assert!(matches!(tags_field.data_type(), DataType::List(_)));
+        let schema = infer_ndjson(&[r#"{"tags": ["a", "b", "c"]}"#, r#"{"tags": ["d"]}"#]);
+        assert!(matches!(
+            schema.field_with_name("tags").unwrap().data_type(),
+            DataType::List(_)
+        ));
     }
 
     #[test]
@@ -502,10 +504,8 @@ mod tests {
             r#"{"id": 1, "name": "Alice"}"#,
             r#"{"id": 2, "name": "Bob"}"#,
         ]);
-
         let schema =
             infer_schema_from_bytes(&bytes, CompressionFormat::Gzip, TEST_PIPELINE, true).unwrap();
-
         assert_eq!(schema.fields().len(), 2);
         assert!(schema.field_with_name("id").is_ok());
         assert!(schema.field_with_name("name").is_ok());
@@ -514,8 +514,9 @@ mod tests {
     #[test]
     fn test_infer_empty_file_error() {
         let bytes = Bytes::new();
-        let result = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true);
-        assert!(result.is_err());
+        assert!(
+            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).is_err()
+        );
     }
 
     // ========================================================================
@@ -524,216 +525,106 @@ mod tests {
 
     #[test]
     fn test_conflict_object_vs_string() {
-        // Same field is an object in one record and a string in another
-        let bytes = make_ndjson(&[
+        let schema = infer_ndjson(&[
             r#"{"data": {"nested": "value"}}"#,
             r#"{"data": "just a string"}"#,
         ]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let data_field = schema.field_with_name("data").unwrap();
-        assert_eq!(
-            data_field.data_type(),
-            &DataType::Utf8,
-            "Conflicting object/string field should become Utf8"
-        );
+        assert_field_type(&schema, "data", &DataType::Utf8);
     }
 
     #[test]
     fn test_conflict_number_vs_string() {
-        // Same field is a number in one record and a string in another
-        let bytes = make_ndjson(&[r#"{"value": 123}"#, r#"{"value": "not a number"}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let value_field = schema.field_with_name("value").unwrap();
-        assert_eq!(
-            value_field.data_type(),
-            &DataType::Utf8,
-            "Conflicting number/string field should become Utf8"
-        );
+        let schema = infer_ndjson(&[r#"{"value": 123}"#, r#"{"value": "not a number"}"#]);
+        assert_field_type(&schema, "value", &DataType::Utf8);
     }
 
     #[test]
     fn test_int_float_widening() {
-        // Same field is an integer in one record and a float in another
-        // This should widen to Float64, not be treated as a conflict
-        let bytes = make_ndjson(&[r#"{"amount": 100}"#, r#"{"amount": 99.99}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let amount_field = schema.field_with_name("amount").unwrap();
-        assert_eq!(
-            amount_field.data_type(),
-            &DataType::Float64,
-            "Int + Float should widen to Float64"
-        );
+        let schema = infer_ndjson(&[r#"{"amount": 100}"#, r#"{"amount": 99.99}"#]);
+        assert_field_type(&schema, "amount", &DataType::Float64);
     }
 
     #[test]
     fn test_array_with_scalar_handled_by_arrow() {
-        // Arrow can handle array vs scalar by inferring List type
-        // This test verifies Arrow's behavior is preserved
-        let bytes = make_ndjson(&[r#"{"items": ["a", "b", "c"]}"#, r#"{"items": "single"}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let items_field = schema.field_with_name("items").unwrap();
-        // Arrow infers List type - this is Arrow's behavior
-        assert!(
-            matches!(items_field.data_type(), DataType::List(_)),
-            "Arrow handles array/scalar by inferring List"
-        );
+        let schema = infer_ndjson(&[r#"{"items": ["a", "b", "c"]}"#, r#"{"items": "single"}"#]);
+        assert!(matches!(
+            schema.field_with_name("items").unwrap().data_type(),
+            DataType::List(_)
+        ));
     }
 
     #[test]
     fn test_array_vs_number_handled_by_arrow() {
-        // Arrow also handles array vs number by inferring List
-        let bytes = make_ndjson(&[r#"{"data": [1, 2, 3]}"#, r#"{"data": 42}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let data_field = schema.field_with_name("data").unwrap();
-        // Arrow handles this by inferring List type
-        assert!(
-            matches!(data_field.data_type(), DataType::List(_)),
-            "Arrow handles array/number by inferring List"
-        );
+        let schema = infer_ndjson(&[r#"{"data": [1, 2, 3]}"#, r#"{"data": 42}"#]);
+        assert!(matches!(
+            schema.field_with_name("data").unwrap().data_type(),
+            DataType::List(_)
+        ));
     }
 
     #[test]
     fn test_nested_fields_preserved_on_conflict() {
-        // When a field conflicts, sibling and other nested fields should stay typed
-        let bytes = make_ndjson(&[
+        let schema = infer_ndjson(&[
             r#"{"id": 1, "meta": {"key": "val"}, "conflict": {"a": 1}}"#,
             r#"{"id": 2, "meta": {"key": "other"}, "conflict": "string"}"#,
         ]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        // Non-conflicting fields should retain their types
-        let id_field = schema.field_with_name("id").unwrap();
-        assert_eq!(id_field.data_type(), &DataType::Int64);
-
-        let meta_field = schema.field_with_name("meta").unwrap();
-        assert!(
-            matches!(meta_field.data_type(), DataType::Struct(_)),
-            "Non-conflicting nested object should stay Struct"
-        );
-
-        // Conflicting field becomes Utf8
-        let conflict_field = schema.field_with_name("conflict").unwrap();
-        assert_eq!(conflict_field.data_type(), &DataType::Utf8);
+        assert_field_type(&schema, "id", &DataType::Int64);
+        assert!(matches!(
+            schema.field_with_name("meta").unwrap().data_type(),
+            DataType::Struct(_)
+        ));
+        assert_field_type(&schema, "conflict", &DataType::Utf8);
     }
 
     #[test]
     fn test_conflict_with_gzip_compression() {
-        // Type conflicts should be handled correctly with compressed data
         let bytes = make_gzip_ndjson(&[
             r#"{"data": {"nested": true}}"#,
             r#"{"data": "string value"}"#,
         ]);
-
         let schema =
             infer_schema_from_bytes(&bytes, CompressionFormat::Gzip, TEST_PIPELINE, true).unwrap();
-
-        let data_field = schema.field_with_name("data").unwrap();
-        assert_eq!(
-            data_field.data_type(),
-            &DataType::Utf8,
-            "Conflicting field in compressed data should become Utf8"
-        );
+        assert_field_type(&schema, "data", &DataType::Utf8);
     }
 
     #[test]
     fn test_no_conflict_normal_inference() {
-        // When there are no conflicts, normal Arrow inference should work
-        let bytes = make_ndjson(&[
+        let schema = infer_ndjson(&[
             r#"{"id": 1, "name": "Alice", "active": true}"#,
             r#"{"id": 2, "name": "Bob", "active": false}"#,
             r#"{"id": 3, "name": "Charlie", "active": true}"#,
         ]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
         assert_eq!(schema.fields().len(), 3);
-        assert_eq!(
-            schema.field_with_name("id").unwrap().data_type(),
-            &DataType::Int64
-        );
-        assert_eq!(
-            schema.field_with_name("name").unwrap().data_type(),
-            &DataType::Utf8
-        );
-        assert_eq!(
-            schema.field_with_name("active").unwrap().data_type(),
-            &DataType::Boolean
-        );
+        assert_field_type(&schema, "id", &DataType::Int64);
+        assert_field_type(&schema, "name", &DataType::Utf8);
+        assert_field_type(&schema, "active", &DataType::Boolean);
     }
 
     #[test]
     fn test_conflict_bool_vs_string() {
-        // Boolean vs string conflict
-        let bytes = make_ndjson(&[r#"{"flag": true}"#, r#"{"flag": "yes"}"#]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let flag_field = schema.field_with_name("flag").unwrap();
-        assert_eq!(
-            flag_field.data_type(),
-            &DataType::Utf8,
-            "Conflicting bool/string field should become Utf8"
-        );
+        let schema = infer_ndjson(&[r#"{"flag": true}"#, r#"{"flag": "yes"}"#]);
+        assert_field_type(&schema, "flag", &DataType::Utf8);
     }
 
     #[test]
     fn test_null_handling_in_conflict_resolution() {
-        // Null values should not cause conflicts
-        let bytes = make_ndjson(&[
+        let schema = infer_ndjson(&[
             r#"{"value": null}"#,
             r#"{"value": 42}"#,
             r#"{"value": null}"#,
         ]);
-
-        let schema =
-            infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, true).unwrap();
-
-        let value_field = schema.field_with_name("value").unwrap();
-        assert_eq!(
-            value_field.data_type(),
-            &DataType::Int64,
-            "Null + Int should resolve to Int64"
-        );
+        assert_field_type(&schema, "value", &DataType::Int64);
     }
 
     #[test]
     fn test_coerce_conflicts_to_utf8_disabled_returns_error() {
-        // When coerce_conflicts_to_utf8 is false, type conflicts should return an error
         let bytes = make_ndjson(&[
             r#"{"data": {"nested": "value"}}"#,
             r#"{"data": "just a string"}"#,
         ]);
-
-        let result = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, false);
-
-        assert!(
-            result.is_err(),
-            "Should return error when coerce_conflicts_to_utf8 is false"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Expected scalar"),
-            "Error should mention type conflict: {err}"
-        );
+        let err = infer_schema_from_bytes(&bytes, CompressionFormat::None, TEST_PIPELINE, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("Expected scalar"));
     }
 
     // ========================================================================
@@ -828,50 +719,40 @@ mod tests {
         observer.build_schema()
     }
 
+    /// Assert that conflicts contain a conflict at the given field path.
+    fn assert_conflict_at(conflicts: &[ConflictInfo], field: &str) {
+        assert!(
+            conflicts.iter().any(|c| c.field == field),
+            "Expected conflict at '{field}'. Got: {conflicts:?}"
+        );
+    }
+
     #[test]
     fn test_nested_conflict_reports_full_path() {
-        // Verify that conflicts in nested fields report the full path
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"nested": {"value": 123, "stable": "ok"}}"#,
             r#"{"nested": {"value": "string", "stable": "ok"}}"#,
         ]);
-
-        assert!(
-            conflicts.iter().any(|c| c.field == "nested.value"),
-            "Should report nested conflict with full path. Got: {conflicts:?}"
-        );
-        assert!(
-            !conflicts.iter().any(|c| c.field == "nested.stable"),
-            "Should not report non-conflicting nested field"
-        );
+        assert_conflict_at(&conflicts, "nested.value");
+        assert!(!conflicts.iter().any(|c| c.field == "nested.stable"));
     }
 
     #[test]
     fn test_array_nested_conflict_reports_full_path() {
-        // Verify that conflicts in array element fields report the full path
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"items": [{"count": 1}, {"count": 2}]}"#,
             r#"{"items": [{"count": "many"}]}"#,
         ]);
-
-        assert!(
-            conflicts.iter().any(|c| c.field == "items[].count"),
-            "Should report array nested conflict with full path. Got: {conflicts:?}"
-        );
+        assert_conflict_at(&conflicts, "items[].count");
     }
 
     #[test]
     fn test_deeply_nested_conflict_reports_full_path() {
-        // Verify conflicts 3+ levels deep report the full path
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"a": {"b": {"c": {"deep_field": 123}}}}"#,
             r#"{"a": {"b": {"c": {"deep_field": "string"}}}}"#,
         ]);
-
-        assert!(
-            conflicts.iter().any(|c| c.field == "a.b.c.deep_field"),
-            "Should report deeply nested conflict with full path. Got: {conflicts:?}"
-        );
+        assert_conflict_at(&conflicts, "a.b.c.deep_field");
     }
 
     #[test]
@@ -880,125 +761,70 @@ mod tests {
             r#"{"top": 1, "nested": {"mid": true, "deep": {"bottom": 100}}}"#,
             r#"{"top": "string", "nested": {"mid": "string", "deep": {"bottom": "string"}}}"#,
         ]);
-
-        assert!(
-            conflicts.iter().any(|c| c.field == "top"),
-            "Should report top-level conflict. Got: {conflicts:?}"
-        );
-        assert!(
-            conflicts.iter().any(|c| c.field == "nested.mid"),
-            "Should report mid-level conflict. Got: {conflicts:?}"
-        );
-        assert!(
-            conflicts.iter().any(|c| c.field == "nested.deep.bottom"),
-            "Should report deep-level conflict. Got: {conflicts:?}"
-        );
-        assert_eq!(conflicts.len(), 3, "Should have exactly 3 conflicts");
+        assert_conflict_at(&conflicts, "top");
+        assert_conflict_at(&conflicts, "nested.mid");
+        assert_conflict_at(&conflicts, "nested.deep.bottom");
+        assert_eq!(conflicts.len(), 3);
     }
 
     #[test]
     fn test_array_element_type_conflict() {
-        // Array with mixed primitive types (not nested objects)
         let (_, conflicts) =
             observe_and_detect_conflicts(&[r#"{"tags": [1, 2, 3]}"#, r#"{"tags": ["a", "b"]}"#]);
-
-        // With the new approach, we detect the conflict at the array element level
-        assert!(
-            conflicts.iter().any(|c| c.field == "tags[]"),
-            "Should report array element conflict. Got: {conflicts:?}"
-        );
+        assert_conflict_at(&conflicts, "tags[]");
     }
 
     #[test]
     fn test_nested_array_in_nested_object() {
-        // nested.items[].value has a conflict
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"outer": {"items": [{"value": 1}, {"value": 2}]}}"#,
             r#"{"outer": {"items": [{"value": "text"}]}}"#,
         ]);
-
-        assert!(
-            conflicts.iter().any(|c| c.field == "outer.items[].value"),
-            "Should report nested array object field conflict. Got: {conflicts:?}"
-        );
+        assert_conflict_at(&conflicts, "outer.items[].value");
     }
 
     #[test]
     fn test_no_false_positives_for_compatible_types() {
-        // Int + Float should widen to Float64, not be a conflict
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"num": 42, "nested": {"val": 1}}"#,
             r#"{"num": 3.14, "nested": {"val": 2.5}}"#,
         ]);
-
-        assert!(
-            conflicts.is_empty(),
-            "Int+Float widening should not be reported as conflict. Got: {conflicts:?}"
-        );
+        assert!(conflicts.is_empty());
     }
 
     #[test]
     fn test_object_vs_scalar_conflict_reports_field_and_reason() {
-        // This is the scenario that triggered the original issue:
-        // Arrow reports "Object(...) v.s. Scalar(...)" but doesn't say which field.
-        // Our fallback should report both the field name and the conflicting types.
         let (_, conflicts) = observe_and_detect_conflicts(&[
             r#"{"indexes": {"alias": "foo", "doNotExpire": true, "name": "bar"}}"#,
             r#"{"indexes": "just a string"}"#,
         ]);
-
-        assert_eq!(conflicts.len(), 1, "Should have exactly 1 conflict");
+        assert_eq!(conflicts.len(), 1);
         let conflict = &conflicts[0];
-        assert_eq!(
-            conflict.field, "indexes",
-            "Should report 'indexes' as conflicting field"
-        );
-        assert_eq!(
-            conflict.resolved_type,
-            DataType::Utf8,
-            "Should resolve to Utf8"
-        );
-        assert!(
-            conflict.reason.contains("Object"),
-            "Reason should mention Object type. Got: {}",
-            conflict.reason
-        );
+        assert_eq!(conflict.field, "indexes");
+        assert_eq!(conflict.resolved_type, DataType::Utf8);
+        assert!(conflict.reason.contains("Object"));
     }
 
     #[test]
     fn test_array_of_objects_vs_strings_reports_conflict() {
-        // Array elements that are sometimes objects and sometimes strings
         let (schema, conflicts) = observe_and_detect_conflicts(&[
             r#"{"components": [{"alias": "foo", "name": "bar"}]}"#,
             r#"{"components": ["just a string"]}"#,
         ]);
-
-        // Should detect a conflict at the array element level
-        assert!(
-            conflicts.iter().any(|c| c.field == "components[]"),
-            "Should report conflict at array element level. Got: {conflicts:?}"
-        );
-
-        // Verify the schema has the field
+        assert_conflict_at(&conflicts, "components[]");
         assert!(schema.field_with_name("components").is_ok());
     }
 
     #[test]
     fn test_nested_array_conflict() {
-        // List<List<Utf8>> case: nested arrays with conflicting element types
         let (schema, conflicts) = observe_and_detect_conflicts(&[
             r#"{"matrix": [[1, 2], [3, 4]]}"#,
             r#"{"matrix": [["a", "b"]]}"#,
         ]);
-
-        // Should detect conflict at the innermost array element level
-        assert!(
-            conflicts.iter().any(|c| c.field == "matrix[][]"),
-            "Should report conflict at nested array element level. Got: {conflicts:?}"
-        );
-
-        // Verify the schema has the field
-        let matrix_field = schema.field_with_name("matrix").unwrap();
-        assert!(matches!(matrix_field.data_type(), DataType::List(_)));
+        assert_conflict_at(&conflicts, "matrix[][]");
+        assert!(matches!(
+            schema.field_with_name("matrix").unwrap().data_type(),
+            DataType::List(_)
+        ));
     }
 }
