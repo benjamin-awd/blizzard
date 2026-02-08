@@ -167,6 +167,13 @@
           "color": {
             "mode": "thresholds"
           },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -179,7 +186,44 @@
           },
           "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Version"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Target"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 4,
@@ -189,18 +233,22 @@
       },
       "id": 3,
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
           "fields": "",
-          "values": false
+          "reducer": [
+            "sum"
+          ],
+          "show": false
         },
-        "textMode": "auto"
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Target"
+          }
+        ]
       },
       "pluginVersion": "10.0.0",
       "targets": [
@@ -210,12 +258,14 @@
             "uid": "${datasource}"
           },
           "expr": "max by (target) (penguin_delta_table_version{job=~\"$job\", pod=~\"$pod\"})",
+          "format": "table",
+          "instant": true,
           "legendFormat": "{{target}}",
           "refId": "A"
         }
       ],
       "title": "Table Version",
-      "type": "stat"
+      "type": "table"
     },
     {
       "datasource": {
@@ -1026,7 +1076,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (action) (rate(penguin_schema_evolutions_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "expr": "sum by (action) (rate(penguin_schema_evolutions_total{action!=\"none\", job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }
@@ -1119,7 +1169,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (target) (rate(penguin_schema_evolutions_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
+          "expr": "sum by (target) (rate(penguin_schema_evolutions_total{action!=\"none\", job=~\"$job\", pod=~\"$pod\"}[5m]))",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
