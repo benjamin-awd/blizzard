@@ -173,12 +173,15 @@ impl UploadTask {
                     match &result {
                         Ok(uploaded) => {
                             debug!(
-                                "[upload] Completed {} ({} bytes, {} records)",
-                                uploaded.filename, uploaded.size, uploaded.record_count
+                                task = "upload",
+                                path = %uploaded.filename,
+                                bytes = uploaded.size,
+                                records = uploaded.record_count,
+                                "Upload completed"
                             );
                         }
                         Err(e) => {
-                            warn!("[upload] Upload failed: {e}");
+                            warn!(task = "upload", error = %e, "Upload failed");
                         }
                     }
 
@@ -190,7 +193,7 @@ impl UploadTask {
                 result = file_rx.recv(), if active_uploads < max_concurrent && pending_result.is_none() => {
                     let Some(file) = result else {
                         let remaining = uploads.len();
-                        debug!("[upload] Input channel closed, draining {remaining} remaining uploads");
+                        debug!(task = "upload", remaining, "Input channel closed, draining remaining uploads");
                         break;
                     };
 
@@ -208,8 +211,11 @@ impl UploadTask {
                     emit!(UploadQueueDepth { count: active_uploads });
 
                     debug!(
-                        "[upload] Starting {} (active: {}/{})",
-                        file.filename, active_uploads, max_concurrent
+                        task = "upload",
+                        path = %file.filename,
+                        active = active_uploads,
+                        max = max_concurrent,
+                        "Starting upload"
                     );
 
                     let semaphore = global_semaphore.clone();
@@ -252,12 +258,14 @@ impl UploadTask {
             match &result {
                 Ok(uploaded) => {
                     debug!(
-                        "[upload] Completed {} ({} bytes)",
-                        uploaded.filename, uploaded.size
+                        task = "upload",
+                        path = %uploaded.filename,
+                        bytes = uploaded.size,
+                        "Upload completed"
                     );
                 }
                 Err(e) => {
-                    warn!("[upload] Upload failed during drain: {e}");
+                    warn!(task = "upload", error = %e, "Upload failed during drain");
                 }
             }
 
@@ -278,7 +286,7 @@ impl UploadTask {
         emit!(UploadQueueBytes { bytes: 0 });
         emit!(UploadQueueDepth { count: 0 });
 
-        debug!("[upload] All uploads complete, {results_pending} results pending collection");
+        debug!(task = "upload", results_pending, "All uploads complete");
     }
 }
 

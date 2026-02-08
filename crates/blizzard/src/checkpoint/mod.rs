@@ -62,6 +62,11 @@ impl CheckpointManager {
         }
     }
 
+    /// Get the storage URL for this checkpoint's storage provider.
+    pub fn storage_url(&self) -> &str {
+        self.storage.url()
+    }
+
     /// Get the checkpoint file path.
     fn checkpoint_path(&self) -> Path {
         let dir = CHECKPOINT_DIR;

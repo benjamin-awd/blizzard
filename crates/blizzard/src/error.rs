@@ -101,8 +101,8 @@ pub enum PipelineError {
     Config { source: ConfigError },
 
     /// Storage error.
-    #[snafu(display("Storage error: {source}"))]
-    Storage { source: StorageError },
+    #[snafu(display("Storage error for {uri}: {source}"))]
+    Storage { uri: String, source: StorageError },
 
     /// Schema inference error.
     #[snafu(display("Schema inference error: {source}"))]
@@ -149,15 +149,9 @@ impl PipelineError {
     /// Check if this error represents a "not found" condition.
     pub fn is_not_found(&self) -> bool {
         match self {
-            PipelineError::Storage { source } => source.is_not_found(),
+            PipelineError::Storage { source, .. } => source.is_not_found(),
             _ => false,
         }
-    }
-}
-
-impl From<StorageError> for PipelineError {
-    fn from(source: StorageError) -> Self {
-        PipelineError::Storage { source }
     }
 }
 

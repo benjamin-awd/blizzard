@@ -8,6 +8,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use snafu::prelude::*;
+
 /// A boxed future that produces a TaskResult.
 pub type BoxFuture<'a> = Pin<Box<dyn Future<Output = TaskResult> + Send + 'a>>;
 
@@ -38,33 +40,21 @@ impl TaskOutput {
 }
 
 /// Error type for task execution.
-#[derive(Debug)]
+#[derive(Debug, Snafu)]
 pub enum TaskError {
     /// Task was cancelled via shutdown signal.
+    #[snafu(display("task cancelled"))]
     Cancelled,
+
     /// Task panicked during execution.
-    Panicked(String),
+    #[snafu(display("task panicked: {message}"))]
+    Panicked { message: String },
+
     /// Task failed with an error.
-    Failed(Box<dyn std::error::Error + Send + Sync>),
-}
-
-impl fmt::Display for TaskError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cancelled => write!(f, "task cancelled"),
-            Self::Panicked(msg) => write!(f, "task panicked: {msg}"),
-            Self::Failed(err) => write!(f, "task failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for TaskError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Failed(err) => Some(err.as_ref()),
-            _ => None,
-        }
-    }
+    #[snafu(display("task failed: {source}"))]
+    Failed {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl TaskError {
@@ -73,7 +63,9 @@ impl TaskError {
     where
         E: std::error::Error + Send + Sync + 'static,
     {
-        Self::Failed(Box::new(err))
+        Self::Failed {
+            source: Box::new(err),
+        }
     }
 
     /// Check if this is a cancellation error.
@@ -83,7 +75,7 @@ impl TaskError {
 
     /// Check if this is a panic error.
     pub fn is_panicked(&self) -> bool {
-        matches!(self, Self::Panicked(_))
+        matches!(self, Self::Panicked { .. })
     }
 }
 
@@ -147,7 +139,12 @@ mod tests {
     fn test_task_error_display() {
         assert_eq!(format!("{}", TaskError::Cancelled), "task cancelled");
         assert_eq!(
-            format!("{}", TaskError::Panicked("oops".to_string())),
+            format!(
+                "{}",
+                TaskError::Panicked {
+                    message: "oops".to_string()
+                }
+            ),
             "task panicked: oops"
         );
 
@@ -159,12 +156,22 @@ mod tests {
     #[test]
     fn test_task_error_is_cancelled() {
         assert!(TaskError::Cancelled.is_cancelled());
-        assert!(!TaskError::Panicked("x".to_string()).is_cancelled());
+        assert!(
+            !TaskError::Panicked {
+                message: "x".to_string()
+            }
+            .is_cancelled()
+        );
     }
 
     #[test]
     fn test_task_error_is_panicked() {
-        assert!(TaskError::Panicked("x".to_string()).is_panicked());
+        assert!(
+            TaskError::Panicked {
+                message: "x".to_string()
+            }
+            .is_panicked()
+        );
         assert!(!TaskError::Cancelled.is_panicked());
     }
 

@@ -15,9 +15,11 @@ use blizzard_core::types::SourceState;
 use indexmap::IndexMap;
 use tracing::{info, warn};
 
+use snafu::ResultExt;
+
 use crate::checkpoint::CheckpointManager;
 use crate::config::SourceConfig;
-use crate::error::{ConfigError, PipelineError};
+use crate::error::{ConfigError, PipelineError, StorageSnafu};
 use crate::source::list_ndjson_files_with_partition_watermarks;
 
 /// Trait for tracking which source files have been processed.
@@ -87,6 +89,7 @@ impl DiscoverySnapshot {
                 } else {
                     Some(partition_watermarks)
                 };
+                let uri = storage.url().to_string();
                 list_ndjson_files_with_partition_watermarks(
                     storage,
                     watermark.as_deref(),
@@ -95,11 +98,14 @@ impl DiscoverySnapshot {
                     pipeline_key,
                 )
                 .await
-                .map_err(Into::into)
+                .context(StorageSnafu { uri })
             }
             DiscoverySnapshot::Processed { processed_files } => {
-                let all_files =
-                    list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key).await?;
+                let all_files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key)
+                    .await
+                    .context(StorageSnafu {
+                        uri: storage.url().to_string(),
+                    })?;
                 Ok(all_files
                     .into_iter()
                     .filter(|f| !processed_files.contains_key(f))
@@ -150,7 +156,10 @@ impl StateTracker for WatermarkTracker {
     async fn save(&self) -> Result<(), PipelineError> {
         self.checkpoint_manager.save().await.map_err(|e| {
             warn!(error = %e, "Failed to save checkpoint");
-            e.into()
+            PipelineError::Storage {
+                uri: self.checkpoint_manager.storage_url().to_string(),
+                source: e,
+            }
         })
     }
 

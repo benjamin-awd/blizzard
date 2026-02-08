@@ -93,8 +93,10 @@ impl DownloadTask {
             Some(s) => s.clone(),
             None => {
                 warn!(
-                    "[download] No storage for source '{}', skipping {}",
-                    sourced_file.source_name, sourced_file.path
+                    task = "download",
+                    source = %sourced_file.source_name,
+                    path = %sourced_file.path,
+                    "No storage for source, skipping file"
                 );
                 return false;
             }
@@ -106,8 +108,11 @@ impl DownloadTask {
             target: pipeline.to_string(),
         });
         debug!(
-            "[download] Starting {}:{} (active: {})",
-            sourced_file.source_name, sourced_file.path, *active_downloads
+            task = "download",
+            source = %sourced_file.source_name,
+            path = %sourced_file.path,
+            active = *active_downloads,
+            "Starting download"
         );
 
         let semaphore = global_semaphore.clone();
@@ -149,7 +154,7 @@ impl DownloadTask {
 
         loop {
             if shutdown.is_cancelled() {
-                debug!("[download] Shutdown requested, stopping downloads");
+                debug!(task = "download", "Shutdown requested, stopping downloads");
                 break;
             }
 
@@ -184,16 +189,17 @@ impl DownloadTask {
                     let should_send = match &result {
                         Ok(downloaded) => {
                             debug!(
-                                "[download] Completed {}:{} ({} bytes)",
-                                downloaded.source_name,
-                                downloaded.path,
-                                downloaded.compressed_data.len()
+                                task = "download",
+                                source = %downloaded.source_name,
+                                path = %downloaded.path,
+                                bytes = downloaded.compressed_data.len(),
+                                "Download completed"
                             );
                             true
                         }
                         Err(e) => {
                             if e.is_not_found() {
-                                warn!("[download] Skipping missing file: {e}");
+                                warn!(task = "download", error = %e, "Skipping missing file");
                                 false
                             } else {
                                 true
@@ -202,7 +208,7 @@ impl DownloadTask {
                     };
 
                     if should_send && download_tx.send(result).await.is_err() {
-                        debug!("[download] Consumer closed, stopping downloads");
+                        debug!(task = "download", "Consumer closed, stopping downloads");
                         break;
                     }
                 }
@@ -219,7 +225,7 @@ impl DownloadTask {
             count: 0,
             target: pipeline
         });
-        debug!("[download] All downloads complete");
+        debug!(task = "download", "All downloads complete");
     }
 }
 

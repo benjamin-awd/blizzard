@@ -149,8 +149,8 @@ pub enum PipelineError {
     Config { source: ConfigError },
 
     /// Storage error.
-    #[snafu(display("Storage error: {source}"))]
-    Storage { source: StorageError },
+    #[snafu(display("Storage error for {uri}: {source}"))]
+    Storage { uri: String, source: StorageError },
 
     /// Delta error.
     #[snafu(display("Delta error: {source}"))]
@@ -179,12 +179,6 @@ pub enum PipelineError {
     /// Internal state error - delta sink not initialized when expected.
     #[snafu(display("Internal error: delta sink not initialized"))]
     DeltaSinkNotInitialized,
-}
-
-impl From<StorageError> for PipelineError {
-    fn from(source: StorageError) -> Self {
-        PipelineError::Storage { source }
-    }
 }
 
 impl From<ConfigError> for PipelineError {

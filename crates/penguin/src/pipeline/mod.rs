@@ -136,7 +136,9 @@ impl Processor {
             table_config.storage_options.clone(),
         )
         .await
-        .context(StorageSnafu)?;
+        .context(StorageSnafu {
+            uri: table_config.table_uri.clone(),
+        })?;
 
         // Create file reader for discovering uncommitted parquet files
         let file_reader = IncomingReader::new(

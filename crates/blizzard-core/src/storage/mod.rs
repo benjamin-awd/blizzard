@@ -81,6 +81,11 @@ impl std::fmt::Debug for StorageProvider {
 }
 
 impl StorageProvider {
+    /// Get the canonical URL for this storage provider.
+    pub fn url(&self) -> &str {
+        &self.canonical_url
+    }
+
     /// Create a storage provider for the given URL with storage options.
     pub async fn for_url_with_options(
         url: &str,

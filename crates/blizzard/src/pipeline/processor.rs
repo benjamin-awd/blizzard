@@ -112,7 +112,9 @@ impl<'a> ConfigResolver<'a> {
                 source_config.storage_options.clone(),
             )
             .await
-            .context(StorageSnafu)?;
+            .context(StorageSnafu {
+                uri: source_config.path.clone(),
+            })?;
             source_storages.insert(source_name.clone(), storage);
         }
         Ok(source_storages)
@@ -126,7 +128,9 @@ impl<'a> ConfigResolver<'a> {
             self.config.sink.storage_options.clone(),
         )
         .await
-        .context(StorageSnafu)
+        .context(StorageSnafu {
+            uri: self.config.sink.table_uri.clone(),
+        })
     }
 
     /// Create multi-source tracker with per-source trackers based on configuration.
@@ -142,7 +146,9 @@ impl<'a> ConfigResolver<'a> {
                     self.config.sink.storage_options.clone(),
                 )
                 .await
-                .context(StorageSnafu)?;
+                .context(StorageSnafu {
+                    uri: self.config.sink.table_uri.clone(),
+                })?;
                 let checkpoint_manager = CheckpointManager::new(
                     checkpoint_storage,
                     self.key.id().to_string(),
