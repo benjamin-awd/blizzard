@@ -438,14 +438,15 @@ impl Iteration {
             .await
             .map_err(|e| PipelineError::TaskJoin { source: e })??;
 
-        // Wait for all sink workers to finalize (flush + upload remaining files).
+        // Wait for all sink workers to finalize (flush + upload remaining files) in parallel.
         // Workers exit when their file_tx senders are dropped (which happens
         // when SinkWorkerChannels is dropped at end of Downloader::run).
-        for handle in self.worker_handles {
-            handle
-                .await
-                .map_err(|e| PipelineError::TaskJoin { source: e })?;
-        }
+        futures::future::try_join_all(
+            self.worker_handles
+                .into_iter()
+                .map(|h| async { h.await.map_err(|e| PipelineError::TaskJoin { source: e }) }),
+        )
+        .await?;
 
         Ok((result, discovery_count))
     }
