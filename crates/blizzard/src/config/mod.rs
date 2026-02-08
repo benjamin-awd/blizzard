@@ -266,21 +266,6 @@ pub struct SchemaConfig {
 }
 
 impl SchemaConfig {
-    /// Returns true if schema should be inferred from source data.
-    pub fn should_infer(&self) -> bool {
-        self.infer
-    }
-
-    /// Returns the explicit fields if defined.
-    pub fn fields(&self) -> &[FieldConfig] {
-        &self.fields
-    }
-
-    /// Returns true if type conflicts should be coerced to Utf8 during inference.
-    pub fn should_coerce_conflicts_to_utf8(&self) -> bool {
-        self.coerce_conflicts_to_utf8
-    }
-
     /// Convert to Arrow Schema. Panics if schema is set to infer mode.
     pub fn to_arrow_schema(&self) -> SchemaRef {
         if self.infer {
@@ -314,13 +299,6 @@ pub struct PipelineConfig {
     /// Error handling configuration.
     #[serde(default)]
     pub error_handling: ErrorHandlingConfig,
-}
-
-impl PipelineConfig {
-    /// Get the sources map.
-    pub fn sources(&self) -> &IndexMap<String, SourceConfig> {
-        &self.sources
-    }
 }
 
 impl PipelineConfig {
@@ -496,16 +474,6 @@ impl Config {
             std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile { source })?;
         Self::parse(&contents)
     }
-
-    /// Iterate over all pipelines with their keys.
-    pub fn pipelines(&self) -> impl Iterator<Item = (&PipelineKey, &PipelineConfig)> {
-        self.pipelines.iter()
-    }
-
-    /// Get the number of pipelines in the configuration.
-    pub fn pipeline_count(&self) -> usize {
-        self.pipelines.len()
-    }
 }
 
 impl AppConfig for Config {
@@ -524,9 +492,9 @@ impl AppConfig for Config {
     }
 
     fn log_startup_info(&self) {
-        let pipeline_count = self.pipeline_count();
+        let pipeline_count = self.pipelines.len();
         info!("Starting blizzard file loader with {pipeline_count} pipeline(s)");
-        for (key, cfg) in self.pipelines() {
+        for (key, cfg) in &self.pipelines {
             let sink = &cfg.sink.table_uri;
             if cfg.sources.len() == 1 {
                 let source = cfg.sources.values().next().unwrap();

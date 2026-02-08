@@ -169,7 +169,7 @@ impl<'a> ConfigResolver<'a> {
         &self,
         source_storages: &IndexMap<String, StorageProviderRef>,
     ) -> Result<SchemaRef, PipelineError> {
-        if self.config.schema.should_infer() {
+        if self.config.schema.infer {
             let first_source =
                 self.config
                     .sources
@@ -187,7 +187,7 @@ impl<'a> ConfigResolver<'a> {
                 first_source.compression,
                 prefixes.as_deref(),
                 self.key.as_ref(),
-                self.config.schema.should_coerce_conflicts_to_utf8(),
+                self.config.schema.coerce_conflicts_to_utf8,
             )
             .await?)
         } else {
@@ -198,7 +198,7 @@ impl<'a> ConfigResolver<'a> {
     /// Create per-source readers (compression may differ between sources).
     fn create_readers(&self, schema: &SchemaRef) -> IndexMap<String, Arc<dyn FileReader>> {
         let mut readers = IndexMap::new();
-        let coerce_objects = self.config.schema.should_coerce_conflicts_to_utf8();
+        let coerce_objects = self.config.schema.coerce_conflicts_to_utf8;
 
         for (source_name, source_config) in &self.config.sources {
             let mut reader_config =
