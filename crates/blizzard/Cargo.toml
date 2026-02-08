@@ -68,3 +68,7 @@ rand = { workspace = true }
 [[bench]]
 name = "pipeline_throughput"
 harness = false
+
+[[bench]]
+name = "coordinator_bench"
+harness = false
