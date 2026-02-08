@@ -547,6 +547,71 @@ impl AppConfig for Config {
 mod tests {
     use super::*;
 
+    /// Minimal valid config YAML with explicit fields schema.
+    const MINIMAL_YAML: &str = r#"
+pipelines:
+  events:
+    sources:
+      default:
+        path: gs://bucket/raw
+    sink:
+      table_uri: gs://bucket/delta/events
+    schema:
+      fields:
+        - name: id
+          type: string
+"#;
+
+    /// Parse YAML and return the first pipeline's config.
+    fn first_pipeline(yaml: &str) -> PipelineConfig {
+        Config::parse(yaml)
+            .unwrap()
+            .pipelines
+            .into_values()
+            .next()
+            .unwrap()
+    }
+
+    /// Assert that parsing the given YAML produces an error containing all substrings.
+    fn assert_parse_err(yaml: &str, substrings: &[&str]) {
+        let err = Config::parse(yaml).unwrap_err().to_string();
+        for s in substrings {
+            assert!(
+                err.contains(s),
+                "Expected error to contain '{s}', got: {err}"
+            );
+        }
+    }
+
+    /// Build a two-pipeline YAML config with fields schema for resource conflict tests.
+    fn two_pipeline_yaml(path_a: &str, uri_a: &str, path_b: &str, uri_b: &str) -> String {
+        format!(
+            r#"
+pipelines:
+  a:
+    sources:
+      default:
+        path: {path_a}
+    sink:
+      table_uri: {uri_a}
+    schema:
+      fields:
+        - name: id
+          type: string
+  b:
+    sources:
+      default:
+        path: {path_b}
+    sink:
+      table_uri: {uri_b}
+    schema:
+      fields:
+        - name: id
+          type: string
+"#
+        )
+    }
+
     #[test]
     fn test_single_pipeline_parse() {
         let yaml = r#"
@@ -565,9 +630,9 @@ pipelines:
           type: string
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert_eq!(config.pipeline_count(), 1);
+        assert_eq!(config.pipelines.len(), 1);
 
-        let (key, pipeline) = config.pipelines().next().unwrap();
+        let (key, pipeline) = config.pipelines.iter().next().unwrap();
         assert_eq!(key.id(), "events");
         assert_eq!(
             pipeline.sources.get("default").unwrap().path,
@@ -596,9 +661,9 @@ pipelines:
       infer: true
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert_eq!(config.pipeline_count(), 1);
+        assert_eq!(config.pipelines.len(), 1);
 
-        let (key, pipeline) = config.pipelines().next().unwrap();
+        let (key, pipeline) = config.pipelines.iter().next().unwrap();
         assert_eq!(key.id(), "events");
         assert_eq!(pipeline.sources.len(), 2);
 
@@ -644,13 +709,10 @@ global:
   total_concurrency: 8
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert_eq!(config.pipeline_count(), 2);
+        assert_eq!(config.pipelines.len(), 2);
         assert_eq!(config.global.total_concurrency, Some(8));
 
-        let pipelines: Vec<_> = config.pipelines().collect();
-        assert_eq!(pipelines.len(), 2);
-
-        // IndexMap preserves insertion order
+        let pipelines: Vec<_> = config.pipelines.iter().collect();
         assert_eq!(pipelines[0].0.id(), "events");
         assert_eq!(
             pipelines[0].1.sources.get("default").unwrap().path,
@@ -678,11 +740,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("empty path"));
+        assert_parse_err(yaml, &["events", "empty path"]);
     }
 
     #[test]
@@ -698,11 +756,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("no sources configured"));
+        assert_parse_err(yaml, &["events", "no sources configured"]);
     }
 
     #[test]
@@ -720,11 +774,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("sink.table_uri is empty"));
+        assert_parse_err(yaml, &["events", "sink.table_uri is empty"]);
     }
 
     #[test]
@@ -740,70 +790,25 @@ pipelines:
     schema:
       fields: []
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("empty schema"));
+        assert_parse_err(yaml, &["events", "empty schema"]);
     }
 
     #[test]
     fn test_metrics_default() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
+        let config = Config::parse(MINIMAL_YAML).unwrap();
         assert_eq!(config.metrics.address, "0.0.0.0:9090");
     }
 
     #[test]
     fn test_global_default() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
+        let config = Config::parse(MINIMAL_YAML).unwrap();
         assert_eq!(config.global.total_concurrency, None);
     }
 
     #[test]
     fn test_source_config_defaults() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let pipeline = first_pipeline(MINIMAL_YAML);
         let source = pipeline.sources.get("default").unwrap();
-
         assert_eq!(source.batch_size, 8192);
         assert_eq!(source.poll_interval_secs, 60);
         assert!(source.partition_filter.is_none());
@@ -812,29 +817,11 @@ pipelines:
 
     #[test]
     fn test_sink_config_defaults() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
+        let pipeline = first_pipeline(MINIMAL_YAML);
         assert_eq!(pipeline.sink.file_size_mb, 128);
         assert_eq!(pipeline.sink.row_group_size_bytes, 128 * MB);
         assert!(pipeline.sink.partition_by.is_none());
-        assert!(
-            pipeline.sink.rollover_timeout_secs.is_none(),
-            "rollover_timeout_secs should default to None"
-        );
+        assert!(pipeline.sink.rollover_timeout_secs.is_none());
     }
 
     #[test]
@@ -853,14 +840,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
-        assert_eq!(
-            pipeline.sink.rollover_timeout_secs,
-            Some(300),
-            "rollover_timeout_secs should be 300"
-        );
+        assert_eq!(first_pipeline(yaml).sink.rollover_timeout_secs, Some(300));
     }
 
     #[test]
@@ -878,10 +858,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
-        let resources = pipeline.resources();
+        let resources = first_pipeline(yaml).resources();
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
@@ -905,11 +882,8 @@ pipelines:
     schema:
       infer: true
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
-        let resources = pipeline.resources();
-        assert_eq!(resources.len(), 3); // 2 sources + 1 sink
+        let resources = first_pipeline(yaml).resources();
+        assert_eq!(resources.len(), 3);
         assert!(resources.contains(&Resource::directory("gs://bucket/asia/events")));
         assert!(resources.contains(&Resource::directory("gs://bucket/europe/events")));
         assert!(resources.contains(&Resource::directory("gs://bucket/delta/events")));
@@ -930,10 +904,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
-        let resources = pipeline.resources();
+        let resources = first_pipeline(yaml).resources();
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
             resources[1],
@@ -943,141 +914,46 @@ pipelines:
 
     #[test]
     fn test_resource_conflict_same_source() {
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/raw/same
-    sink:
-      table_uri: gs://bucket/delta/a
-    schema:
-      fields:
-        - name: id
-          type: string
-  b:
-    sources:
-      default:
-        path: gs://bucket/raw/same
-    sink:
-      table_uri: gs://bucket/delta/b
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {msg}"
+        let yaml = two_pipeline_yaml(
+            "gs://bucket/raw/same",
+            "gs://bucket/delta/a",
+            "gs://bucket/raw/same",
+            "gs://bucket/delta/b",
         );
-        assert!(
-            msg.contains("gs://bucket/raw/same"),
-            "Expected source dir in error, got: {msg}"
-        );
+        assert_parse_err(&yaml, &["Resource conflict", "gs://bucket/raw/same"]);
     }
 
     #[test]
     fn test_resource_conflict_same_sink() {
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/raw/a
-    sink:
-      table_uri: gs://bucket/delta/same
-    schema:
-      fields:
-        - name: id
-          type: string
-  b:
-    sources:
-      default:
-        path: gs://bucket/raw/b
-    sink:
-      table_uri: gs://bucket/delta/same
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {msg}"
+        let yaml = two_pipeline_yaml(
+            "gs://bucket/raw/a",
+            "gs://bucket/delta/same",
+            "gs://bucket/raw/b",
+            "gs://bucket/delta/same",
         );
-        assert!(
-            msg.contains("gs://bucket/delta/same"),
-            "Expected table dir in error, got: {msg}"
-        );
+        assert_parse_err(&yaml, &["Resource conflict", "gs://bucket/delta/same"]);
     }
 
     #[test]
     fn test_resource_conflict_trailing_slash_normalization() {
-        // Same source with/without trailing slash should conflict
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/raw/same
-    sink:
-      table_uri: gs://bucket/delta/a
-    schema:
-      fields:
-        - name: id
-          type: string
-  b:
-    sources:
-      default:
-        path: gs://bucket/raw/same/
-    sink:
-      table_uri: gs://bucket/delta/b
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Resource conflict"));
+        let yaml = two_pipeline_yaml(
+            "gs://bucket/raw/same",
+            "gs://bucket/delta/a",
+            "gs://bucket/raw/same/",
+            "gs://bucket/delta/b",
+        );
+        assert_parse_err(&yaml, &["Resource conflict"]);
     }
 
     #[test]
     fn test_no_resource_conflict_different_paths() {
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/raw/a
-    sink:
-      table_uri: gs://bucket/delta/a
-    schema:
-      fields:
-        - name: id
-          type: string
-  b:
-    sources:
-      default:
-        path: gs://bucket/raw/b
-    sink:
-      table_uri: gs://bucket/delta/b
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_ok());
+        let yaml = two_pipeline_yaml(
+            "gs://bucket/raw/a",
+            "gs://bucket/delta/a",
+            "gs://bucket/raw/b",
+            "gs://bucket/delta/b",
+        );
+        assert!(Config::parse(&yaml).is_ok());
     }
 
     #[test]
@@ -1093,9 +969,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        assert!(pipeline.schema.should_infer());
+        assert!(first_pipeline(yaml).schema.infer);
     }
 
     #[test]
@@ -1111,11 +985,7 @@ pipelines:
     schema:
       infer: false
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("events"));
-        assert!(err.to_string().contains("empty schema"));
+        assert_parse_err(yaml, &["events", "empty schema"]);
     }
 
     #[test]
@@ -1134,16 +1004,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let result = Config::parse(yaml);
-        assert!(
-            result.is_err(),
-            "Should error when both infer and fields are specified"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("cannot specify both"),
-            "Error should mention the conflict: {err}"
-        );
+        assert_parse_err(yaml, &["cannot specify both"]);
     }
 
     #[test]
@@ -1151,8 +1012,7 @@ pipelines:
         let config = PartitionByConfig {
             prefix_template: "date=%Y-%m-%d/hour=%H".to_string(),
         };
-        let columns = config.partition_columns();
-        assert_eq!(columns, vec!["date", "hour"]);
+        assert_eq!(config.partition_columns(), vec!["date", "hour"]);
     }
 
     #[test]
@@ -1160,8 +1020,7 @@ pipelines:
         let config = PartitionByConfig {
             prefix_template: "date=%Y-%m-%d".to_string(),
         };
-        let columns = config.partition_columns();
-        assert_eq!(columns, vec!["date"]);
+        assert_eq!(config.partition_columns(), vec!["date"]);
     }
 
     #[test]
@@ -1169,8 +1028,7 @@ pipelines:
         let config = PartitionByConfig {
             prefix_template: String::new(),
         };
-        let columns = config.partition_columns();
-        assert!(columns.is_empty());
+        assert!(config.partition_columns().is_empty());
     }
 
     #[test]
@@ -1190,9 +1048,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-
+        let pipeline = first_pipeline(yaml);
         let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
         assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
@@ -1212,13 +1068,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should reject unknown field 'batchsize'");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        assert_parse_err(yaml, &["unknown field"]);
     }
 
     #[test]
@@ -1235,13 +1085,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should reject unknown field 'filesize'");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        assert_parse_err(yaml, &["unknown field"]);
     }
 
     #[test]
@@ -1258,13 +1102,7 @@ pipelines:
       infer: true
     unknown_key: value
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should reject unknown field 'unknown_key'");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        assert_parse_err(yaml, &["unknown field"]);
     }
 
     #[test]
@@ -1281,16 +1119,7 @@ pipelines:
       infer: true
 unknown_top_level: value
 "#;
-        let result = Config::parse(yaml);
-        assert!(
-            result.is_err(),
-            "Should reject unknown field 'unknown_top_level'"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        assert_parse_err(yaml, &["unknown field"]);
     }
 
     #[test]
@@ -1314,23 +1143,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should have validation errors");
-        let err = result.unwrap_err().to_string();
-        // Should contain errors for pipeline 'a' (empty path and empty table_uri)
-        // and pipeline 'b' (empty path)
-        assert!(
-            err.contains("Pipeline 'a'"),
-            "Should mention pipeline 'a': {err}"
-        );
-        assert!(
-            err.contains("Pipeline 'b'"),
-            "Should mention pipeline 'b': {err}"
-        );
-        assert!(
-            err.contains("empty path"),
-            "Should mention empty source path: {err}"
-        );
+        assert_parse_err(yaml, &["Pipeline 'a'", "Pipeline 'b'", "empty path"]);
     }
 
     #[test]
@@ -1357,44 +1170,25 @@ pipelines:
     schema:
       infer: false
 "#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should have validation errors");
-        let err = result.unwrap_err().to_string();
-        // Pipeline 'a' has both infer and fields
-        // Pipeline 'b' has empty schema
-        assert!(
-            err.contains("Pipeline 'a'") && err.contains("cannot specify both"),
-            "Should mention pipeline 'a' schema conflict: {err}"
-        );
-        assert!(
-            err.contains("Pipeline 'b'") && err.contains("empty schema"),
-            "Should mention pipeline 'b' empty schema: {err}"
+        assert_parse_err(
+            yaml,
+            &[
+                "Pipeline 'a'",
+                "cannot specify both",
+                "Pipeline 'b'",
+                "empty schema",
+            ],
         );
     }
 
     #[test]
     fn test_use_watermark_default_false() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        let source = pipeline.sources.get("default").unwrap();
-
-        assert!(
-            !source.use_watermark,
-            "use_watermark should default to false"
-        );
+        let source = first_pipeline(MINIMAL_YAML)
+            .sources
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(!source.use_watermark);
     }
 
     #[test]
@@ -1416,11 +1210,8 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        let source = pipeline.sources.get("default").unwrap();
-
-        assert!(source.use_watermark, "use_watermark should be true");
+        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        assert!(source.use_watermark);
         assert!(source.partition_filter.is_some());
     }
 
@@ -1440,18 +1231,9 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        let source = pipeline.sources.get("default").unwrap();
-
-        assert_eq!(
-            source.checkpoint.interval_files, 100,
-            "checkpoint.interval_files should default to 100"
-        );
-        assert_eq!(
-            source.checkpoint.interval_secs, 30,
-            "checkpoint.interval_secs should default to 30"
-        );
+        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        assert_eq!(source.checkpoint.interval_files, 100);
+        assert_eq!(source.checkpoint.interval_secs, 30);
     }
 
     #[test]
@@ -1473,10 +1255,7 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        let source = pipeline.sources.get("default").unwrap();
-
+        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 50);
         assert_eq!(source.checkpoint.interval_secs, 15);
     }
@@ -1499,14 +1278,8 @@ pipelines:
         - name: id
           type: string
 "#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
-        let source = pipeline.sources.get("default").unwrap();
-
+        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 200);
-        assert_eq!(
-            source.checkpoint.interval_secs, 30,
-            "interval_secs should default to 30 when not specified"
-        );
+        assert_eq!(source.checkpoint.interval_secs, 30);
     }
 }
