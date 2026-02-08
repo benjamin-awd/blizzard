@@ -4,12 +4,14 @@ use std::path::Path;
 
 use indexmap::IndexMap;
 
+use serde::de::DeserializeOwned;
+
 use crate::config::{ConfigPath, GlobalConfig, MetricsConfig, interpolate, is_yaml_file};
 use crate::error::ConfigError;
 use crate::topology::PipelineContext;
 
 /// Trait for configs that can be merged from multiple files.
-pub trait Mergeable: Sized + Default {
+pub trait Mergeable: Sized + Default + DeserializeOwned {
     type Key: Eq + std::hash::Hash + Clone + std::fmt::Display;
     type Component;
 
@@ -19,7 +21,10 @@ pub trait Mergeable: Sized + Default {
     fn global_mut(&mut self) -> &mut GlobalConfig;
     fn metrics(&self) -> &MetricsConfig;
     fn metrics_mut(&mut self) -> &mut MetricsConfig;
-    fn parse_yaml(contents: &str) -> Result<Self, ConfigError>;
+
+    fn parse_yaml(contents: &str) -> Result<Self, ConfigError> {
+        serde_yaml::from_str(contents).map_err(|source| ConfigError::YamlParse { source })
+    }
 
     /// Validate the configuration.
     fn validate(&self) -> Result<(), ConfigError>;
