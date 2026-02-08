@@ -5,7 +5,7 @@
 
 use indexmap::IndexMap;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -48,44 +48,50 @@ impl DiscoveryTask {
         shutdown: CancellationToken,
         pipeline_key: String,
     ) -> Result<usize, PipelineError> {
-        let mut total = 0;
+        let mut tasks = JoinSet::new();
 
         for (source_name, source) in sources {
-            if shutdown.is_cancelled() {
+            let tx = tx.clone();
+            let shutdown = shutdown.clone();
+            let pipeline_key = pipeline_key.clone();
+            tasks.spawn(async move {
+                if shutdown.is_cancelled() {
+                    return Ok(0);
+                }
+
+                let files = source
+                    .snapshot
+                    .list_pending(&source.storage, source.prefixes.as_deref(), &pipeline_key)
+                    .await?;
+
                 debug!(
                     target = %pipeline_key,
-                    "Discovery stopped by shutdown"
+                    source = %source_name,
+                    count = files.len(),
+                    "Discovered files from source"
                 );
-                break;
-            }
 
-            let files = source
-                .snapshot
-                .list_pending(&source.storage, source.prefixes.as_deref(), &pipeline_key)
-                .await?;
-
-            debug!(
-                target = %pipeline_key,
-                source = %source_name,
-                count = files.len(),
-                "Discovered files from source"
-            );
-
-            for path in files {
-                total += 1;
-                let sourced_file = SourcedFile {
-                    source_name: source_name.clone(),
-                    path,
-                };
-                if tx.send(sourced_file).await.is_err() {
-                    // Consumer dropped — stop discovery
-                    debug!(
-                        target = %pipeline_key,
-                        "Discovery stopped: consumer closed"
-                    );
-                    return Ok(total);
+                let mut count = 0;
+                for path in files {
+                    count += 1;
+                    let sourced_file = SourcedFile {
+                        source_name: source_name.clone(),
+                        path,
+                    };
+                    if tx.send(sourced_file).await.is_err() {
+                        return Ok(count);
+                    }
                 }
-            }
+                Ok::<usize, PipelineError>(count)
+            });
+        }
+
+        // Drop original sender so channel closes when all tasks finish
+        drop(tx);
+
+        let mut total = 0;
+        while let Some(result) = tasks.join_next().await {
+            total += result.map_err(|e| PipelineError::TaskJoin { source: e })??;
         }
 
         debug!(
