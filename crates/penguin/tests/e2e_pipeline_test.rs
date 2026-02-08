@@ -51,7 +51,7 @@ async fn test_discover_and_commit_pipeline() {
     let table_path = temp_dir.path();
     let schema = test_schema();
 
-    // Step 1: Create partition directory and write 2 parquet files
+    // Create partition directory and write 2 parquet files
     let partition_dir = table_path.join("date=2026-01-15");
     std::fs::create_dir_all(&partition_dir).unwrap();
 
@@ -66,7 +66,7 @@ async fn test_discover_and_commit_pipeline() {
         &[(4, "dave"), (5, "eve")],
     );
 
-    // Step 2: Create storage provider and IncomingReader
+    // Create storage provider and IncomingReader
     let storage = Arc::new(
         StorageProvider::for_url_with_options(table_path.to_str().unwrap(), HashMap::new())
             .await
@@ -81,7 +81,7 @@ async fn test_discover_and_commit_pipeline() {
         },
     );
 
-    // Step 3: Discover uncommitted files
+    // Discover uncommitted files
     let uncommitted = reader
         .list_uncommitted_files(None, &HashSet::new(), true)
         .await
@@ -93,7 +93,7 @@ async fn test_discover_and_commit_pipeline() {
         "should discover both parquet files, found: {uncommitted:?}"
     );
 
-    // Step 4: Read parquet metadata for each file
+    // Read parquet metadata for each file
     let mut finished_files = Vec::new();
     for incoming in &uncommitted {
         let finished = reader.read_parquet_metadata(incoming).await.unwrap();
@@ -108,7 +108,7 @@ async fn test_discover_and_commit_pipeline() {
     let total_records: usize = finished_files.iter().map(|f| f.record_count).sum();
     assert_eq!(total_records, 5, "total records should be 5");
 
-    // Step 5: Infer schema from the first file
+    // Infer schema from the first file
     let inferred_schema = infer_schema_from_first_file(&storage, &finished_files, "e2e-test")
         .await
         .unwrap();
@@ -117,7 +117,7 @@ async fn test_discover_and_commit_pipeline() {
     assert_eq!(inferred_schema.field(0).name(), "id");
     assert_eq!(inferred_schema.field(1).name(), "name");
 
-    // Step 6: Create DeltaSink with inferred schema
+    // Create DeltaSink with inferred schema
     let mut delta_sink = DeltaSink::new(
         &storage,
         &inferred_schema,
@@ -127,7 +127,7 @@ async fn test_discover_and_commit_pipeline() {
     .await
     .unwrap();
 
-    // Step 7: Commit files with checkpoint
+    // Commit files with checkpoint
     let checkpoint_state = CheckpointState::default();
     let commit_result = delta_sink
         .commit_files_with_checkpoint(&finished_files, &checkpoint_state)
@@ -139,7 +139,7 @@ async fn test_discover_and_commit_pipeline() {
         "commit should return a version number"
     );
 
-    // Step 8: Verify Delta table state
+    // Verify Delta table state
     assert!(
         delta_sink.version() >= 1,
         "version should be >= 1 after commit"
@@ -164,7 +164,7 @@ async fn test_discover_and_commit_pipeline() {
         );
     }
 
-    // Step 9: Verify checkpoint recovery from log
+    // Verify checkpoint recovery from log
     let mut reopened_sink =
         DeltaSink::try_open(&storage, vec!["date".to_string()], "e2e-test".to_string())
             .await
@@ -176,7 +176,7 @@ async fn test_discover_and_commit_pipeline() {
         "should recover checkpoint from Delta log"
     );
 
-    // Step 10: Verify list_uncommitted_files returns empty when committed paths are excluded.
+    // Verify list_uncommitted_files returns empty when committed paths are excluded.
     // On local filesystem, get_committed_paths() returns full absolute paths while
     // list_uncommitted_files returns paths relative to the table root. Extract relative
     // paths by finding and stripping the common table-root prefix.

@@ -60,11 +60,11 @@ fn test_ndjson_to_parquet_pipeline() {
     let schema = test_schema();
     let num_rows = 100;
 
-    // Step 1: Generate NDJSON content
+    // Generate NDJSON content
     let ndjson = generate_ndjson(num_rows);
     let data = Bytes::from(ndjson);
 
-    // Step 2: Read with NdjsonReader (uncompressed)
+    // Read with NdjsonReader (uncompressed)
     let reader_config = NdjsonReaderConfig::new(1000, CompressionFormat::None);
     let reader = NdjsonReader::new(schema.clone(), reader_config, "e2e-test".to_string());
 
@@ -74,7 +74,7 @@ fn test_ndjson_to_parquet_pipeline() {
     let total_read: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_read, num_rows, "should read all rows");
 
-    // Step 3: Write batches with ParquetWriter
+    // Write batches with ParquetWriter
     let writer_config = ParquetWriterConfig::default().with_file_size_mb(10);
     let mut writer = ParquetWriter::new(schema, writer_config, "e2e-test".to_string()).unwrap();
 
@@ -84,7 +84,7 @@ fn test_ndjson_to_parquet_pipeline() {
 
     let finished_files = writer.close().unwrap();
 
-    // Step 4: Verify FinishedFile metadata
+    // Verify FinishedFile metadata
     assert!(
         !finished_files.is_empty(),
         "should produce at least one file"
@@ -96,7 +96,7 @@ fn test_ndjson_to_parquet_pipeline() {
         "total record count should match input"
     );
 
-    // Step 5: Verify each parquet file is readable and correct
+    // Verify each parquet file is readable and correct
     for file in &finished_files {
         assert!(file.size > 0, "file should have non-zero size");
         assert!(file.bytes.is_some(), "file should have parquet bytes");
@@ -146,7 +146,7 @@ fn test_ndjson_to_parquet_pipeline() {
         );
     }
 
-    // Step 6: Spot-check column values from the first file
+    // Spot-check column values from the first file
     let first_bytes = finished_files[0].bytes.as_ref().unwrap();
     let arrow_reader = ParquetRecordBatchReaderBuilder::try_new(first_bytes.clone())
         .unwrap()
@@ -189,14 +189,14 @@ fn test_ndjson_gz_to_parquet_pipeline() {
     let schema = test_schema();
     let num_rows = 50;
 
-    // Step 1: Generate gzip-compressed NDJSON
+    // Generate gzip-compressed NDJSON
     let ndjson = generate_ndjson(num_rows);
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(ndjson.as_bytes()).unwrap();
     let compressed = encoder.finish().unwrap();
     let data = Bytes::from(compressed);
 
-    // Step 2: Read with NdjsonReader (gzip)
+    // Read with NdjsonReader (gzip)
     let reader_config = NdjsonReaderConfig::new(1000, CompressionFormat::Gzip);
     let reader = NdjsonReader::new(schema.clone(), reader_config, "e2e-gz-test".to_string());
 
@@ -206,7 +206,7 @@ fn test_ndjson_gz_to_parquet_pipeline() {
     let total_read: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_read, num_rows, "should read all rows from gzip");
 
-    // Step 3: Write to parquet
+    // Write to parquet
     let writer_config = ParquetWriterConfig::default().with_file_size_mb(10);
     let mut writer = ParquetWriter::new(schema, writer_config, "e2e-gz-test".to_string()).unwrap();
 
@@ -216,7 +216,7 @@ fn test_ndjson_gz_to_parquet_pipeline() {
 
     let finished_files = writer.close().unwrap();
 
-    // Step 4: Verify
+    // Verify
     assert!(!finished_files.is_empty());
     let total_records: usize = finished_files.iter().map(|f| f.record_count).sum();
     assert_eq!(total_records, num_rows);
