@@ -22,7 +22,7 @@ pub const CHECKPOINT_DIR: &str = "_blizzard";
 
 use object_store::path::Path;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use snafu::ResultExt;
 
@@ -92,7 +92,7 @@ impl CheckpointManager {
                 let json = String::from_utf8_lossy(&bytes);
                 match serde_json::from_str::<CheckpointState>(&json) {
                     Ok(state) => {
-                        info!(
+                        debug!(
                             target = %self.pipeline_key,
                             watermark = ?state.watermark,
                             last_update_ts = state.last_update_ts,
