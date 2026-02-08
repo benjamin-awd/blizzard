@@ -3,7 +3,7 @@
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::multipart::MultipartStore;
 use object_store::path::Path;
-use object_store::{ObjectStore, RetryConfig};
+use object_store::ObjectStore;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,18 +11,13 @@ use tracing::debug;
 
 use crate::error::{GcsConfigSnafu, StorageError};
 
-use super::{BackendConfig, StorageProvider};
+use super::{BackendConfig, StorageProvider, default_retry_config};
 
 /// Google Cloud Storage configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcsConfig {
     pub bucket: String,
     pub key: Option<Path>,
-}
-
-/// Create a standard retry configuration for cloud storage operations.
-fn default_retry_config() -> RetryConfig {
-    RetryConfig::default()
 }
 
 impl StorageProvider {

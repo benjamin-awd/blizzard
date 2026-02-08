@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::debug;
 
+use object_store::RetryConfig;
+
 use crate::emit;
 use crate::error::{ObjectStoreSnafu, StorageError};
 use crate::metrics::events::{
@@ -38,6 +40,11 @@ pub use azure::AzureConfig;
 pub use gcs::GcsConfig;
 pub use local::LocalConfig;
 pub use s3::S3Config;
+
+/// Create a standard retry configuration for cloud storage operations.
+pub(super) fn default_retry_config() -> RetryConfig {
+    RetryConfig::default()
+}
 
 /// A reference-counted storage provider.
 pub type StorageProviderRef = Arc<StorageProvider>;

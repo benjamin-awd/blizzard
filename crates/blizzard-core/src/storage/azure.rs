@@ -3,14 +3,14 @@
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::multipart::MultipartStore;
 use object_store::path::Path;
-use object_store::{ObjectStore, RetryConfig};
+use object_store::ObjectStore;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::{AzureConfigSnafu, StorageError};
 
-use super::{BackendConfig, StorageProvider};
+use super::{BackendConfig, StorageProvider, default_retry_config};
 
 /// Azure Blob Storage configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,11 +18,6 @@ pub struct AzureConfig {
     pub account: String,
     pub container: String,
     pub key: Option<Path>,
-}
-
-/// Create a standard retry configuration for cloud storage operations.
-fn default_retry_config() -> RetryConfig {
-    RetryConfig::default()
 }
 
 impl StorageProvider {
