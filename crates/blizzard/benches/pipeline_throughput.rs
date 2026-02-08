@@ -168,11 +168,80 @@ fn decompression_and_parse(c: &mut Criterion) {
     group.finish();
 }
 
+/// Coercion mode benchmark: measures the cost of object-to-string coercion.
+///
+/// Compares standard Arrow reader vs coercion mode on data where Utf8 fields
+/// sometimes contain JSON objects/arrays. Standard mode would fail on this
+/// data, so this benchmarks the coercion path that makes it work.
+fn coercion_mode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("coercion_mode");
+
+    for record_count in [10_000, 100_000] {
+        let temp_file = bench_utils::generate_ndjson_gz_file_with_objects(record_count);
+        let compressed = Bytes::from(std::fs::read(temp_file.path()).unwrap());
+        let schema = bench_utils::coercion_schema();
+
+        // Also generate clean data (no objects in Utf8 fields) for baseline comparison
+        let clean_temp_file = bench_utils::generate_ndjson_gz_file(record_count);
+        let clean_compressed = Bytes::from(std::fs::read(clean_temp_file.path()).unwrap());
+        let clean_schema = bench_utils::benchmark_schema();
+
+        group.throughput(Throughput::Elements(record_count as u64));
+        group.sample_size(10);
+
+        // Baseline: standard mode on clean data
+        group.bench_with_input(
+            BenchmarkId::new("standard", record_count),
+            &clean_compressed,
+            |b, data| {
+                b.iter(|| {
+                    let config = NdjsonReaderConfig::new(8192, CompressionFormat::Gzip);
+                    let reader = NdjsonReader::new(clean_schema.clone(), config, "bench".into());
+
+                    let mut total = 0usize;
+                    reader
+                        .read_batches(data.clone(), "bench.ndjson.gz", &mut |batch| {
+                            total += batch.num_rows();
+                            ControlFlow::Continue(())
+                        })
+                        .unwrap();
+                    total
+                });
+            },
+        );
+
+        // Coercion mode on mixed data (objects in Utf8 fields)
+        group.bench_with_input(
+            BenchmarkId::new("coercing", record_count),
+            &compressed,
+            |b, data| {
+                b.iter(|| {
+                    let config = NdjsonReaderConfig::new(8192, CompressionFormat::Gzip)
+                        .coerce_objects_to_strings();
+                    let reader = NdjsonReader::new(schema.clone(), config, "bench".into());
+
+                    let mut total = 0usize;
+                    reader
+                        .read_batches(data.clone(), "bench.ndjson.gz", &mut |batch| {
+                            total += batch.num_rows();
+                            ControlFlow::Continue(())
+                        })
+                        .unwrap();
+                    total
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     pipeline_end_to_end,
     json_parsing,
     parquet_writing,
     decompression_and_parse,
+    coercion_mode,
 );
 criterion_main!(benches);

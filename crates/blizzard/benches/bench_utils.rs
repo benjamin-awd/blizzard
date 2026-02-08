@@ -61,6 +61,72 @@ pub fn generate_ndjson_gz_file(count: usize) -> tempfile::NamedTempFile {
     file
 }
 
+/// Schema for coercion benchmarks: has Utf8 fields that may contain objects.
+pub fn coercion_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("value", DataType::Float64, true),
+        Field::new("metadata", DataType::Utf8, true),
+        Field::new("tags", DataType::Utf8, true),
+        Field::new("active", DataType::Boolean, true),
+    ]))
+}
+
+/// Generate NDJSON lines where Utf8 fields sometimes contain objects/arrays.
+///
+/// ~50% of `metadata` values are JSON objects, ~50% are plain strings.
+/// ~30% of `tags` values are JSON arrays, ~70% are plain strings.
+/// This exercises the coercion path that stringifies non-scalar values.
+pub fn generate_json_lines_with_objects(count: usize) -> Vec<String> {
+    let mut rng = rand::rng();
+
+    (0..count)
+        .map(|i| {
+            let value: f64 = rng.random_range(100.0..10000.0);
+            let timestamp: i64 = 1700000000000 + (i as i64);
+            let active: bool = rng.random_bool(0.9);
+
+            let metadata = if rng.random_bool(0.5) {
+                format!(r#"{{"source":"api","region":"us-east-{}","retry_count":{}}}"#, rng.random_range(1..5), rng.random_range(0..3))
+            } else {
+                format!(r#""simple_value_{i}""#)
+            };
+
+            let tags = if rng.random_bool(0.3) {
+                format!(r#"["tag_{}","tag_{}","tag_{}"]"#, rng.random_range(0..10), rng.random_range(0..10), rng.random_range(0..10))
+            } else {
+                format!(r#""category_{}""#, rng.random_range(0..5))
+            };
+
+            format!(
+                r#"{{"id":"record_{i}","timestamp":{timestamp},"value":{value:.2},"metadata":{metadata},"tags":{tags},"active":{active}}}"#,
+            )
+        })
+        .collect()
+}
+
+/// Generate a gzip-compressed NDJSON file with object-containing fields.
+pub fn generate_ndjson_gz_file_with_objects(count: usize) -> tempfile::NamedTempFile {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let lines = generate_json_lines_with_objects(count);
+    let file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+
+    let mut encoder = GzEncoder::new(
+        std::fs::File::create(file.path()).expect("Failed to create file"),
+        Compression::fast(),
+    );
+
+    for line in &lines {
+        writeln!(encoder, "{line}").expect("Failed to write line");
+    }
+
+    encoder.finish().expect("Failed to finish compression");
+    file
+}
+
 /// Generate Arrow RecordBatches for Parquet writing benchmarks.
 pub fn generate_record_batches(batch_size: usize, num_batches: usize) -> Vec<RecordBatch> {
     let schema = benchmark_schema();
