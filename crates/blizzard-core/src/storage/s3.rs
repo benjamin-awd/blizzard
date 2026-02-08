@@ -3,14 +3,14 @@
 use object_store::aws::AmazonS3Builder;
 use object_store::multipart::MultipartStore;
 use object_store::path::Path;
-use object_store::{ObjectStore, RetryConfig};
+use object_store::ObjectStore;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::{S3ConfigSnafu, StorageError};
 
-use super::{BackendConfig, StorageProvider};
+use super::{BackendConfig, StorageProvider, default_retry_config};
 
 /// S3 storage configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +19,6 @@ pub struct S3Config {
     pub region: Option<String>,
     pub bucket: String,
     pub key: Option<Path>,
-}
-
-/// Create a standard retry configuration for cloud storage operations.
-fn default_retry_config() -> RetryConfig {
-    RetryConfig::default()
 }
 
 impl StorageProvider {

@@ -168,32 +168,11 @@ impl Sink {
 mod tests {
     use super::*;
     use blizzard_core::StorageProvider;
-    use deltalake::arrow::array::{Int64Array, StringArray};
-    use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn test_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, true),
-        ]))
-    }
-
-    fn test_batch(num_rows: usize) -> RecordBatch {
-        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
-        let values: Vec<i64> = (0..num_rows).map(|i| i64::try_from(i).unwrap()).collect();
-
-        RecordBatch::try_new(
-            test_schema(),
-            vec![
-                Arc::new(StringArray::from(ids)),
-                Arc::new(Int64Array::from(values)),
-            ],
-        )
-        .unwrap()
-    }
+    use crate::test_util::{test_batch, test_schema};
 
     #[tokio::test]
     async fn test_sink_writer_extracts_partitions_and_writes() {

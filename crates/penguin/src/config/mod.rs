@@ -166,10 +166,6 @@ impl Mergeable for Config {
         &mut self.metrics
     }
 
-    fn parse_yaml(contents: &str) -> Result<Self, ConfigError> {
-        serde_yaml::from_str(contents).map_err(|source| ConfigError::YamlParse { source })
-    }
-
     fn validate(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
