@@ -1,6 +1,6 @@
 //! Benchmark utilities for generating test data.
 
-#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_possible_wrap, dead_code)]
 
 use deltalake::arrow::array::{BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef};

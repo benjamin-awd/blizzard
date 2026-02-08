@@ -32,13 +32,13 @@ pipelines:
           type: int64
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         let source = pipeline.sources.get("default").unwrap();
 
         assert_eq!(source.path, "s3://bucket/input/*.ndjson.gz");
         assert_eq!(source.batch_size, 4096);
         assert_eq!(pipeline.sink.file_size_mb, 64);
-        assert_eq!(pipeline.schema.fields().len(), 4);
+        assert_eq!(pipeline.schema.fields.len(), 4);
 
         // Test schema conversion
         let arrow_schema = pipeline.schema.to_arrow_schema();
@@ -63,7 +63,7 @@ pipelines:
           type: string
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         let source = pipeline.sources.get("default").unwrap();
 
         // Check defaults
@@ -101,7 +101,7 @@ pipelines:
 "#
             );
             let config: blizzard::config::Config = serde_yaml::from_str(&yaml).unwrap();
-            let (_, pipeline) = config.pipelines().next().unwrap();
+            let (_, pipeline) = config.pipelines.iter().next().unwrap();
             let schema = pipeline.schema.to_arrow_schema();
             assert_eq!(
                 schema.field(0).data_type(),
@@ -185,7 +185,7 @@ mod parquet_tests {
     /// Build rolling policies from config the same way processor.rs does.
     /// This mirrors the logic in Iteration::new() to ensure config is wired correctly.
     fn build_rolling_policies_from_config(config: &Config) -> Vec<RollingPolicy> {
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         let mut policies = vec![RollingPolicy::SizeLimit(pipeline.sink.file_size_mb * MB)];
         if let Some(secs) = pipeline.sink.rollover_timeout_secs {
             policies.push(RollingPolicy::RolloverDuration(Duration::from_secs(secs)));
@@ -270,7 +270,7 @@ pipelines:
           type: string
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
 
         // Build config the same way processor.rs does
         let mut policies = vec![RollingPolicy::SizeLimit(pipeline.sink.file_size_mb * MB)];
@@ -604,7 +604,7 @@ pipelines:
       dlq_path: "/var/log/blizzard/dlq"
 "#;
         let config: blizzard::config::Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         assert_eq!(pipeline.error_handling.max_failures, 100);
         assert_eq!(
             pipeline.error_handling.dlq_path,
@@ -632,7 +632,7 @@ pipelines:
           type: string
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         let source = pipeline.sources.get("default").unwrap();
 
         // Check default poll interval
@@ -659,7 +659,7 @@ pipelines:
           type: string
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let (_, pipeline) = config.pipelines().next().unwrap();
+        let (_, pipeline) = config.pipelines.iter().next().unwrap();
         let source = pipeline.sources.get("default").unwrap();
 
         assert_eq!(source.poll_interval_secs, 30, "poll interval should be 30s");

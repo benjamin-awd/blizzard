@@ -1,9 +1,9 @@
 //! S3 storage backend implementation.
 
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::multipart::MultipartStore;
 use object_store::path::Path;
-use object_store::ObjectStore;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
