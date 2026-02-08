@@ -125,10 +125,11 @@ impl MetricsController {
 
 /// Run the HTTP server for metrics and health endpoints.
 async fn run_server(addr: SocketAddr) {
-    // Get the handle from the controller (guaranteed to exist since we just set it)
-    let controller = CONTROLLER
-        .get()
-        .expect("controller initialized before server spawn");
+    // Get the handle from the controller (set by init_global before spawning this task)
+    let Some(controller) = CONTROLLER.get() else {
+        error!("Metrics controller not initialized before server spawn");
+        return;
+    };
 
     let app = Router::new()
         .route("/metrics", get(metrics_handler))

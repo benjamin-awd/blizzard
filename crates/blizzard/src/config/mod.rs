@@ -483,8 +483,9 @@ impl AppConfig for Config {
         info!("Starting blizzard file loader with {pipeline_count} pipeline(s)");
         for (key, cfg) in &self.pipelines {
             let sink = &cfg.sink.table_uri;
-            if cfg.sources.len() == 1 {
-                let source = cfg.sources.values().next().unwrap();
+            if let Some(source) = cfg.sources.values().next()
+                && cfg.sources.len() == 1
+            {
                 info!("  Pipeline: {key} ({} -> {sink})", source.path);
             } else {
                 let source_names: Vec<_> = cfg.sources.keys().collect();

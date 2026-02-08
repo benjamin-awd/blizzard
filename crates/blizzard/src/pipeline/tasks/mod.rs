@@ -58,7 +58,18 @@ pub(super) fn spawn_read_task(
                 "No reader for source '{}', using first available reader",
                 source_name
             );
-            readers.values().next().unwrap().clone()
+            match readers.values().next() {
+                Some(r) => r.clone(),
+                None => {
+                    tracing::error!("No readers available, cannot process file");
+                    let (_, batch_rx) = mpsc::channel(1);
+                    return ProcessedFile {
+                        source_name,
+                        path,
+                        batch_rx,
+                    };
+                }
+            }
         }
     };
 

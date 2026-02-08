@@ -354,10 +354,13 @@ impl PollingProcessor for Processor {
             .map(String::from);
 
         // Acquire global semaphore permit if configured (limits concurrent I/O across tables)
-        let _permit = if let Some(ref sem) = self.global_semaphore {
-            Some(sem.acquire().await.expect("semaphore should not be closed"))
-        } else {
-            None
+        let _permit = match &self.global_semaphore {
+            Some(sem) => Some(sem.acquire().await.map_err(|_| PipelineError::Config {
+                source: blizzard_core::error::ConfigError::Internal {
+                    message: "Global semaphore closed unexpectedly".to_string(),
+                },
+            })?),
+            None => None,
         };
 
         // Commit files to Delta Lake

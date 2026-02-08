@@ -38,6 +38,10 @@ pub enum StorageError {
     /// Azure configuration error.
     #[snafu(display("Azure configuration error: {source}"))]
     AzureConfig { source: object_store::Error },
+
+    /// Failed to serialize data for storage.
+    #[snafu(display("Serialization failed: {source}"))]
+    Serialize { source: serde_json::Error },
 }
 
 impl StorageError {

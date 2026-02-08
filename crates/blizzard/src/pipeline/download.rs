@@ -160,7 +160,11 @@ impl Downloader {
                 let mut file = Some(processed);
                 for i in 0..num_workers {
                     let idx = (next_worker + i) % num_workers;
-                    match workers.file_txs[idx].try_send(file.take().unwrap()) {
+                    // SAFETY: `file` is always Some here — it starts as Some and is
+                    // only set to None via take() on successful send (which breaks).
+                    // The Full branch restores it to Some immediately.
+                    let to_send = file.take().expect("file should be Some in dispatch loop");
+                    match workers.file_txs[idx].try_send(to_send) {
                         Ok(()) => {
                             completion_tracker.assign(&source_name, &path);
                             next_worker = (idx + 1) % num_workers;
@@ -180,7 +184,9 @@ impl Downloader {
                 }
                 // All workers full — push back and fall through to select!
                 // to process completions or accept new downloads.
-                pending.push_front(file.unwrap());
+                if let Some(returned) = file {
+                    pending.push_front(returned);
+                }
             }
 
             // No pending files — wait for downloads, completions, shutdown, or checkpoint

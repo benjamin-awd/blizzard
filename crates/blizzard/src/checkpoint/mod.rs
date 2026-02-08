@@ -24,7 +24,10 @@ use object_store::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use snafu::ResultExt;
+
 use blizzard_core::emit;
+use blizzard_core::error::SerializeSnafu;
 use blizzard_core::metrics::events::CheckpointSaved;
 use blizzard_core::storage::StorageProvider;
 
@@ -124,8 +127,7 @@ impl CheckpointManager {
     ///
     /// Uses temp file + rename pattern for atomicity.
     pub async fn save(&self) -> Result<(), StorageError> {
-        let json = serde_json::to_string_pretty(&self.state)
-            .expect("checkpoint state should always serialize");
+        let json = serde_json::to_string_pretty(&self.state).context(SerializeSnafu)?;
 
         let path = self.checkpoint_path();
         self.storage.atomic_write(&path, json.into_bytes()).await?;

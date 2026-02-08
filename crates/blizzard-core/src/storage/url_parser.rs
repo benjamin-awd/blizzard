@@ -191,15 +191,22 @@ impl BackendConfig {
         let key = if with_key {
             let key = path
                 .file_name()
-                .map(|k| k.to_str().unwrap().to_string().into());
+                .and_then(|k| k.to_str().map(|s| s.to_string().into()));
             path.pop();
             key
         } else {
             None
         };
 
+        let path_str = path.to_str().ok_or_else(|| {
+            InvalidUrlSnafu {
+                url: path.to_string_lossy().to_string(),
+            }
+            .build()
+        })?;
+
         Ok(BackendConfig::Local(LocalConfig {
-            path: path.to_str().unwrap().to_string(),
+            path: path_str.to_string(),
             key,
         }))
     }

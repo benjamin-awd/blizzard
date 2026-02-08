@@ -180,7 +180,15 @@ impl<'a> ConfigResolver<'a> {
                             message: "No sources configured".to_string(),
                         },
                     })?;
-            let first_storage = source_storages.values().next().unwrap();
+            let first_storage =
+                source_storages
+                    .values()
+                    .next()
+                    .ok_or_else(|| PipelineError::Config {
+                        source: ConfigError::Internal {
+                            message: "No source storages available".to_string(),
+                        },
+                    })?;
             let prefixes = first_source.date_prefixes();
             Ok(infer_schema_from_source(
                 first_storage,

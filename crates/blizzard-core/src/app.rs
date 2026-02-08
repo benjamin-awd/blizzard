@@ -88,7 +88,13 @@ impl<C: AppConfig> Application<C> {
     fn execute(self) -> ExitCode {
         self.config.log_startup_info();
 
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("Failed to create tokio runtime: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         let result = runtime.block_on(run_pipelines(
             &Mergeable::metrics(&self.config).address,
             Mergeable::global(&self.config),

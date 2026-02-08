@@ -37,13 +37,11 @@ pub fn create_add_action(file: &FinishedFile) -> Action {
 
     Action::Add(Add {
         path: subpath.to_string(),
-        size: i64::try_from(file.size).expect("file size should fit in i64"),
+        size: i64::try_from(file.size).unwrap_or(i64::MAX),
         partition_values,
         modification_time: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| {
-                i64::try_from(d.as_millis()).expect("modification time in millis should fit in i64")
-            })
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
             .unwrap_or(0),
         data_change: true,
         ..Default::default()
@@ -78,10 +76,7 @@ pub fn create_txn_action(
         last_updated: Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| {
-                    i64::try_from(d.as_millis())
-                        .expect("modification time in millis should fit in i64")
-                })
+                .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
                 .unwrap_or(0),
         ),
     }))

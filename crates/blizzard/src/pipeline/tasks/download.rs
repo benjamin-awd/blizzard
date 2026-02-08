@@ -118,10 +118,15 @@ impl DownloadTask {
         let semaphore = global_semaphore.clone();
         let pipeline_clone = pipeline.to_string();
         downloads.push(Box::pin(async move {
-            let _permit = if let Some(ref sem) = semaphore {
-                Some(sem.acquire().await.expect("semaphore should not be closed"))
-            } else {
-                None
+            let _permit = match &semaphore {
+                Some(sem) => match sem.acquire().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        tracing::error!(task = "download", "Global semaphore closed unexpectedly");
+                        None
+                    }
+                },
+                None => None,
             };
             download_file(
                 storage,

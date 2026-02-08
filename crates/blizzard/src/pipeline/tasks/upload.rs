@@ -221,10 +221,15 @@ impl UploadTask {
                     let semaphore = global_semaphore.clone();
                     uploads.push(Box::pin(async move {
                         // Acquire global semaphore permit if configured
-                        let _permit = if let Some(ref sem) = semaphore {
-                            Some(sem.acquire().await.expect("semaphore should not be closed"))
-                        } else {
-                            None
+                        let _permit = match &semaphore {
+                            Some(sem) => match sem.acquire().await {
+                                Ok(permit) => Some(permit),
+                                Err(_) => {
+                                    tracing::error!(task = "upload", "Global semaphore closed unexpectedly");
+                                    None
+                                }
+                            },
+                            None => None,
                         };
                         (upload_file(storage, file, pipeline_clone).await, size)
                     }));
