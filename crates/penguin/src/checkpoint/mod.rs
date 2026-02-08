@@ -115,7 +115,10 @@ impl CheckpointCoordinator {
     pub async fn mark_checkpoint_committed(&self) {
         let mut last = self.last_checkpoint.lock().await;
         *last = Instant::now();
-        emit!(CheckpointAge { seconds: 0.0 });
+        emit!(CheckpointAge {
+            seconds: 0.0,
+            target: self.table.clone()
+        });
         debug!(target = %self.table, "Checkpoint committed, timer reset");
     }
 

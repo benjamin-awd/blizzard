@@ -419,12 +419,13 @@ impl InternalEvent for MultipartUploadCompleted {
 /// Event emitted to track time since last checkpoint.
 pub struct CheckpointAge {
     pub seconds: f64,
+    pub target: String,
 }
 
 impl InternalEvent for CheckpointAge {
     fn emit(self) {
-        trace!(seconds = self.seconds, "Checkpoint age");
-        gauge!("blizzard_checkpoint_age_seconds").set(self.seconds);
+        trace!(target = %self.target, seconds = self.seconds, "Checkpoint age");
+        gauge!("blizzard_checkpoint_age_seconds", "target" => self.target).set(self.seconds);
     }
 }
 

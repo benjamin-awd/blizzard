@@ -28,7 +28,7 @@ use snafu::ResultExt;
 
 use blizzard_core::emit;
 use blizzard_core::error::SerializeSnafu;
-use blizzard_core::metrics::events::CheckpointSaved;
+use blizzard_core::metrics::events::{CheckpointAge, CheckpointSaved};
 use blizzard_core::storage::StorageProvider;
 
 use crate::error::StorageError;
@@ -132,6 +132,16 @@ impl CheckpointManager {
         let path = self.checkpoint_path();
         self.storage.atomic_write(&path, json.into_bytes()).await?;
 
+        let age_seconds = if self.state.last_update_ts > 0 {
+            let now = chrono::Utc::now().timestamp();
+            (now - self.state.last_update_ts).max(0) as f64
+        } else {
+            0.0
+        };
+        emit!(CheckpointAge {
+            seconds: age_seconds,
+            target: self.pipeline_key.clone(),
+        });
         emit!(CheckpointSaved {
             target: self.pipeline_key.clone(),
         });
