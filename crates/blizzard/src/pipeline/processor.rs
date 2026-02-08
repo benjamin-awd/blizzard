@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use snafu::ResultExt;
 
 use blizzard_core::emit;
+use blizzard_core::metrics::UtilizationTimer;
 use blizzard_core::metrics::events::FilesDiscovered;
 use blizzard_core::polling::{IterationResult, PollingProcessor};
 use blizzard_core::{
@@ -407,6 +408,7 @@ impl Iteration {
         multi_tracker: &mut MultiSourceTracker,
         failure_tracker: &mut FailureTracker,
         shutdown: CancellationToken,
+        util_timer: &mut UtilizationTimer,
     ) -> Result<(IterationResult, usize), PipelineError> {
         let mut ctx = ProcessingContext {
             multi_tracker,
@@ -420,6 +422,7 @@ impl Iteration {
                 self.worker_channels,
                 shutdown,
                 &self.checkpoint_config,
+                util_timer,
             )
             .await?;
 
@@ -463,6 +466,8 @@ pub(super) struct PipelineOrchestrator {
     shutdown: CancellationToken,
     /// Optional global semaphore for cross-pipeline concurrency limiting.
     global_semaphore: Option<Arc<Semaphore>>,
+    /// Persistent utilization timer for tracking working vs idle time.
+    util_timer: UtilizationTimer,
 }
 
 impl PipelineOrchestrator {
@@ -474,6 +479,7 @@ impl PipelineOrchestrator {
         global_semaphore: Option<Arc<Semaphore>>,
         shutdown: CancellationToken,
     ) -> Self {
+        let util_timer = UtilizationTimer::new(key.id());
         Self {
             key,
             config,
@@ -482,6 +488,7 @@ impl PipelineOrchestrator {
             failure_tracker: resolved.failure_tracker,
             shutdown,
             global_semaphore,
+            util_timer,
         }
     }
 }
@@ -533,6 +540,8 @@ impl PollingProcessor for PipelineOrchestrator {
     }
 
     async fn process(&mut self, _state: Self::State) -> Result<IterationResult, Self::Error> {
+        self.util_timer.stop_wait();
+
         // Take discovery snapshots from trackers before spawning
         let discovery_sources = self
             .multi_tracker
@@ -559,6 +568,7 @@ impl PollingProcessor for PipelineOrchestrator {
                 &mut self.multi_tracker,
                 &mut self.failure_tracker,
                 self.shutdown.clone(),
+                &mut self.util_timer,
             )
             .await?;
 
@@ -582,6 +592,9 @@ impl PollingProcessor for PipelineOrchestrator {
         } else {
             debug!(target = %self.key, "Saved state");
         }
+
+        self.util_timer.start_wait();
+        self.util_timer.maybe_update();
 
         Ok(result)
     }

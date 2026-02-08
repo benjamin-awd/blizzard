@@ -105,12 +105,12 @@ impl Downloader {
         mut workers: SinkWorkerChannels,
         shutdown: CancellationToken,
         checkpoint_config: &IncrementalCheckpointConfig,
+        util_timer: &mut UtilizationTimer,
     ) -> Result<IterationResult, PipelineError> {
         let mut pending: VecDeque<ProcessedFile> = VecDeque::new();
         let mut files_since_save: usize = 0;
         let mut files_downloaded: usize = 0;
         let mut files_processed: usize = 0;
-        let mut util_timer = UtilizationTimer::new(&self.pipeline_key);
         let mut completion_tracker = CompletionTracker::new();
 
         // Track how many files have been spawned but not yet fully consumed.
