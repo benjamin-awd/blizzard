@@ -199,28 +199,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
-    use deltalake::arrow::array::{Int64Array, RecordBatch, StringArray};
-    use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use deltalake::arrow::array::RecordBatch;
+    use deltalake::arrow::datatypes::SchemaRef;
 
-    fn test_schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, true),
-        ]))
-    }
-
-    fn test_batch(num_rows: usize) -> RecordBatch {
-        let ids: Vec<String> = (0..num_rows).map(|i| format!("id_{i}")).collect();
-        let values: Vec<i64> = (0..num_rows).map(|i| i64::try_from(i).unwrap()).collect();
-        RecordBatch::try_new(
-            test_schema(),
-            vec![
-                Arc::new(StringArray::from(ids)),
-                Arc::new(Int64Array::from(values)),
-            ],
-        )
-        .unwrap()
-    }
+    use crate::test_util::{test_batch, test_schema};
 
     /// A mock reader that produces batches with a configurable delay between them.
     struct SlowReader {
@@ -404,7 +386,6 @@ mod tests {
 #[cfg(test)]
 mod discovery_tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use indexmap::IndexMap;
     use tempfile::TempDir;
@@ -412,27 +393,7 @@ mod discovery_tests {
 
     use super::DiscoveryTask;
     use crate::pipeline::tracker::{DiscoverySnapshot, DiscoverySource};
-
-    async fn create_test_storage(temp_dir: &TempDir) -> blizzard_core::StorageProviderRef {
-        Arc::new(
-            blizzard_core::storage::StorageProvider::for_url_with_options(
-                temp_dir.path().to_str().unwrap(),
-                HashMap::new(),
-            )
-            .await
-            .unwrap(),
-        )
-    }
-
-    fn create_files(temp_dir: &TempDir, paths: &[&str]) {
-        for path in paths {
-            let full_path = temp_dir.path().join(path);
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(full_path, b"").unwrap();
-        }
-    }
+    use crate::test_util::{create_files, create_test_storage};
 
     /// Discovery with multiple sources finds files from all sources
     /// and returns the correct total count.

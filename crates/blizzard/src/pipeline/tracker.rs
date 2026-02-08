@@ -406,30 +406,9 @@ pub struct DiscoverySource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
-    async fn create_test_storage(temp_dir: &TempDir) -> StorageProviderRef {
-        Arc::new(
-            blizzard_core::storage::StorageProvider::for_url_with_options(
-                temp_dir.path().to_str().unwrap(),
-                HashMap::new(),
-            )
-            .await
-            .unwrap(),
-        )
-    }
-
-    /// Helper to create ndjson.gz files in a temp directory.
-    fn create_files(temp_dir: &TempDir, paths: &[&str]) {
-        for path in paths {
-            let full_path = temp_dir.path().join(path);
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(full_path, b"").unwrap();
-        }
-    }
+    use crate::test_util::{create_files, create_test_storage};
 
     // =========================================================================
     // DiscoverySnapshot::list_pending — Watermark variant
