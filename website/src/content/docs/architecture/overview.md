@@ -55,9 +55,9 @@ The pipeline consists of concurrent stages connected by bounded channels:
 | **Upload** | Tokio async | I/O bound | Concurrent multipart uploads to table directory |
 
 1. **Download**: `DownloadTask` manages concurrent downloads via `FuturesUnordered`, sending `DownloadedFile` through a bounded channel
-2. **Process**: `spawn_blocking` decompresses (gzip/zstd) and parses NDJSON to Arrow RecordBatches
-3. **Sink**: `ParquetWriter` writes batches, queues rolled files to `UploadTask` via bounded channel, drains results with `try_recv()`
-4. **Upload**: `UploadTask` runs concurrent multipart uploads to the table directory
+2. **Process**: `spawn_blocking` decompresses (gzip/zstd) and parses NDJSON to Arrow RecordBatches. Read tasks are spawned eagerly — the downloader accepts incoming downloads via biased `select!` while dispatching processed files to workers, so decompression overlaps with sink writes
+3. **Sink**: N sink workers (configured by `sink_parallelism`, default 4) each run their own `ParquetWriter` + `UploadTask`. Workers pull files from a bounded channel (capacity 1), providing natural backpressure
+4. **Upload**: Each worker's `UploadTask` runs concurrent uploads to the table directory
 
 ```d2
 direction: down
@@ -65,99 +65,70 @@ direction: down
 source: Source Files { shape: document }
 
 download: DownloadTask {
-  label: "DownloadTask\n(async, 4 concurrent)"
+  label: "DownloadTask\n(async, concurrent)"
 }
 
 process: spawn_blocking {
   label: "spawn_blocking\n(decompress + parse)"
 }
 
-sink: Sink {
-  writer: ParquetWriter
-}
+workers: Sink Workers {
+  label: "N sink workers\n(sink_parallelism)"
 
-upload: UploadTask {
-  label: "UploadTask\n(async, 4 concurrent)"
+  worker: Worker {
+    writer: ParquetWriter
+    upload: UploadTask {
+      label: "UploadTask\n(async, concurrent)"
+    }
+    writer -> upload: "rolled Parquet\n(bounded channel)"
+  }
 }
 
 output: Table Directory { shape: cylinder }
 
 source -> download: "file list"
 download -> process: "DownloadedFile\n(bounded channel)"
-process -> sink.writer: RecordBatches
-sink.writer -> upload: "rolled Parquet\n(bounded channel)"
-upload -> output: multipart upload
-upload -> sink: "drain results" {style.stroke-dash: 3}
+process -> workers.worker.writer: ProcessedFile
+workers.worker.upload -> output: upload
 ```
 
 ## Detailed Processing Flow
 
-The following diagram shows the internal flow within a single processing iteration, including the biased `tokio::select!` loop priorities and how backpressure propagates through the system.
+The `Downloader` runs a main loop that first tries to dispatch pending files to workers via round-robin `try_send`, then falls through to a single biased `select!` that prioritises: shutdown > worker completions > checkpoint > accepting new downloads.
 
 ```d2
 direction: down
 
-iteration: Iteration::run() {
-  label: "Iteration::run()"
-}
-
 download_task: DownloadTask {
-  label: "DownloadTask\n(4 concurrent downloads)"
+  label: "DownloadTask\n(concurrent downloads)"
 }
 
-upload_task: UploadTask {
-  label: "UploadTask\n(4 concurrent uploads)"
-}
-
-iteration -> download_task: spawn
-iteration -> upload_task: spawn
-
-downloader: Downloader::run() {
+downloader: Downloader {
   label: "Downloader::run()\nbiased select! loop"
-
-  p1: "1. Shutdown" { style.fill: "#ffcccc" }
-  p2: "2. Process completed" { style.fill: "#ffffcc" }
-  p3: "3. Checkpoint" { style.fill: "#e0e0e0" }
-  p4: "4. Accept downloads" { style.fill: "#ccffcc" }
-
-  p1 -> p2 -> p3 -> p4: priority {style.stroke-dash: 3}
 }
-
-download_task -> downloader: DownloadedFile
 
 blocking: spawn_blocking {
-  label: "spawn_blocking\n(CPU-bound: decompress + parse)"
-  style.fill: "#ffeecc"
+  label: "spawn_blocking\n(decompress + parse)"
 }
 
-downloader.p4 -> blocking: spawn read task
+workers: Sink Workers {
+  label: "N sink workers (sink_parallelism)"
 
-processed: ProcessedFile { shape: document }
-
-blocking -> processed
-processed -> downloader.p2: complete
-
-sink: Sink {
-  label: "Sink::write_file_batches()\nwrite Parquet batches"
+  worker: Worker {
+    sink: Sink
+    upload: UploadTask
+    sink -> upload: "rolled Parquet"
+  }
 }
 
-downloader.p2 -> sink
+output: Table Directory { shape: cylinder }
 
-upload_chan: {
-  label: "channel\n(capacity: 4)"
-  shape: queue
-}
-
-sink -> upload_chan: Parquet file
-upload_chan -> upload_task
-
-result_chan: {
-  label: "results"
-  shape: queue
-}
-
-upload_task -> result_chan
-result_chan -> sink: drain {style.stroke-dash: 3}
+download_task -> downloader: DownloadedFile
+downloader -> blocking: "spawn read task"
+blocking -> downloader: ProcessedFile
+downloader -> workers.worker.sink: "round-robin dispatch"
+workers.worker.sink -> downloader: "completion result"
+workers.worker.upload -> output: upload
 ```
 
 ## Backpressure
@@ -167,19 +138,19 @@ Bounded channels between stages provide natural backpressure:
 | Channel | Buffer Size | Purpose |
 |---------|-------------|---------|
 | Download -> Process | `max_concurrent_files` | Limits memory for downloaded files |
-| Process -> Upload | `max_concurrent_uploads x 4` | Allows upload queue to stay ahead |
+| Downloader -> Worker | 1 | Workers pull files on demand via round-robin dispatch |
+| Process -> Upload | `max_concurrent_uploads` | Limits queued upload files per worker |
 
 When channels fill, upstream stages block until downstream catches up.
 
 ## Concurrency Configuration
 
 ```yaml
-source:
-  max_concurrent_files: 16    # Parallel downloads/processing
+max_concurrent_files: 4       # Parallel downloads/processing (default: 4)
+sink_parallelism: 4           # Number of sink workers (default: 4)
 
 sink:
-  max_concurrent_uploads: 4   # Parallel file uploads
-  max_concurrent_parts: 8     # Parts per multipart upload
+  max_concurrent_uploads: 4   # Parallel file uploads per worker (default: 4)
 ```
 
 ## Pipeline Statistics
@@ -191,7 +162,6 @@ The pipeline tracks comprehensive statistics:
 | `files_processed` | Number of source files processed |
 | `records_processed` | Total records written |
 | `bytes_written` | Total Parquet bytes written |
-| `parquet_files_written` | Number of Parquet files created |
 | `parquet_files_written` | Number of Parquet files written to table |
 
 ## Error Handling

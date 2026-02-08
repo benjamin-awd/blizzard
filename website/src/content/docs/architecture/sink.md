@@ -15,7 +15,7 @@ Sink Processing: {
     label: "Parquet Writer\nBuffer batches, compress, roll files"
   }
   uploader: Uploader Task {
-    label: "Uploader Task\nConcurrent multipart uploads"
+    label: "Uploader Task\nConcurrent uploads"
   }
   staging: Staging Writer {
     label: "Staging Writer\nWrite parquet + metadata for Penguin"
@@ -43,7 +43,7 @@ Files are rolled (completed) based on configurable policies:
 ```yaml
 sink:
   file_size_mb: 128              # Target file size (default: 128 MB)
-  rollover_timeout_secs: 300     # Roll after 5 minutes max
+  rollover_timeout_secs: 300     # Roll after 5 minutes max (optional, no default)
 ```
 
 ### Row Groups
@@ -98,31 +98,16 @@ sink:
   max_concurrent_uploads: 4  # Parallel file uploads (default: 4)
 ```
 
-### Multipart Uploads
-
-Large files use parallel multipart uploads:
-
-```yaml
-sink:
-  part_size_mb: 32           # Part size (default: 32 MB)
-  min_multipart_size_mb: 5   # Minimum for multipart (default: 5 MB)
-  max_concurrent_parts: 8    # Concurrent parts (default: 8)
-```
-
-Files smaller than `min_multipart_size_mb` use simple PUT.
-
 ## Configuration Example
 
 ```yaml
 sink:
-  path: "s3://my-bucket/delta-table"
+  table_uri: "s3://my-bucket/delta-table"
   file_size_mb: 128
   row_group_size_bytes: 134217728
   compression: snappy
   max_concurrent_uploads: 4
-  part_size_mb: 32
-  min_multipart_size_mb: 5
-  max_concurrent_parts: 8
+  rollover_timeout_secs: 300
   storage_options:
     AWS_REGION: "us-east-1"
 ```
@@ -131,7 +116,8 @@ sink:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `blizzard_bytes_written_total` | Counter | Total Parquet bytes written |
+| `blizzard_bytes_written_total` | Counter | Total Parquet bytes written (per batch) |
+| `blizzard_parquet_bytes_written_total` | Counter | Total Parquet file bytes written (per file) |
 | `blizzard_parquet_write_duration_seconds` | Histogram | Parquet file write latency |
 | `blizzard_parquet_files_written_total` | Counter | Parquet files written to table |
 | `blizzard_active_uploads` | Gauge | Currently uploading files |

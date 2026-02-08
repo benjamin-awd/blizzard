@@ -63,7 +63,7 @@ This approach lets you:
 
 ## Jittered Starts
 
-Pipelines start with random delays to avoid thundering herd problems. Each pipeline waits a random duration (0 to `poll_jitter_secs`) before starting, spreading load on source storage and smoothing resource usage spikes:
+Pipelines start with random delays to avoid thundering herd problems. A random duration (0 to `poll_jitter_secs`) is added both to the initial startup and to every subsequent poll interval, spreading load on source storage and smoothing resource usage spikes:
 
 ```d2
 shape: sequence_diagram
@@ -90,7 +90,7 @@ Configuration:
 
 ```yaml
 global:
-  poll_jitter_secs: 10  # Max jitter in seconds (0 to disable)
+  poll_jitter_secs: 10  # Max jitter in seconds (default: 30, 0 to disable)
 ```
 
 ## Concurrency Control
@@ -115,14 +115,12 @@ Without a global limit, each pipeline operates independently with its own concur
 
 ## Connection Pooling
 
-Enable connection pooling to reuse storage connections across pipelines:
+Connection pooling is enabled by default. Pipelines reading from the same bucket share storage connections, reducing connection overhead and improving HTTP/2 multiplexing.
 
 ```yaml
 global:
-  connection_pooling: true
+  connection_pooling: true  # default: true
 ```
-
-This allows pipelines to reuse authenticated connections to S3, GCS, or Azure, reducing connection overhead and authentication latency.
 
 **When NOT to use pooling:**
 
