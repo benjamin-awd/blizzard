@@ -12,6 +12,24 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "blue",
+        "name": "blizzard",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [
+            "blizzard"
+          ],
+          "type": "tags"
+        }
       }
     ]
   },
@@ -296,7 +314,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rate of checkpoint saves per second",
+      "description": "Time since the last successful checkpoint. High values indicate checkpoint issues.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -309,10 +327,18 @@
               {
                 "color": "green",
                 "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 600
               }
             ]
           },
-          "unit": "ops"
+          "unit": "s"
         },
         "overrides": []
       },
@@ -325,7 +351,7 @@
       "id": 5,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
@@ -347,12 +373,12 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(blizzard_checkpoints_saved_total{job=~\"$job\", pod=~\"$pod\"}[5m]))",
-          "legendFormat": "Checkpoints/s",
+          "expr": "max(blizzard_checkpoint_age_seconds{job=~\"$job\", pod=~\"$pod\"})",
+          "legendFormat": "Age",
           "refId": "A"
         }
       ],
-      "title": "Checkpoint Rate",
+      "title": "Checkpoint Age",
       "type": "stat"
     },
     {
@@ -1745,7 +1771,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Pipeline utilization percentage (0-100%)",
+      "description": "Pipeline stage utilization percentage (0-100%)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1807,11 +1833,11 @@
             "uid": "${datasource}"
           },
           "expr": "blizzard_utilization{job=~\"$job\", pod=~\"$pod\"} * 100",
-          "legendFormat": "{{target}}",
+          "legendFormat": "{{stage}}",
           "refId": "A"
         }
       ],
-      "title": "Pipeline Utilization",
+      "title": "Stage Utilization",
       "type": "stat"
     },
     {
@@ -2831,8 +2857,8 @@
       {
         "allValue": ".*",
         "current": {
-          "text": "All",
-          "value": "$__all"
+          "text": "blizzard",
+          "value": "blizzard"
         },
         "datasource": {
           "type": "prometheus",
@@ -2855,8 +2881,8 @@
       {
         "allValue": ".*",
         "current": {
-          "text": "bli-public-orderbooks-v1-as-6dc45fdc76-z8bzt",
-          "value": "bli-public-orderbooks-v1-as-6dc45fdc76-z8bzt"
+          "text": "All",
+          "value": "$__all"
         },
         "datasource": {
           "type": "prometheus",
@@ -2879,7 +2905,7 @@
     ]
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {
@@ -2897,5 +2923,5 @@
   "timezone": "browser",
   "title": "[SYS] Blizzard",
   "uid": "blizzard-ingestion",
-  "version": 16
+  "version": 20
 }
