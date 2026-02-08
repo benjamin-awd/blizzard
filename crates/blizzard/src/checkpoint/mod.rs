@@ -179,19 +179,9 @@ impl CheckpointManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use tempfile::TempDir;
 
-    async fn create_test_storage(temp_dir: &TempDir) -> Arc<StorageProvider> {
-        Arc::new(
-            StorageProvider::for_url_with_options(
-                temp_dir.path().to_str().unwrap(),
-                HashMap::new(),
-            )
-            .await
-            .unwrap(),
-        )
-    }
+    use crate::test_util::create_test_storage;
 
     #[tokio::test]
     async fn test_checkpoint_manager_load_no_checkpoint() {

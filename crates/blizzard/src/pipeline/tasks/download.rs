@@ -252,20 +252,10 @@ async fn download_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
-    async fn create_test_storage(temp_dir: &TempDir) -> StorageProviderRef {
-        Arc::new(
-            blizzard_core::storage::StorageProvider::for_url_with_options(
-                temp_dir.path().to_str().unwrap(),
-                HashMap::new(),
-            )
-            .await
-            .unwrap(),
-        )
-    }
+    use crate::test_util::create_test_storage;
 
     /// Helper to create a file on disk and return the SourcedFile.
     fn create_source_file(temp_dir: &TempDir, source: &str, path: &str) -> SourcedFile {
