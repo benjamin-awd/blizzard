@@ -1152,6 +1152,113 @@ mod watermark_tests {
     // ==================== End-to-End Checkpoint Manager Tests ====================
 
     #[tokio::test]
+    async fn test_restart_catches_up_without_reprocessing() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create _blizzard dir for checkpoint storage
+        std::fs::create_dir_all(temp_dir.path().join("_blizzard")).unwrap();
+
+        // Create 2 partitions with 3 files each (Phase 1 — initial data)
+        let hour13 = temp_dir.path().join("date=2024-01-28").join("hour=13");
+        let hour14 = temp_dir.path().join("date=2024-01-28").join("hour=14");
+        std::fs::create_dir_all(&hour13).unwrap();
+        std::fs::create_dir_all(&hour14).unwrap();
+
+        let original_files = [
+            "date=2024-01-28/hour=13/0001-aaa.ndjson.gz",
+            "date=2024-01-28/hour=13/0002-bbb.ndjson.gz",
+            "date=2024-01-28/hour=13/0003-ccc.ndjson.gz",
+            "date=2024-01-28/hour=14/0001-aaa.ndjson.gz",
+            "date=2024-01-28/hour=14/0002-bbb.ndjson.gz",
+            "date=2024-01-28/hour=14/0003-ccc.ndjson.gz",
+        ];
+        for f in &original_files {
+            std::fs::write(temp_dir.path().join(f), b"").unwrap();
+        }
+
+        let storage = create_test_storage(&temp_dir).await;
+
+        // Simulate processing: update watermark for each file, then save
+        let mut manager = CheckpointManager::new(
+            storage.clone(),
+            "test_pipeline".to_string(),
+            "src".to_string(),
+        );
+        for f in &original_files {
+            manager.update_watermark(f);
+        }
+        manager.save().await.unwrap();
+
+        // Phase 2 — add new files after "shutdown"
+        // 2 new files in existing partitions (above existing watermarks)
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("date=2024-01-28/hour=13/0004-ddd.ndjson.gz"),
+            b"",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("date=2024-01-28/hour=14/0004-ddd.ndjson.gz"),
+            b"",
+        )
+        .unwrap();
+
+        // 1 new file in a brand-new partition
+        let hour15 = temp_dir.path().join("date=2024-01-28").join("hour=15");
+        std::fs::create_dir_all(&hour15).unwrap();
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("date=2024-01-28/hour=15/0001-aaa.ndjson.gz"),
+            b"",
+        )
+        .unwrap();
+
+        // Phase 3 — restart: fresh manager, load checkpoint, discover files
+        let mut manager2 = CheckpointManager::new(
+            storage.clone(),
+            "test_pipeline".to_string(),
+            "src".to_string(),
+        );
+        let loaded = manager2.load().await.unwrap();
+        assert!(loaded, "checkpoint should have been loaded");
+
+        let storage_for_listing = StorageProvider::for_url_with_options(
+            temp_dir.path().to_str().unwrap(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let config = ndjson_config("test");
+
+        let files = list_files_above_partition_watermarks(
+            &storage_for_listing,
+            manager2.partition_watermarks(),
+            None,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        // Only the 3 new files should be discovered
+        assert_eq!(files.len(), 3, "expected 3 new files, got: {files:?}");
+        assert!(files.contains(&"date=2024-01-28/hour=13/0004-ddd.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2024-01-28/hour=14/0004-ddd.ndjson.gz".to_string()));
+        assert!(files.contains(&"date=2024-01-28/hour=15/0001-aaa.ndjson.gz".to_string()));
+
+        // None of the original 6 files should appear
+        for f in &original_files {
+            assert!(
+                !files.contains(&f.to_string()),
+                "original file {f} should not be re-discovered"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_checkpoint_manager_save_and_load_new_format() {
         let temp_dir = TempDir::new().unwrap();
 
