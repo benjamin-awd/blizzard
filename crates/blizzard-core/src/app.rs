@@ -19,15 +19,7 @@ use crate::tracing::init_tracing;
 /// Returns the number of whole CPUs available, or `None` if not running
 /// in a cgroup-limited environment (e.g., local development).
 fn detect_cpu_limit() -> Option<usize> {
-    // cgroups v2: /sys/fs/cgroup/cpu.max contains "$MAX $PERIOD" (e.g., "300000 100000" = 3 CPUs)
-    if let Some(cpus) = detect_cgroupv2() {
-        return Some(cpus);
-    }
-    // cgroups v1: separate quota and period files
-    if let Some(cpus) = detect_cgroupv1() {
-        return Some(cpus);
-    }
-    None
+    detect_cgroupv2().or_else(detect_cgroupv1)
 }
 
 fn detect_cgroupv2() -> Option<usize> {
