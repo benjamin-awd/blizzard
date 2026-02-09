@@ -118,44 +118,33 @@ pub async fn run_polling_loop<P: PollingProcessor + Send>(
             }
         };
 
-        // Emit iteration metrics and exit on shutdown
-        match result {
-            IterationResult::Shutdown => break,
-            IterationResult::NoItems => {
-                emit!(IterationCompleted {
-                    service,
-                    result: IterationResultType::NoItems,
-                    target: name.to_string(),
-                });
-                emit!(IterationDuration {
-                    service,
-                    duration: iteration_start.elapsed(),
-                    target: name.to_string(),
-                });
-                debug!(
-                    target = name,
-                    "No new items, waiting {}s before next poll",
-                    poll_interval.as_secs()
-                );
-            }
-            IterationResult::ProcessedItems => {
-                emit!(IterationCompleted {
-                    service,
-                    result: IterationResultType::Processed,
-                    target: name.to_string(),
-                });
-                emit!(IterationDuration {
-                    service,
-                    duration: iteration_start.elapsed(),
-                    target: name.to_string(),
-                });
-                debug!(
-                    target = name,
-                    "Iteration complete, waiting {}s before next poll",
-                    poll_interval.as_secs()
-                );
-            }
+        // Exit on shutdown
+        if matches!(result, IterationResult::Shutdown) {
+            break;
         }
+
+        // Emit iteration metrics
+        let result_type = match result {
+            IterationResult::NoItems => IterationResultType::NoItems,
+            IterationResult::ProcessedItems => IterationResultType::Processed,
+            IterationResult::Shutdown => unreachable!(),
+        };
+        emit!(IterationCompleted {
+            service,
+            result: result_type,
+            target: name.to_string(),
+        });
+        emit!(IterationDuration {
+            service,
+            duration: iteration_start.elapsed(),
+            target: name.to_string(),
+        });
+        debug!(
+            target = name,
+            result = ?result_type,
+            "Iteration complete, waiting {}s before next poll",
+            poll_interval.as_secs()
+        );
 
         // Wait for poll interval (plus jitter) or shutdown
         let jitter = random_jitter(poll_jitter_secs);
