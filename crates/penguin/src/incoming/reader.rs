@@ -263,40 +263,30 @@ impl IncomingReader {
 
     /// Read metadata from a parquet file and create a FinishedFile.
     ///
-    /// Extracts record count and file size from parquet metadata.
-    /// Partition values are parsed from the file path.
+    /// Fetches only the file footer (~64 KB) via a single suffix-range
+    /// request instead of downloading the entire file (10-100 MB).
+    /// Falls back to full download if footer parsing fails.
     pub async fn read_parquet_metadata(
         &self,
         incoming: &IncomingFile,
     ) -> Result<FinishedFile, IncomingError> {
-        use deltalake::parquet::file::reader::{FileReader, SerializedFileReader};
+        let (file_size, metadata) =
+            crate::parquet::read_parquet_footer(&self.storage, incoming.path.as_str(), &self.table)
+                .await
+                .map_err(|e| match e {
+                    crate::parquet::FooterReadError::Storage(source) => IncomingError::Read {
+                        path: incoming.path.clone(),
+                        source,
+                    },
+                    crate::parquet::FooterReadError::Parquet(source) => {
+                        IncomingError::ParquetMetadata {
+                            path: incoming.path.clone(),
+                            source,
+                        }
+                    }
+                })?;
 
-        // Read the parquet file
-        let bytes = self
-            .storage
-            .get(incoming.path.as_str())
-            .await
-            .map_err(|source| IncomingError::Read {
-                path: incoming.path.clone(),
-                source,
-            })?;
-
-        let file_size = bytes.len();
-
-        // Create a serialized file reader to parse parquet metadata
-        let reader =
-            SerializedFileReader::new(bytes).map_err(|source| IncomingError::ParquetMetadata {
-                path: incoming.path.clone(),
-                source,
-            })?;
-
-        // Get metadata and extract row counts
-        let metadata = reader.metadata();
-        let record_count: usize = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| usize::try_from(rg.num_rows()).unwrap_or(0))
-            .sum();
+        let record_count = usize::try_from(metadata.file_metadata().num_rows()).unwrap_or(0);
 
         // Parse partition values from path
         let partition_values = self.config.partition_extractor.extract(&incoming.path);
@@ -306,12 +296,13 @@ impl IncomingReader {
             path = %incoming.path,
             size = file_size,
             records = record_count,
-            "Read parquet metadata"
+            "Read parquet metadata (footer-only)"
         );
 
         Ok(FinishedFile::without_bytes(
             incoming.path.clone(),
-            file_size,
+            // u64 → usize: lossless on 64-bit, saturates on 32-bit
+            file_size.try_into().unwrap_or(usize::MAX),
             record_count,
             partition_values,
             None, // No source file for external writes

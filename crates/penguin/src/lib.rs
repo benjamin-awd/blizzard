@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod incoming;
 pub mod metrics;
+pub(crate) mod parquet;
 pub mod pipeline;
 pub mod schema;
 pub mod sink;

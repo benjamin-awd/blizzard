@@ -10,6 +10,7 @@ use deltalake::arrow::array::{Int32Array, StringArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::parquet::arrow::ArrowWriter;
+use deltalake::parquet::file::properties::WriterProperties;
 use tempfile::TempDir;
 
 use blizzard_core::PartitionExtractor;
@@ -278,4 +279,98 @@ async fn test_checkpoint_coordinator_with_delta_sink() {
         captured_state.delta_version >= 0,
         "captured state should have a valid delta version"
     );
+}
+
+/// Test that footer-only parquet metadata reading returns correct results.
+///
+/// Creates a parquet file with multiple row groups and verifies that
+/// `read_parquet_metadata()` (which uses a suffix-range read of the last 64KB)
+/// correctly extracts record count, file size, and partition values.
+#[tokio::test]
+async fn test_footer_only_metadata_read() {
+    let temp_dir = TempDir::new().unwrap();
+    let table_path = temp_dir.path();
+    let schema = test_schema();
+
+    let partition_dir = table_path.join("date=2026-03-01");
+    std::fs::create_dir_all(&partition_dir).unwrap();
+
+    let file_path = partition_dir.join("00000001-0000-0000-0000-000000000001.parquet");
+
+    // Write a parquet file with multiple row groups (max_row_group_size=2)
+    // so we verify that row counts are summed across all row groups.
+    let props = WriterProperties::builder()
+        .set_max_row_group_size(2)
+        .build();
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
+            Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
+        ],
+    )
+    .unwrap();
+
+    let file = std::fs::File::create(&file_path).unwrap();
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let expected_file_size: usize = std::fs::metadata(&file_path)
+        .unwrap()
+        .len()
+        .try_into()
+        .unwrap();
+
+    // Set up IncomingReader and read metadata via footer-only path
+    let storage = Arc::new(
+        StorageProvider::for_url_with_options(table_path.to_str().unwrap(), HashMap::new())
+            .await
+            .unwrap(),
+    );
+
+    let reader = IncomingReader::new(
+        storage.clone(),
+        "footer-test".to_string(),
+        IncomingConfig {
+            partition_filter: None,
+            partition_extractor: PartitionExtractor::all(),
+        },
+    );
+
+    let incoming = penguin::incoming::IncomingFile {
+        path: "date=2026-03-01/00000001-0000-0000-0000-000000000001.parquet".to_string(),
+        size: 0, // size is unknown at listing time
+    };
+
+    let finished = reader.read_parquet_metadata(&incoming).await.unwrap();
+
+    // Verify record count (5 rows across 3 row groups: 2+2+1)
+    assert_eq!(
+        finished.record_count, 5,
+        "should count all rows across row groups"
+    );
+
+    // Verify file size comes from suffix-range response metadata, not from IncomingFile.size
+    assert_eq!(
+        finished.size, expected_file_size,
+        "file size should match actual file on disk"
+    );
+
+    // Verify partition values were extracted from the path
+    assert_eq!(
+        finished.partition_values.get("date"),
+        Some(&"2026-03-01".to_string()),
+        "should extract partition values from path"
+    );
+
+    // Verify schema inference also works via footer-only path
+    let inferred = infer_schema_from_first_file(&storage, &[finished], "footer-test")
+        .await
+        .unwrap();
+
+    assert_eq!(inferred.fields().len(), 2);
+    assert_eq!(inferred.field(0).name(), "id");
+    assert_eq!(inferred.field(1).name(), "name");
 }

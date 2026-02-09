@@ -13,7 +13,7 @@
 use bytes::Bytes;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::parquet::arrow::parquet_to_arrow_schema;
-use deltalake::parquet::file::reader::{FileReader, SerializedFileReader};
+use deltalake::parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use tracing::{debug, warn};
 
 use blizzard_core::schema::coerce_schema;
@@ -36,28 +36,20 @@ const MAX_SCHEMA_INFERENCE_ATTEMPTS: usize = 3;
 /// - Timestamp precision is converted to microseconds (ns/ms -> μs)
 /// - Nested types (List, Struct) are recursively coerced
 pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, SchemaError> {
-    // Create a serialized file reader from the bytes
-    let reader = SerializedFileReader::new(bytes.clone())
+    let metadata = ParquetMetaDataReader::new()
+        .parse_and_finish(bytes)
         .map_err(|source| SchemaError::ParquetFooter { source })?;
-
-    // Get the parquet metadata
-    let metadata = reader.metadata();
-
-    // Convert parquet schema to Arrow schema
-    let schema = parquet_to_arrow_schema(metadata.file_metadata().schema_descr(), None)
-        .map_err(|source| SchemaError::ArrowConversion { source })?;
-
-    // Coerce schema to be Delta Lake compatible (e.g., timestamp precision)
-    Ok(coerce_schema(&schema))
+    schema_from_metadata(&metadata)
 }
 
-/// Infer schema from the first available parquet file.
+/// Infer schema from the first available parquet file using footer-only reads.
+///
+/// Uses a single suffix-range request to fetch only the parquet footer
+/// (~64 KB) instead of downloading the entire file. Falls back to full
+/// download if footer parsing fails.
 ///
 /// Tries up to 3 files in case some are corrupted or inaccessible.
 /// Returns the schema from the first file that can be successfully read.
-///
-/// Files are read directly from their discovered paths (e.g.,
-/// `date=2024-01-28/{uuid}.parquet`).
 pub async fn infer_schema_from_first_file(
     storage: &StorageProvider,
     files: &[FinishedFile],
@@ -75,35 +67,53 @@ pub async fn infer_schema_from_first_file(
 
         debug!(target = %table, "Attempting to infer schema from file: {file_path}");
 
-        match storage.get(file_path.as_str()).await {
-            Ok(bytes) => match infer_schema_from_parquet_bytes(&bytes) {
-                Ok(schema) => {
-                    debug!(
-                        target = %table,
-                        "Successfully inferred schema with {} fields from {}",
-                        schema.fields().len(),
-                        file_path
-                    );
-                    return Ok(schema);
-                }
-                Err(e) => {
-                    warn!(
-                        target = %table,
-                        "Failed to parse parquet schema from {}: {}",
-                        file_path, e
-                    );
-                    last_error = Some(e);
-                }
-            },
+        match infer_schema_from_footer(storage, file_path, table).await {
+            Ok(schema) => {
+                debug!(
+                    target = %table,
+                    "Successfully inferred schema with {} fields from {}",
+                    schema.fields().len(),
+                    file_path
+                );
+                return Ok(schema);
+            }
             Err(e) => {
-                warn!(target = %table, "Failed to read file {file_path}: {e}");
-                last_error = Some(SchemaError::StorageRead { source: e });
+                warn!(
+                    target = %table,
+                    "Failed to infer schema from {}: {}",
+                    file_path, e
+                );
+                last_error = Some(e);
             }
         }
     }
 
     // Return the last error we encountered
     Err(last_error.unwrap_or(SchemaError::NoFilesAvailable))
+}
+
+/// Infer schema from a single file using a suffix-range read.
+async fn infer_schema_from_footer(
+    storage: &StorageProvider,
+    file_path: &str,
+    table: &str,
+) -> Result<SchemaRef, SchemaError> {
+    let (_, metadata) = crate::parquet::read_parquet_footer(storage, file_path, table)
+        .await
+        .map_err(|e| match e {
+            crate::parquet::FooterReadError::Storage(source) => SchemaError::StorageRead { source },
+            crate::parquet::FooterReadError::Parquet(source) => {
+                SchemaError::ParquetFooter { source }
+            }
+        })?;
+    schema_from_metadata(&metadata)
+}
+
+/// Convert parquet metadata to a Delta Lake-compatible Arrow schema.
+fn schema_from_metadata(metadata: &ParquetMetaData) -> Result<SchemaRef, SchemaError> {
+    let schema = parquet_to_arrow_schema(metadata.file_metadata().schema_descr(), None)
+        .map_err(|source| SchemaError::ArrowConversion { source })?;
+    Ok(coerce_schema(&schema))
 }
 
 #[cfg(test)]

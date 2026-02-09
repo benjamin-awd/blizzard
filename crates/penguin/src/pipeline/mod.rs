@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::StreamExt;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
@@ -312,13 +312,17 @@ impl PollingProcessor for Processor {
             return Ok(None);
         }
 
-        // Read parquet metadata for each file concurrently
-        let metadata_results = join_all(
-            uncommitted
-                .iter()
-                .map(|incoming| self.file_reader.read_parquet_metadata(incoming)),
-        )
-        .await;
+        // Read parquet metadata with bounded concurrency.
+        // Each read fetches only the parquet footer (~64 KB) via a single suffix-range request.
+        const MAX_CONCURRENT_METADATA_READS: usize = 32;
+        let futs: Vec<_> = uncommitted
+            .iter()
+            .map(|incoming| self.file_reader.read_parquet_metadata(incoming))
+            .collect();
+        let metadata_results: Vec<_> = futures::stream::iter(futs)
+            .buffer_unordered(MAX_CONCURRENT_METADATA_READS)
+            .collect()
+            .await;
 
         let mut files = Vec::with_capacity(uncommitted.len());
         for (incoming, result) in uncommitted.iter().zip(metadata_results) {
