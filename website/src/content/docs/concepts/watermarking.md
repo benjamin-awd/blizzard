@@ -224,34 +224,47 @@ The improvement is most significant when:
 - Partitions have many files (100s to 1000s)
 - Poll intervals are short (seconds to minutes)
 
-## Watermark Advancement Atomicity
+## Watermark Advancement and Ordering
 
-Watermarks only advance after successful sink writes. This ensures exactly-once semantics even during failures.
+With parallel sink workers (`sink_parallelism > 1`), files can complete out of order — a small file on one worker may finish before a large file on another. To prevent the watermark from skipping over incomplete files, Blizzard uses a **contiguous completion tracker**.
 
-### Guarantee
+### Contiguous Completion Tracking
 
-In the processing loop:
+Files are assigned to sink workers in lexicographic (discovery) order. The completion tracker records this assignment order and only advances the watermark through contiguous completions from the front of the queue:
 
-```rust
-// 1. Write to sink (must succeed)
-ctx.sink.write_file_batches(&path, batches).await?;
+```
+Assigned:  [A, B, C, D]    (in discovery order)
+Completed: [A, -, C, -]    (C finished before B)
 
-// 2. Only then advance watermark
-ctx.multi_tracker.mark_processed(&source_name, &path);
+Drain → only A is drained, watermark advances to A
+        B is not yet complete, so C is held back
 ```
 
-The `?` operator ensures that if the sink write fails:
-- The error propagates immediately
-- `mark_processed()` is never called
-- The watermark stays at its previous position
+Once B completes:
 
-### Recovery Behavior
+```
+Assigned:  [B, C, D]
+Completed: [B, C, -]
 
-If the pipeline crashes or restarts:
+Drain → B and C are drained, watermark advances to C
+```
 
-1. **Watermark is at last successfully written file**
-2. **Failed file will be reprocessed** on restart
-3. **No data loss** — Files are either fully processed or will be retried
+This guarantees the watermark always represents a contiguous prefix of successfully processed files.
+
+### Failure Behavior
+
+When a sink write fails, the file is marked as completed in the tracker to unblock the contiguous drain, but `mark_processed` is **not** called for it — the watermark is never explicitly advanced to the failed file. However, subsequent successful files will advance the watermark past it:
+
+```
+Assigned:  [A, B(failed), C]
+1. A succeeds → watermark advances to A
+2. B fails   → drained from tracker, but watermark NOT advanced to B
+3. C succeeds → watermark advances to C (past B)
+```
+
+In this scenario, B is **not reprocessed on restart** — the watermark is at C, so B is below it. Instead, B is routed to the [dead letter queue](/blizzard/concepts/fault-tolerance/) (if configured) for investigation.
+
+A failed file is only reprocessed on restart if no subsequent files succeed and advance the watermark past it (e.g., it was the last file in the batch, or the pipeline crashed immediately after the failure).
 
 :::tip[Idempotent Writes]
 For true exactly-once semantics, ensure your sink is idempotent (e.g., Delta Lake with deduplication) so reprocessing the same file doesn't create duplicates.
