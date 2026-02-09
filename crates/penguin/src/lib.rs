@@ -15,7 +15,7 @@ pub mod schema;
 pub mod sink;
 
 // Re-export commonly used items
-pub use checkpoint::{CheckpointCoordinator, CheckpointManager, CheckpointState};
+pub use checkpoint::{CheckpointCoordinator, CheckpointState};
 pub use config::Config;
 pub use error::PipelineError;
 pub use incoming::{FileReader, IncomingFile, IncomingReader};
