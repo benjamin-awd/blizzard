@@ -1,6 +1,6 @@
 //! Configuration for the penguin delta checkpointer.
 
-mod table_key;
+blizzard_core::define_component_key!(TableKey);
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,6 @@ use blizzard_core::config::{
 };
 use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
-pub use table_key::TableKey;
 
 use crate::pipeline::Pipeline;
 use crate::schema::SchemaEvolutionMode;

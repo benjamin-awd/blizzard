@@ -1,6 +1,6 @@
 //! Configuration for the blizzard file loader.
 
-mod pipeline_key;
+blizzard_core::define_component_key!(PipelineKey);
 
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use indexmap::IndexMap;
@@ -22,7 +22,6 @@ use blizzard_core::config::{
 use blizzard_core::storage::DatePrefixGenerator;
 use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
-pub use pipeline_key::PipelineKey;
 
 use blizzard_core::error::ConfigError;
 

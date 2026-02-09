@@ -183,22 +183,9 @@ impl StateTracker for WatermarkTracker {
 ///
 /// Keeps track of all processed files in memory. Works with any file naming
 /// scheme but doesn't persist across restarts.
+#[derive(Default)]
 pub struct HashMapTracker {
     source_state: SourceState,
-}
-
-impl HashMapTracker {
-    pub fn new() -> Self {
-        Self {
-            source_state: SourceState::new(),
-        }
-    }
-}
-
-impl Default for HashMapTracker {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[async_trait]

@@ -159,7 +159,7 @@ impl<'a> ConfigResolver<'a> {
                 );
                 Box::new(WatermarkTracker::new(checkpoint_manager))
             } else {
-                Box::new(HashMapTracker::new())
+                Box::<HashMapTracker>::default()
             };
             trackers.insert(source_name.clone(), tracker);
         }
