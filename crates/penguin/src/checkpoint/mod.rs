@@ -27,7 +27,7 @@ use blizzard_core::watermark::WatermarkState;
 use blizzard_core::emit;
 
 use crate::error::DeltaError;
-use crate::sink::TableSink;
+use crate::sink::{CheckpointRecovery, TableCommitter};
 
 /// Consolidated checkpoint state protected by a single lock.
 struct CheckpointStateInner {
@@ -162,7 +162,7 @@ impl CheckpointCoordinator {
     /// Returns `true` if a checkpoint was recovered, `false` otherwise.
     pub async fn restore_from_table_log(
         &self,
-        sink: &mut dyn TableSink,
+        sink: &mut dyn CheckpointRecovery,
     ) -> Result<bool, DeltaError> {
         if let Some((checkpoint, version)) = sink.recover_checkpoint_from_log().await? {
             info!(
@@ -204,7 +204,7 @@ impl CheckpointCoordinator {
     /// # Arguments
     /// * `sink` - The table sink to create the checkpoint for
     /// * `interval` - Number of commits between checkpoints. Set to 0 to disable.
-    async fn maybe_create_table_checkpoint(&self, sink: &dyn TableSink, interval: usize) {
+    async fn maybe_create_table_checkpoint(&self, sink: &dyn TableCommitter, interval: usize) {
         if interval == 0 {
             return;
         }
@@ -242,7 +242,7 @@ impl CheckpointCoordinator {
     /// Returns the number of files committed (0 if files list was empty).
     pub async fn commit_files(
         &self,
-        sink: &mut dyn TableSink,
+        sink: &mut dyn TableCommitter,
         files: &[FinishedFile],
         checkpoint_interval: usize,
     ) -> usize {
@@ -288,6 +288,7 @@ impl CheckpointCoordinator {
 mod tests {
     use super::*;
     use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode};
+    use crate::sink::{CheckpointRecovery, SchemaEvolution, TableCommitter, TableSink};
     use async_trait::async_trait;
     use deltalake::arrow::datatypes::{Schema, SchemaRef};
     use std::collections::HashSet;
@@ -313,13 +314,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl TableSink for MockTableSink {
+    impl TableCommitter for MockTableSink {
         async fn commit_files_with_checkpoint(
             &mut self,
             _files: &[FinishedFile],
             _checkpoint: &CheckpointState,
         ) -> Result<Option<i64>, DeltaError> {
             Ok(Some(1))
+        }
+
+        async fn create_checkpoint(&self) -> Result<(), DeltaError> {
+            Ok(())
         }
 
         fn version(&self) -> i64 {
@@ -329,19 +334,12 @@ mod tests {
         fn checkpoint_version(&self) -> i64 {
             0
         }
+    }
 
+    #[async_trait]
+    impl SchemaEvolution for MockTableSink {
         fn schema(&self) -> Option<&SchemaRef> {
             None
-        }
-
-        fn get_committed_paths(&self) -> HashSet<String> {
-            self.committed_paths.clone()
-        }
-
-        async fn recover_checkpoint_from_log(
-            &mut self,
-        ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
-            Ok(self.checkpoint.clone())
         }
 
         fn validate_schema(
@@ -355,11 +353,23 @@ mod tests {
         async fn evolve_schema(&mut self, _action: EvolutionAction) -> Result<(), DeltaError> {
             Ok(())
         }
+    }
 
-        async fn create_checkpoint(&self) -> Result<(), DeltaError> {
-            Ok(())
+    #[async_trait]
+    impl CheckpointRecovery for MockTableSink {
+        async fn recover_checkpoint_from_log(
+            &mut self,
+        ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
+            Ok(self.checkpoint.clone())
         }
 
+        fn get_committed_paths(&self) -> HashSet<String> {
+            self.committed_paths.clone()
+        }
+    }
+
+    #[async_trait]
+    impl TableSink for MockTableSink {
         fn table_name(&self) -> &str {
             "mock_table"
         }

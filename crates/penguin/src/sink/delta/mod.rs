@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
 
-use super::TableSink;
+use super::{CheckpointRecovery, SchemaEvolution, TableCommitter, TableSink};
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
 use crate::metrics::events::{InternalEvent, SchemaEvolved};
@@ -405,13 +405,19 @@ impl DeltaSink {
 }
 
 #[async_trait]
-impl TableSink for DeltaSink {
+impl TableCommitter for DeltaSink {
     async fn commit_files_with_checkpoint(
         &mut self,
         files: &[FinishedFile],
         checkpoint: &CheckpointState,
     ) -> Result<Option<i64>, DeltaError> {
         DeltaSink::commit_files_with_checkpoint(self, files, checkpoint).await
+    }
+
+    async fn create_checkpoint(&self) -> Result<(), DeltaError> {
+        deltalake::checkpoints::create_checkpoint(self.table(), None)
+            .await
+            .map_err(|source| DeltaError::DeltaOperation { source })
     }
 
     fn version(&self) -> i64 {
@@ -421,19 +427,12 @@ impl TableSink for DeltaSink {
     fn checkpoint_version(&self) -> i64 {
         DeltaSink::checkpoint_version(self)
     }
+}
 
+#[async_trait]
+impl SchemaEvolution for DeltaSink {
     fn schema(&self) -> Option<&SchemaRef> {
         DeltaSink::schema(self)
-    }
-
-    fn get_committed_paths(&self) -> HashSet<String> {
-        DeltaSink::get_committed_paths(self)
-    }
-
-    async fn recover_checkpoint_from_log(
-        &mut self,
-    ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
-        DeltaSink::recover_checkpoint_from_log(self).await
     }
 
     fn validate_schema(
@@ -447,13 +446,23 @@ impl TableSink for DeltaSink {
     async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
         DeltaSink::evolve_schema(self, action).await
     }
+}
 
-    async fn create_checkpoint(&self) -> Result<(), DeltaError> {
-        deltalake::checkpoints::create_checkpoint(self.table(), None)
-            .await
-            .map_err(|source| DeltaError::DeltaOperation { source })
+#[async_trait]
+impl CheckpointRecovery for DeltaSink {
+    async fn recover_checkpoint_from_log(
+        &mut self,
+    ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
+        DeltaSink::recover_checkpoint_from_log(self).await
     }
 
+    fn get_committed_paths(&self) -> HashSet<String> {
+        DeltaSink::get_committed_paths(self)
+    }
+}
+
+#[async_trait]
+impl TableSink for DeltaSink {
     fn table_name(&self) -> &str {
         &self.table_name
     }

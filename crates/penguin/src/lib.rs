@@ -23,7 +23,7 @@ pub use pipeline::Pipeline;
 pub use schema::{
     SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas, merge_schemas,
 };
-pub use sink::{DeltaSink, TableSink};
+pub use sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter, TableSink};
 
 // Re-export from blizzard-core
 pub use blizzard_core::{
