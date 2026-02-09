@@ -10,7 +10,7 @@ mod prefix;
 mod s3;
 mod url_parser;
 
-pub use prefix::DatePrefixGenerator;
+pub use prefix::{DatePrefixGenerator, expand_include_prefixes};
 pub use url_parser::BackendConfig;
 
 use bytes::Bytes;

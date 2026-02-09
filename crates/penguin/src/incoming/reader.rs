@@ -20,7 +20,7 @@
 //! 5. Commit new files to Delta
 //! 6. Update watermark to highest committed path
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,7 +29,7 @@ use tracing::{debug, info};
 
 use blizzard_core::FinishedFile;
 use blizzard_core::PartitionExtractor;
-use blizzard_core::storage::StorageProvider;
+use blizzard_core::storage::{StorageProvider, expand_include_prefixes};
 use blizzard_core::watermark::{
     self, FileListingConfig, generate_prefixes, list_files_above_watermark_with_prefixes,
 };
@@ -83,6 +83,8 @@ impl IncomingReader {
     /// - Only scans partitions >= watermark's partition
     /// - Filters to UUIDs > watermark's UUID within the watermark partition
     /// - Cross-checks against `committed_paths` to avoid double-commits
+    /// - Applies client-side include filters for partition values that couldn't
+    ///   be folded into the S3 prefix
     pub async fn list_uncommitted_files(
         &self,
         watermark: Option<&str>,
@@ -95,10 +97,36 @@ impl IncomingReader {
         };
 
         // Filter out already committed files
-        let uncommitted: Vec<IncomingFile> = files
+        let mut uncommitted: Vec<IncomingFile> = files
             .into_iter()
             .filter(|f| !committed_paths.contains(&f.path))
             .collect();
+
+        // Apply client-side include filters for entries that couldn't be
+        // folded into the S3 prefix (due to gaps or missing placeholders).
+        let remaining_filters = self.remaining_include_filters();
+        if !remaining_filters.is_empty() {
+            let before = uncommitted.len();
+            uncommitted.retain(|f| {
+                let values = self.config.partition_extractor.extract(&f.path);
+                remaining_filters.iter().all(|(key, allowed)| {
+                    match values.get(key) {
+                        Some(val) => allowed.iter().any(|a| a == val),
+                        // If the key isn't in the path, don't filter it out
+                        None => true,
+                    }
+                })
+            });
+            let filtered = before - uncommitted.len();
+            if filtered > 0 {
+                debug!(
+                    target = %self.table,
+                    filtered,
+                    remaining = uncommitted.len(),
+                    "Applied client-side include filters"
+                );
+            }
+        }
 
         if !uncommitted.is_empty() {
             debug!(
@@ -200,11 +228,37 @@ impl IncomingReader {
     }
 
     /// Generate prefixes for cold start based on partition filter config.
+    ///
+    /// When include filters are configured, expands `{key}` placeholders in the
+    /// prefix template with include values (cartesian product), stopping at the
+    /// first key without a match. Remaining filters are applied client-side.
     fn generate_cold_start_prefixes(&self) -> Option<Vec<String>> {
-        self.config
-            .partition_filter
-            .as_ref()
-            .map(|filter| generate_prefixes(&filter.prefix_template, filter.lookback))
+        self.config.partition_filter.as_ref().map(|filter| {
+            let date_prefixes = generate_prefixes(&filter.prefix_template, filter.lookback);
+            if filter.include.is_empty() {
+                return date_prefixes;
+            }
+            let (expanded, _remaining) = expand_include_prefixes(&date_prefixes, &filter.include);
+            expanded
+        })
+    }
+
+    /// Compute the remaining include filters that must be applied client-side.
+    ///
+    /// These are include entries that couldn't be folded into the S3 prefix
+    /// (due to gaps in `{key}` placeholders or keys not in the template).
+    fn remaining_include_filters(&self) -> HashMap<String, Vec<String>> {
+        let Some(filter) = &self.config.partition_filter else {
+            return HashMap::new();
+        };
+        if filter.include.is_empty() {
+            return HashMap::new();
+        }
+        // Use a dummy prefix to compute remaining filters — the structure is
+        // the same regardless of the date values.
+        let dummy = vec![filter.prefix_template.clone()];
+        let (_expanded, remaining) = expand_include_prefixes(&dummy, &filter.include);
+        remaining
     }
 
     /// Read metadata from a parquet file and create a FinishedFile.
@@ -447,5 +501,113 @@ mod tests {
         // Should only find the file after the watermark
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "date=2026-01-28/01926abc-3333.parquet");
+    }
+
+    #[tokio::test]
+    async fn test_client_side_include_filter() {
+        use blizzard_core::config::StringOrVec;
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let table_path = temp_dir.path();
+
+        // Use today's date so generate_prefixes(lookback=0) hits the right dir.
+        let today = chrono::Utc::now();
+        let year = today.format("%Y").to_string();
+        let month = today.format("%m").to_string();
+        let day = today.format("%d").to_string();
+
+        // Create directories: {year}/{month}/{day}/{host}/{region}/{category}/
+        for host in &["web-prod-01", "web-prod-02", "db-prod-01"] {
+            for region in &["us-east-1", "eu-west-1"] {
+                for category in &["events", "metrics", "logs"] {
+                    let dir = table_path
+                        .join(&year)
+                        .join(&month)
+                        .join(&day)
+                        .join(host)
+                        .join(region)
+                        .join(category);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    std::fs::write(dir.join("data.parquet"), b"").unwrap();
+                }
+            }
+        }
+
+        let storage = Arc::new(
+            StorageProvider::for_url_with_options(table_path.to_str().unwrap(), HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        // Configure: prefix_template has {host} and {region} but include only
+        // provides host. This creates a gap at {region}, so category (after
+        // the gap) becomes a client-side filter.
+        let mut include = HashMap::new();
+        include.insert(
+            "host".to_string(),
+            StringOrVec::Multiple(vec!["web-prod-01".to_string(), "web-prod-02".to_string()]),
+        );
+        include.insert(
+            "category".to_string(),
+            StringOrVec::Multiple(vec!["events".to_string(), "logs".to_string()]),
+        );
+
+        let reader = IncomingReader::new(
+            storage,
+            "test".to_string(),
+            IncomingConfig {
+                partition_filter: Some(PartitionFilterConfig {
+                    prefix_template: "%Y/%m/%d/{host}/{region}/{category}".to_string(),
+                    lookback: 0,
+                    include,
+                }),
+                partition_extractor: PartitionExtractor::from_template(
+                    "year=%Y/month=%m/day=%d/host={host}/region={region}/category={category}",
+                    None,
+                ),
+            },
+        );
+
+        // Verify remaining filters: {host} is folded, {region} has no include
+        // (gap), so {category} becomes a remaining client-side filter.
+        let remaining = reader.remaining_include_filters();
+        assert!(
+            remaining.contains_key("category"),
+            "category should be remaining: {remaining:?}"
+        );
+        assert!(
+            !remaining.contains_key("host"),
+            "host should not be remaining: {remaining:?}"
+        );
+
+        // Cold start listing: prefixes will be expanded for web-prod-01 and web-prod-02.
+        // All files under those hosts (both regions, all categories) will be listed.
+        // Client-side filter should then narrow to only "events" and "logs".
+        let committed = HashSet::new();
+        let files = reader
+            .list_uncommitted_files(None, &committed, true)
+            .await
+            .unwrap();
+
+        // 2 hosts × 2 regions × 2 categories = 8 files (out of 3×2×3 = 18 total)
+        assert_eq!(
+            files.len(),
+            8,
+            "Expected 8 files after include filter, got: {}",
+            files.len()
+        );
+
+        // Verify no db-prod-01 files (host not in include)
+        assert!(
+            !files.iter().any(|f| f.path.contains("db-prod-01")),
+            "Should not contain db-prod-01 files"
+        );
+        // Verify no metrics files (category not in include)
+        assert!(
+            !files.iter().any(|f| f.path.contains("metrics")),
+            "Should not contain metrics files"
+        );
     }
 }

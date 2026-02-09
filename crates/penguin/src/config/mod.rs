@@ -10,8 +10,8 @@ use tracing::info;
 use blizzard_core::AppConfig;
 pub use blizzard_core::config::{
     ConfigPath, ErrorHandlingConfig, InterpolationResult, Mergeable, MetricsConfig,
-    ParquetCompression, PartitionByConfig, PartitionFilterConfig, Resource, interpolate,
-    load_from_paths,
+    ParquetCompression, PartitionByConfig, PartitionFilterConfig, Resource, StringOrVec,
+    interpolate, load_from_paths,
 };
 use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
@@ -399,6 +399,87 @@ tables:
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.prefix_template, "date=%Y-%m-%d");
         assert_eq!(filter.lookback, 7);
+        assert!(filter.include.is_empty());
+    }
+
+    #[test]
+    fn test_partition_filter_include_single_string() {
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        region: "us-east-1"
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        let filter = table.partition_filter.as_ref().unwrap();
+        let region = filter.include.get("region").unwrap();
+        assert_eq!(region.values(), &["us-east-1"]);
+    }
+
+    #[test]
+    fn test_partition_filter_include_list() {
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        host:
+          - "web-prod-01"
+          - "web-prod-02"
+        category: ["events", "metrics"]
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        let filter = table.partition_filter.as_ref().unwrap();
+        let host = filter.include.get("host").unwrap();
+        assert_eq!(host.values(), &["web-prod-01", "web-prod-02"]);
+        let category = filter.include.get("category").unwrap();
+        assert_eq!(category.values(), &["events", "metrics"]);
+    }
+
+    #[test]
+    fn test_partition_filter_include_mixed() {
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        host:
+          - "web-prod-01"
+          - "web-prod-02"
+        region: "us-east-1"
+        category: ["events", "metrics"]
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        let filter = table.partition_filter.as_ref().unwrap();
+        assert_eq!(filter.include.len(), 3);
+        assert_eq!(
+            filter.include.get("host").unwrap().values(),
+            &["web-prod-01", "web-prod-02"]
+        );
+        assert_eq!(
+            filter.include.get("region").unwrap().values(),
+            &["us-east-1"]
+        );
+        assert_eq!(
+            filter.include.get("category").unwrap().values(),
+            &["events", "metrics"]
+        );
     }
 
     #[test]

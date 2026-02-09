@@ -21,6 +21,26 @@ use std::collections::HashMap;
 pub const KB: usize = 1024;
 pub const MB: usize = 1024 * KB;
 
+/// A string value or list of strings, for YAML ergonomics.
+///
+/// Allows writing either `key: "value"` or `key: ["a", "b"]` in config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl StringOrVec {
+    /// Return the values as a slice.
+    pub fn values(&self) -> &[String] {
+        match self {
+            StringOrVec::Single(s) => std::slice::from_ref(s),
+            StringOrVec::Multiple(v) => v,
+        }
+    }
+}
+
 /// Configuration for a partition filter.
 ///
 /// Used for efficient date-based listing during cold starts or polling.
@@ -32,6 +52,11 @@ pub struct PartitionFilterConfig {
     /// Number of units to look back (days or hours depending on template).
     #[serde(default)]
     pub lookback: u32,
+    /// Include filters: key-value pairs that extend the S3 prefix or act as
+    /// client-side filters. Keys matching `{key}` placeholders in the template
+    /// extend the prefix (cartesian product); others become client-side filters.
+    #[serde(default)]
+    pub include: HashMap<String, StringOrVec>,
 }
 
 /// Configuration for partitioning output files.
