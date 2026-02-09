@@ -1,5 +1,7 @@
 //! Configuration for the blizzard file loader.
 
+pub mod builder;
+
 blizzard_core::define_component_key!(PipelineKey);
 
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -117,6 +119,38 @@ impl Default for CheckpointConfig {
 }
 
 impl SourceConfig {
+    /// Create a new source config with required path and sensible defaults.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            compression: CompressionFormat::default(),
+            batch_size: default_batch_size(),
+            poll_interval_secs: default_poll_interval(),
+            partition_filter: None,
+            storage_options: HashMap::new(),
+            use_watermark: false,
+            checkpoint: CheckpointConfig::default(),
+        }
+    }
+
+    /// Set the compression format.
+    pub fn with_compression(mut self, compression: CompressionFormat) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Set the batch size.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// Enable watermark-based source tracking.
+    pub fn with_watermark(mut self) -> Self {
+        self.use_watermark = true;
+        self
+    }
+
     /// Generate date prefixes for partition filtering.
     ///
     /// Returns `None` if no partition filter is configured.
@@ -192,6 +226,37 @@ pub struct SinkConfig {
     pub max_concurrent_parts: usize,
 }
 
+impl SinkConfig {
+    /// Create a new sink config with required table URI and sensible defaults.
+    pub fn new(table_uri: impl Into<String>) -> Self {
+        Self {
+            table_uri: table_uri.into(),
+            file_size_mb: default_file_size_mb(),
+            row_group_size_bytes: default_row_group_size(),
+            compression: ParquetCompression::default(),
+            partition_by: None,
+            storage_options: HashMap::new(),
+            max_concurrent_uploads: default_max_concurrent_uploads(),
+            rollover_timeout_secs: None,
+            part_size_mb: default_part_size_mb(),
+            min_multipart_size_mb: default_min_multipart_size_mb(),
+            max_concurrent_parts: default_max_concurrent_parts(),
+        }
+    }
+
+    /// Set the target file size in MB.
+    pub fn with_file_size_mb(mut self, file_size_mb: usize) -> Self {
+        self.file_size_mb = file_size_mb;
+        self
+    }
+
+    /// Set the rollover timeout in seconds.
+    pub fn with_rollover_timeout_secs(mut self, secs: u64) -> Self {
+        self.rollover_timeout_secs = Some(secs);
+        self
+    }
+}
+
 fn default_file_size_mb() -> usize {
     128
 }
@@ -253,40 +318,134 @@ impl FieldType {
 }
 
 /// Schema configuration - either explicit fields or inference mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// This enum makes invalid states unrepresentable: you either infer the schema
+/// (with optional conflict coercion) or provide explicit fields. The two modes
+/// cannot be mixed.
+#[derive(Debug, Clone)]
+pub enum SchemaConfig {
+    /// Infer schema from the first source file.
+    Infer {
+        /// When true, type conflicts during inference are coerced to Utf8.
+        coerce_conflicts_to_utf8: bool,
+    },
+    /// Explicit field definitions.
+    Explicit {
+        /// List of fields in the schema.
+        fields: Vec<FieldConfig>,
+    },
+}
+
+/// Raw helper struct for deserializing SchemaConfig from YAML while keeping the
+/// original config format unchanged.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SchemaConfig {
-    /// When true, schema is inferred from the first NDJSON file.
+struct RawSchemaConfig {
     #[serde(default)]
-    pub infer: bool,
-    /// List of fields in the schema. Required unless `infer: true`.
+    infer: bool,
     #[serde(default)]
-    pub fields: Vec<FieldConfig>,
-    /// When true and `infer: true`, type conflicts during inference are coerced to Utf8.
-    ///
-    /// Arrow's schema inference fails when the same field has different types across records
-    /// (e.g., sometimes an object, sometimes a string). When this option is enabled, such
-    /// conflicts are resolved by treating the field as a Utf8 string.
-    ///
-    /// Only applies when `infer: true`.
+    fields: Vec<FieldConfig>,
     #[serde(default)]
-    pub coerce_conflicts_to_utf8: bool,
+    coerce_conflicts_to_utf8: bool,
+}
+
+impl<'de> Deserialize<'de> for SchemaConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSchemaConfig::deserialize(deserializer)?;
+        let has_fields = !raw.fields.is_empty();
+
+        if raw.infer && has_fields {
+            return Err(serde::de::Error::custom(
+                "cannot specify both 'infer: true' and 'fields'",
+            ));
+        }
+        if !raw.infer && !has_fields {
+            return Err(serde::de::Error::custom(
+                "empty schema (specify either 'infer: true' or 'fields')",
+            ));
+        }
+
+        if raw.infer {
+            Ok(SchemaConfig::Infer {
+                coerce_conflicts_to_utf8: raw.coerce_conflicts_to_utf8,
+            })
+        } else {
+            Ok(SchemaConfig::Explicit { fields: raw.fields })
+        }
+    }
+}
+
+impl Serialize for SchemaConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        match self {
+            SchemaConfig::Infer {
+                coerce_conflicts_to_utf8,
+            } => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("infer", &true)?;
+                if *coerce_conflicts_to_utf8 {
+                    map.serialize_entry("coerce_conflicts_to_utf8", &true)?;
+                }
+                map.end()
+            }
+            SchemaConfig::Explicit { fields } => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("fields", fields)?;
+                map.end()
+            }
+        }
+    }
 }
 
 impl SchemaConfig {
+    /// Create an infer schema config with default options.
+    pub fn infer() -> Self {
+        SchemaConfig::Infer {
+            coerce_conflicts_to_utf8: false,
+        }
+    }
+
+    /// Create an explicit schema config from field definitions.
+    pub fn explicit(fields: Vec<FieldConfig>) -> Self {
+        SchemaConfig::Explicit { fields }
+    }
+
+    /// Returns true if this config uses schema inference.
+    pub fn is_infer(&self) -> bool {
+        matches!(self, SchemaConfig::Infer { .. })
+    }
+
+    /// Returns true if type conflicts should be coerced to Utf8 during inference.
+    pub fn coerce_conflicts_to_utf8(&self) -> bool {
+        matches!(
+            self,
+            SchemaConfig::Infer {
+                coerce_conflicts_to_utf8: true,
+            }
+        )
+    }
+
     /// Convert to Arrow Schema. Returns an error if schema is set to infer mode.
     pub fn to_arrow_schema(&self) -> Result<SchemaRef, ConfigError> {
-        if self.infer {
-            return Err(ConfigError::Internal {
+        match self {
+            SchemaConfig::Infer { .. } => Err(ConfigError::Internal {
                 message: "Cannot convert infer schema config to Arrow schema".to_string(),
-            });
+            }),
+            SchemaConfig::Explicit { fields } => {
+                let arrow_fields: Vec<Field> = fields
+                    .iter()
+                    .map(|f| Field::new(&f.name, f.field_type.to_arrow_type(), f.nullable))
+                    .collect();
+                Ok(Arc::new(Schema::new(arrow_fields)))
+            }
         }
-        let arrow_fields: Vec<Field> = self
-            .fields
-            .iter()
-            .map(|f| Field::new(&f.name, f.field_type.to_arrow_type(), f.nullable))
-            .collect();
-        Ok(Arc::new(Schema::new(arrow_fields)))
     }
 }
 
@@ -401,20 +560,6 @@ impl Config {
 
             if pipeline.sink.table_uri.is_empty() {
                 errors.push(format!("Pipeline '{pipeline_id}': sink.table_uri is empty"));
-            }
-
-            let has_fields = !pipeline.schema.fields.is_empty();
-            let wants_infer = pipeline.schema.infer;
-
-            if wants_infer && has_fields {
-                errors.push(format!(
-                    "Pipeline '{pipeline_id}': cannot specify both 'infer: true' and 'fields'"
-                ));
-            }
-            if !wants_infer && !has_fields {
-                errors.push(format!(
-                    "Pipeline '{pipeline_id}': empty schema (specify either 'infer: true' or 'fields')"
-                ));
             }
         }
 
@@ -895,7 +1040,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        assert!(first_pipeline(yaml).schema.infer);
+        assert!(first_pipeline(yaml).schema.is_infer());
     }
 
     #[test]
@@ -1073,7 +1218,7 @@ pipelines:
     }
 
     #[test]
-    fn test_multiple_schema_errors_collected() {
+    fn test_schema_infer_and_fields_error_at_parse_time() {
         let yaml = r#"
 pipelines:
   a:
@@ -1087,24 +1232,24 @@ pipelines:
       fields:
         - name: id
           type: string
-  b:
+"#;
+        assert_parse_err(yaml, &["cannot specify both"]);
+    }
+
+    #[test]
+    fn test_schema_empty_error_at_parse_time() {
+        let yaml = r#"
+pipelines:
+  a:
     sources:
       default:
-        path: gs://bucket/b
+        path: gs://bucket/a
     sink:
-      table_uri: gs://bucket/delta/b
+      table_uri: gs://bucket/delta/a
     schema:
       infer: false
 "#;
-        assert_parse_err(
-            yaml,
-            &[
-                "Pipeline 'a'",
-                "cannot specify both",
-                "Pipeline 'b'",
-                "empty schema",
-            ],
-        );
+        assert_parse_err(yaml, &["empty schema"]);
     }
 
     #[test]
@@ -1207,5 +1352,54 @@ pipelines:
         let source = first_pipeline(yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 200);
         assert_eq!(source.checkpoint.interval_secs, 30);
+    }
+
+    #[test]
+    fn test_schema_config_infer_round_trip() {
+        let schema = SchemaConfig::Infer {
+            coerce_conflicts_to_utf8: true,
+        };
+        let yaml = serde_yaml::to_string(&schema).unwrap();
+        let restored: SchemaConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert!(restored.is_infer());
+        assert!(restored.coerce_conflicts_to_utf8());
+    }
+
+    #[test]
+    fn test_schema_config_explicit_round_trip() {
+        let schema = SchemaConfig::explicit(vec![
+            FieldConfig {
+                name: "id".to_string(),
+                field_type: FieldType::String,
+                nullable: false,
+            },
+            FieldConfig {
+                name: "value".to_string(),
+                field_type: FieldType::Int64,
+                nullable: true,
+            },
+        ]);
+        let yaml = serde_yaml::to_string(&schema).unwrap();
+        let restored: SchemaConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert!(!restored.is_infer());
+        let arrow_schema = restored.to_arrow_schema().unwrap();
+        assert_eq!(arrow_schema.fields().len(), 2);
+    }
+
+    #[test]
+    fn test_schema_config_constructors() {
+        let infer = SchemaConfig::infer();
+        assert!(infer.is_infer());
+        assert!(!infer.coerce_conflicts_to_utf8());
+
+        let explicit = SchemaConfig::explicit(vec![FieldConfig {
+            name: "id".to_string(),
+            field_type: FieldType::String,
+            nullable: false,
+        }]);
+        assert!(!explicit.is_infer());
+        assert!(!explicit.coerce_conflicts_to_utf8());
     }
 }

@@ -38,7 +38,12 @@ pipelines:
         assert_eq!(source.path, "s3://bucket/input/*.ndjson.gz");
         assert_eq!(source.batch_size, 4096);
         assert_eq!(pipeline.sink.file_size_mb, 64);
-        assert_eq!(pipeline.schema.fields.len(), 4);
+        match &pipeline.schema {
+            blizzard::config::SchemaConfig::Explicit { fields } => {
+                assert_eq!(fields.len(), 4);
+            }
+            _ => panic!("Expected Explicit schema"),
+        }
 
         // Test schema conversion
         let arrow_schema = pipeline.schema.to_arrow_schema().unwrap();

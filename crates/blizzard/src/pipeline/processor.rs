@@ -172,44 +172,48 @@ impl<'a> ConfigResolver<'a> {
         &self,
         source_storages: &IndexMap<String, StorageProviderRef>,
     ) -> Result<SchemaRef, PipelineError> {
-        if self.config.schema.infer {
-            let first_source =
-                self.config
-                    .sources
-                    .values()
-                    .next()
-                    .ok_or_else(|| PipelineError::Config {
-                        source: ConfigError::Internal {
-                            message: "No sources configured".to_string(),
-                        },
-                    })?;
-            let first_storage =
-                source_storages
-                    .values()
-                    .next()
-                    .ok_or_else(|| PipelineError::Config {
-                        source: ConfigError::Internal {
-                            message: "No source storages available".to_string(),
-                        },
-                    })?;
-            let prefixes = first_source.date_prefixes();
-            Ok(infer_schema_from_source(
-                first_storage,
-                first_source.compression,
-                prefixes.as_deref(),
-                self.key.as_ref(),
-                self.config.schema.coerce_conflicts_to_utf8,
-            )
-            .await?)
-        } else {
-            Ok(self.config.schema.to_arrow_schema()?)
+        use crate::config::SchemaConfig;
+        match &self.config.schema {
+            SchemaConfig::Infer {
+                coerce_conflicts_to_utf8,
+            } => {
+                let first_source =
+                    self.config
+                        .sources
+                        .values()
+                        .next()
+                        .ok_or_else(|| PipelineError::Config {
+                            source: ConfigError::Internal {
+                                message: "No sources configured".to_string(),
+                            },
+                        })?;
+                let first_storage =
+                    source_storages
+                        .values()
+                        .next()
+                        .ok_or_else(|| PipelineError::Config {
+                            source: ConfigError::Internal {
+                                message: "No source storages available".to_string(),
+                            },
+                        })?;
+                let prefixes = first_source.date_prefixes();
+                Ok(infer_schema_from_source(
+                    first_storage,
+                    first_source.compression,
+                    prefixes.as_deref(),
+                    self.key.as_ref(),
+                    *coerce_conflicts_to_utf8,
+                )
+                .await?)
+            }
+            SchemaConfig::Explicit { .. } => Ok(self.config.schema.to_arrow_schema()?),
         }
     }
 
     /// Create per-source readers (compression may differ between sources).
     fn create_readers(&self, schema: &SchemaRef) -> IndexMap<String, Arc<dyn FileReader>> {
         let mut readers = IndexMap::new();
-        let coerce_objects = self.config.schema.coerce_conflicts_to_utf8;
+        let coerce_objects = self.config.schema.coerce_conflicts_to_utf8();
 
         for (source_name, source_config) in &self.config.sources {
             let mut reader_config =
