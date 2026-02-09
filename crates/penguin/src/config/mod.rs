@@ -94,6 +94,31 @@ pub struct TableConfig {
 }
 
 impl TableConfig {
+    /// Create a new table config with required table URI and sensible defaults.
+    pub fn new(table_uri: impl Into<String>) -> Self {
+        Self {
+            table_uri: table_uri.into(),
+            poll_interval_secs: default_poll_interval(),
+            partition_by: None,
+            path_columns: None,
+            delta_checkpoint_interval: default_delta_checkpoint_interval(),
+            max_concurrent_uploads: default_max_concurrent_uploads(),
+            max_concurrent_parts: default_max_concurrent_parts(),
+            part_size_mb: default_part_size_mb(),
+            min_multipart_size_mb: default_min_multipart_size_mb(),
+            storage_options: HashMap::new(),
+            schema_evolution: SchemaEvolutionMode::default(),
+            max_concurrent_metadata_reads: default_max_concurrent_metadata_reads(),
+            partition_filter: None,
+        }
+    }
+
+    /// Set the poll interval in seconds.
+    pub fn with_poll_interval_secs(mut self, secs: u64) -> Self {
+        self.poll_interval_secs = secs;
+        self
+    }
+
     /// Returns exclusive resources used by this table configuration.
     ///
     /// Each table claims exclusive access to its table URI to prevent
@@ -173,18 +198,6 @@ impl Config {
     }
 }
 
-impl Config {
-    /// Iterate over all tables with their keys.
-    pub fn tables(&self) -> impl Iterator<Item = (&TableKey, &TableConfig)> {
-        self.tables.iter()
-    }
-
-    /// Get the number of tables in the configuration.
-    pub fn table_count(&self) -> usize {
-        self.tables.len()
-    }
-}
-
 impl AppConfig for Config {
     type Pipeline = Pipeline;
 
@@ -201,9 +214,9 @@ impl AppConfig for Config {
     }
 
     fn log_startup_info(&self) {
-        let table_count = self.table_count();
+        let table_count = self.tables.len();
         info!("Starting checkpointer with {table_count} table(s)");
-        for (key, cfg) in self.tables() {
+        for (key, cfg) in &self.tables {
             let uri = &cfg.table_uri;
             info!("  Table: {key} ({uri})");
         }
@@ -223,9 +236,9 @@ tables:
     poll_interval_secs: 30
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert_eq!(config.table_count(), 1);
+        assert_eq!(config.tables.len(), 1);
 
-        let (key, table) = config.tables().next().unwrap();
+        let (key, table) = config.tables.iter().next().unwrap();
         assert_eq!(key.id(), "events");
         assert_eq!(table.table_uri, "gs://bucket/events");
         assert_eq!(table.poll_interval_secs, 30);
@@ -246,10 +259,10 @@ global:
   total_concurrency: 8
 "#;
         let config = Config::parse(yaml).unwrap();
-        assert_eq!(config.table_count(), 2);
+        assert_eq!(config.tables.len(), 2);
         assert_eq!(config.global.total_concurrency, Some(8));
 
-        let tables: Vec<_> = config.tables().collect();
+        let tables: Vec<_> = config.tables.iter().collect();
         assert_eq!(tables.len(), 2);
 
         // IndexMap preserves insertion order
@@ -305,7 +318,7 @@ tables:
     table_uri: gs://bucket/events
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         assert_eq!(table.poll_interval_secs, 10);
         assert_eq!(table.delta_checkpoint_interval, 10);
@@ -320,22 +333,7 @@ tables:
 
     #[test]
     fn test_table_config_resources() {
-        let table = TableConfig {
-            table_uri: "gs://bucket/my_table".to_string(),
-            poll_interval_secs: 10,
-            partition_by: None,
-            path_columns: None,
-            delta_checkpoint_interval: 10,
-            max_concurrent_uploads: 4,
-            max_concurrent_parts: 8,
-            part_size_mb: 10,
-            min_multipart_size_mb: 100,
-            storage_options: HashMap::new(),
-            schema_evolution: Default::default(),
-            max_concurrent_metadata_reads: 32,
-            partition_filter: None,
-        };
-
+        let table = TableConfig::new("gs://bucket/my_table");
         let resources = table.resources();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0], Resource::directory("gs://bucket/my_table"));
@@ -352,7 +350,7 @@ tables:
       lookback: 7
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.prefix_template, "date=%Y-%m-%d");
@@ -373,7 +371,7 @@ tables:
         region: "us-east-1"
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let filter = table.partition_filter.as_ref().unwrap();
         let region = filter.include.get("region").unwrap();
@@ -396,7 +394,7 @@ tables:
         category: ["events", "metrics"]
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let filter = table.partition_filter.as_ref().unwrap();
         let host = filter.include.get("host").unwrap();
@@ -422,7 +420,7 @@ tables:
         category: ["events", "metrics"]
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.include.len(), 3);
@@ -495,7 +493,7 @@ tables:
       prefix_template: "date=%Y-%m-%d"
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::Template(_)));
@@ -511,7 +509,7 @@ tables:
     partition_by: [year, month, day, category, source]
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::List(_)));
@@ -531,7 +529,7 @@ tables:
     partition_by: [year, month, day, category, source]
 "#;
         let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables().next().unwrap();
+        let (_, table) = config.tables.iter().next().unwrap();
 
         assert_eq!(
             table.path_columns.as_deref(),
