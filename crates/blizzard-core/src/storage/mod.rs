@@ -506,7 +506,7 @@ impl StorageProvider {
         let qualified_path = Arc::new(qualified_path);
         let active_parts = Arc::new(AtomicUsize::new(0));
 
-        let results: Vec<(usize, PartId)> = futures::stream::iter(parts)
+        let mut results: Vec<(usize, PartId)> = futures::stream::iter(parts)
             .map(|(idx, data)| {
                 let multipart_store = multipart_store.clone();
                 let qualified_path = qualified_path.clone();
@@ -548,7 +548,6 @@ impl StorageProvider {
             .await?;
 
         // Sort by index and extract PartIds (parts may complete out of order)
-        let mut results = results;
         results.sort_by_key(|(idx, _)| *idx);
         let part_ids: Vec<PartId> = results.into_iter().map(|(_, id)| id).collect();
 
