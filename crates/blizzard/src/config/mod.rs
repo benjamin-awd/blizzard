@@ -365,7 +365,7 @@ impl PipelineConfig {
 /// metrics:
 ///   enabled: true
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Named pipeline configurations.
@@ -377,16 +377,6 @@ pub struct Config {
     /// Metrics configuration.
     #[serde(default)]
     pub metrics: MetricsConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            pipelines: IndexMap::new(),
-            global: GlobalConfig::default(),
-            metrics: MetricsConfig::default(),
-        }
-    }
 }
 
 impl Mergeable for Config {
