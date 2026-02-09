@@ -427,12 +427,7 @@ mod dlq_tests {
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
             .expect("Failed to read DLQ directory")
             .flatten()
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "ndjson")
-                    .unwrap_or(false)
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "ndjson"))
             .collect();
 
         assert_eq!(entries.len(), 1, "Should have exactly one NDJSON file");
@@ -562,12 +557,7 @@ mod dlq_tests {
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
             .unwrap()
             .flatten()
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "ndjson")
-                    .unwrap_or(false)
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "ndjson"))
             .collect();
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
