@@ -713,8 +713,7 @@ pub async fn list_ndjson_files_with_prefixes(
     pipeline: &str,
 ) -> Result<Vec<String>, StorageError> {
     match prefixes {
-        None => list_ndjson_files(storage).await,
-        Some([]) => list_ndjson_files(storage).await,
+        None | Some([]) => list_ndjson_files(storage).await,
         Some(prefixes) => {
             let mut files = Vec::new();
             let mut total_listed = 0;
