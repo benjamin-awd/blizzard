@@ -213,10 +213,8 @@ impl DeltaSink {
             EvolutionAction::Overwrite { .. } => "overwrite",
         };
 
-        match action {
-            EvolutionAction::None => {
-                // No change needed
-            }
+        match &action {
+            EvolutionAction::None => {}
             EvolutionAction::Merge { new_schema } => {
                 info!(
                     target = %self.table_name,
@@ -224,8 +222,6 @@ impl DeltaSink {
                     new_schema.fields().len()
                         - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
                 );
-                self.apply_schema_change(&new_schema).await?;
-                self.cached_schema = Some(new_schema);
             }
             EvolutionAction::Overwrite { new_schema } => {
                 warn!(
@@ -233,9 +229,14 @@ impl DeltaSink {
                     "Overwriting schema with {} fields",
                     new_schema.fields().len()
                 );
-                self.apply_schema_change(&new_schema).await?;
-                self.cached_schema = Some(new_schema);
             }
+        }
+
+        if let EvolutionAction::Merge { new_schema } | EvolutionAction::Overwrite { new_schema } =
+            action
+        {
+            self.apply_schema_change(&new_schema).await?;
+            self.cached_schema = Some(new_schema);
         }
 
         SchemaEvolved {
