@@ -4,6 +4,7 @@
 //! trait from blizzard-core. It supports running multiple Delta tables
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -292,11 +293,10 @@ impl PollingProcessor for Processor {
         }
 
         // Get committed paths from Delta log to avoid double-commits
-        let committed_paths = if let Some(delta_sink) = &self.delta_sink {
-            delta_sink.get_committed_paths()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let committed_paths = self
+            .delta_sink
+            .as_ref()
+            .map_or_else(HashSet::new, |s| s.get_committed_paths());
 
         // Get current watermark
         let watermark = self.checkpoint_coordinator.watermark().await;
