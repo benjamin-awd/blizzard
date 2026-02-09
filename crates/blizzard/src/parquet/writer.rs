@@ -91,11 +91,6 @@ impl SharedBuffer {
         let writer = mutex.into_inner().map_err(|_| BufferLockSnafu.build())?;
         Ok(writer.into_inner())
     }
-
-    fn len(&self) -> Result<usize, ParquetError> {
-        let guard = self.buffer.lock().map_err(|_| BufferLockSnafu.build())?;
-        Ok(guard.get_ref().len())
-    }
 }
 
 impl Write for SharedBuffer {
@@ -183,10 +178,6 @@ pub struct ParquetWriter {
     pipeline: String,
     /// Current source name for logging context.
     current_source: String,
-    /// Cumulative uncompressed bytes flushed (for compression ratio estimation).
-    total_uncompressed_flushed: usize,
-    /// Cumulative compressed bytes from flushes (for compression ratio estimation).
-    total_compressed_flushed: usize,
 }
 
 impl ParquetWriter {
@@ -222,8 +213,6 @@ impl ParquetWriter {
             current_partition_values: partition_values,
             pipeline,
             current_source: String::new(),
-            total_uncompressed_flushed: 0,
-            total_compressed_flushed: 0,
         })
     }
 
@@ -312,7 +301,6 @@ impl ParquetWriter {
         // Flush row group based on byte size
         let in_progress_size = writer.in_progress_size();
         if in_progress_size > self.config.row_group_size_bytes {
-            let buffer_before = self.buffer.len()?;
             tracing::info!(
                 target = %self.pipeline,
                 "Flushing row group: in_progress_size={} bytes ({:.2} MB), threshold={} bytes ({:.2} MB), total_records={}, row_group_records={}",
@@ -326,25 +314,13 @@ impl ParquetWriter {
             writer.flush().context(ParquetWriteSnafu)?;
             self.row_group_records = 0;
 
-            // Track compression ratio from this flush
-            let buffer_after = self.buffer.len()?;
-            let compressed_delta = buffer_after - buffer_before;
-            self.total_uncompressed_flushed += in_progress_size;
-            self.total_compressed_flushed += compressed_delta;
-
-            // Update bytes_written after flush
-            self.stats.bytes_written = buffer_after;
+            let bytes_written = writer.bytes_written();
+            self.stats.bytes_written = bytes_written;
             tracing::info!(
                 target = %self.pipeline,
-                "After flush: buffer={} bytes ({:.2} MB), bytes_written={}, compression_ratio={:.2}",
-                buffer_after,
-                buffer_after as f64 / 1024.0 / 1024.0,
-                self.stats.bytes_written,
-                if self.total_uncompressed_flushed > 0 {
-                    self.total_compressed_flushed as f64 / self.total_uncompressed_flushed as f64
-                } else {
-                    1.0
-                }
+                "After flush: bytes_written={} ({:.2} MB)",
+                bytes_written,
+                bytes_written as f64 / 1024.0 / 1024.0,
             );
         }
 
@@ -418,8 +394,6 @@ impl ParquetWriter {
         self.current_file_name = Self::generate_filename(&self.current_partition_values);
         self.stats = WriterStats::new();
         self.row_group_records = 0;
-        self.total_uncompressed_flushed = 0;
-        self.total_compressed_flushed = 0;
 
         Ok(())
     }
@@ -473,25 +447,37 @@ impl ParquetWriter {
 
     /// Get the current estimated file size in bytes (including in-progress data).
     ///
-    /// Applies the observed compression ratio from previous row group flushes
-    /// to estimate how large the in-progress (uncompressed) data will be once
-    /// compressed. Falls back to raw uncompressed size when no flushes have
-    /// occurred yet.
+    /// Uses the compression ratio observed in flushed row group metadata to
+    /// estimate how large the in-progress (encoded) data will be once
+    /// compressed. Falls back to raw encoded size when no row groups have
+    /// been flushed yet.
     pub fn current_file_size(&self) -> usize {
-        let buffer_size = self.buffer.len().unwrap_or(0);
-        let in_progress_size = self
-            .writer
-            .as_ref()
-            .map(|w| w.in_progress_size())
-            .unwrap_or(0);
-        let estimated_in_progress = if self.total_uncompressed_flushed > 0 {
-            // ratio is always in [0, 1] so the product is non-negative and ≤ in_progress_size
-            in_progress_size * self.total_compressed_flushed / self.total_uncompressed_flushed
-        } else {
-            // No flushes yet — use uncompressed as conservative upper bound
-            in_progress_size
+        let Some(writer) = self.writer.as_ref() else {
+            return 0;
         };
-        buffer_size + estimated_in_progress
+        let bytes_written = writer.bytes_written();
+        let in_progress = writer.in_progress_size();
+
+        let flushed = writer.flushed_row_groups();
+        if flushed.is_empty() {
+            return bytes_written + in_progress;
+        }
+
+        let total_compressed: usize = flushed
+            .iter()
+            .map(|rg| usize::try_from(rg.compressed_size()).unwrap_or(0))
+            .sum();
+        let total_uncompressed: usize = flushed
+            .iter()
+            .map(|rg| usize::try_from(rg.total_byte_size()).unwrap_or(0))
+            .sum();
+
+        let estimated = if total_uncompressed > 0 {
+            in_progress * total_compressed / total_uncompressed
+        } else {
+            in_progress
+        };
+        bytes_written + estimated
     }
 }
 
