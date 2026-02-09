@@ -178,6 +178,31 @@ pub enum PipelineSetupError {
     Metrics { source: MetricsError },
 }
 
+/// Generate `From<Source> for Target` impls for error type conversions.
+///
+/// Each entry maps a source error type to a variant name on the target.
+///
+/// # Usage
+///
+/// ```ignore
+/// blizzard_core::impl_from_error!(PipelineError {
+///     ConfigError => Config,
+///     DeltaError => Delta,
+/// });
+/// ```
+#[macro_export]
+macro_rules! impl_from_error {
+    ($target:ident { $($source:ty => $variant:ident),* $(,)? }) => {
+        $(
+            impl From<$source> for $target {
+                fn from(source: $source) -> Self {
+                    $target::$variant { source }
+                }
+            }
+        )*
+    };
+}
+
 /// Generate a `From<PipelineSetupError>` impl for a crate's pipeline error type.
 ///
 /// # Usage

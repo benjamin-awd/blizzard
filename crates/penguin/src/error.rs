@@ -176,28 +176,11 @@ pub enum PipelineError {
     DeltaSinkNotInitialized,
 }
 
-impl From<ConfigError> for PipelineError {
-    fn from(source: ConfigError) -> Self {
-        PipelineError::Config { source }
-    }
-}
-
-impl From<DeltaError> for PipelineError {
-    fn from(source: DeltaError) -> Self {
-        PipelineError::Delta { source }
-    }
-}
-
-impl From<SchemaError> for PipelineError {
-    fn from(source: SchemaError) -> Self {
-        PipelineError::Schema { source }
-    }
-}
-
-impl From<IncomingError> for PipelineError {
-    fn from(source: IncomingError) -> Self {
-        PipelineError::Incoming { source }
-    }
-}
+blizzard_core::impl_from_error!(PipelineError {
+    ConfigError => Config,
+    DeltaError => Delta,
+    SchemaError => Schema,
+    IncomingError => Incoming,
+});
 
 blizzard_core::impl_from_pipeline_setup_error!(PipelineError);

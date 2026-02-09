@@ -155,40 +155,13 @@ impl PipelineError {
     }
 }
 
-impl From<ConfigError> for PipelineError {
-    fn from(source: ConfigError) -> Self {
-        PipelineError::Config { source }
-    }
-}
-
-impl From<ParquetError> for PipelineError {
-    fn from(source: ParquetError) -> Self {
-        PipelineError::Parquet { source }
-    }
-}
-
-impl From<TableWriteError> for PipelineError {
-    fn from(source: TableWriteError) -> Self {
-        PipelineError::TableWrite { source }
-    }
-}
-
-impl From<DlqError> for PipelineError {
-    fn from(source: DlqError) -> Self {
-        PipelineError::Dlq { source }
-    }
-}
-
-impl From<ReaderError> for PipelineError {
-    fn from(source: ReaderError) -> Self {
-        PipelineError::Reader { source }
-    }
-}
-
-impl From<InferenceError> for PipelineError {
-    fn from(source: InferenceError) -> Self {
-        PipelineError::Inference { source }
-    }
-}
+blizzard_core::impl_from_error!(PipelineError {
+    ConfigError => Config,
+    ParquetError => Parquet,
+    TableWriteError => TableWrite,
+    DlqError => Dlq,
+    ReaderError => Reader,
+    InferenceError => Inference,
+});
 
 blizzard_core::impl_from_pipeline_setup_error!(PipelineError);
