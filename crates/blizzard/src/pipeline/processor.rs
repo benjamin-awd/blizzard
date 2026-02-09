@@ -202,11 +202,7 @@ impl<'a> ConfigResolver<'a> {
             )
             .await?)
         } else {
-            Ok(self
-                .config
-                .schema
-                .to_arrow_schema()
-                .map_err(|e| PipelineError::Config { source: e })?)
+            Ok(self.config.schema.to_arrow_schema()?)
         }
     }
 
