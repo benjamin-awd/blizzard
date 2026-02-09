@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use snafu::ResultExt;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use blizzard_core::FinishedFile;
 use blizzard_core::PartitionExtractor;
@@ -174,7 +174,7 @@ impl IncomingReader {
     ///
     /// Uses partition filter if configured, otherwise scans all files.
     /// On the very first poll (`cold_start=true`), logs at `info!` level;
-    /// subsequent polls log at `debug!` to avoid persistent log noise.
+    /// subsequent polls log at `trace!` to avoid persistent log noise.
     async fn list_files_cold_start(
         &self,
         cold_start: bool,
@@ -195,10 +195,10 @@ impl IncomingReader {
                         "Cold start: scanning partitions with filter"
                     );
                 } else {
-                    debug!(
+                    trace!(
                         target = %self.table,
                         prefixes = ?p,
-                        "Cold start: scanning partitions with filter"
+                        "No watermark: scanning partitions with filter"
                     );
                 }
             }
@@ -209,9 +209,9 @@ impl IncomingReader {
                         "Cold start: scanning all files (no filter configured)"
                     );
                 } else {
-                    debug!(
+                    trace!(
                         target = %self.table,
-                        "Cold start: scanning all files (no filter configured)"
+                        "No watermark: scanning all files (no filter configured)"
                     );
                 }
             }
