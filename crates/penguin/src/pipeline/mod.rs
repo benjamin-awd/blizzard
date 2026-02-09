@@ -355,9 +355,7 @@ impl PollingProcessor for Processor {
         Ok(Some(files))
     }
 
-    async fn process(&mut self, state: Self::State) -> Result<IterationResult, Self::Error> {
-        let files = state;
-
+    async fn process(&mut self, files: Self::State) -> Result<IterationResult, Self::Error> {
         // Emit pending files metric
         emit!(PendingFiles {
             target: self.table_key.id().to_string(),
