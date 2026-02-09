@@ -14,6 +14,7 @@ mod commit;
 mod table;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -62,6 +63,14 @@ pub struct DeltaSink {
 }
 
 impl DeltaSink {
+    /// Extract the Arrow schema from a Delta table's snapshot metadata.
+    fn cached_schema_from_table(table: &DeltaTable) -> Option<SchemaRef> {
+        use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
+        let snapshot = table.snapshot().ok()?;
+        let arrow_schema: Schema = snapshot.schema().as_ref().try_into_arrow().ok()?;
+        Some(Arc::new(arrow_schema))
+    }
+
     /// Load or create a Delta Lake table.
     pub async fn new(
         storage: &StorageProvider,
@@ -73,14 +82,7 @@ impl DeltaSink {
 
         let table = load_or_create_table(storage, schema, &partition_by, &table_name).await?;
         let last_version = table.version().unwrap_or(-1);
-
-        // Cache the schema from the created/loaded table
-        let cached_schema = table.snapshot().ok().and_then(|s| {
-            use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
-            use std::sync::Arc;
-            let arrow_schema: Schema = s.schema().as_ref().try_into_arrow().ok()?;
-            Some(Arc::new(arrow_schema))
-        });
+        let cached_schema = Self::cached_schema_from_table(&table);
 
         Ok(Self {
             table,
@@ -105,14 +107,7 @@ impl DeltaSink {
 
         let table = try_open_table(storage, &table_name).await?;
         let last_version = table.version().unwrap_or(-1);
-
-        // Cache the schema from the opened table
-        let cached_schema = table.snapshot().ok().and_then(|s| {
-            use deltalake::kernel::engine::arrow_conversion::TryIntoArrow;
-            use std::sync::Arc;
-            let arrow_schema: Schema = s.schema().as_ref().try_into_arrow().ok()?;
-            Some(Arc::new(arrow_schema))
-        });
+        let cached_schema = Self::cached_schema_from_table(&table);
 
         Ok(Self {
             table,
