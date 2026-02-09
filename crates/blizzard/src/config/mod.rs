@@ -759,11 +759,35 @@ pipelines:
         }
     }
 
+    /// Append `text` to `out`, adding `spaces` leading spaces to each line.
+    /// Auto-dedents: strips the common leading whitespace from all non-empty lines,
+    /// so raw strings can be indented naturally in source code.
     fn append_indented(out: &mut String, text: &str, spaces: usize) {
+        let all_lines: Vec<&str> = text.lines().collect();
+        let start = all_lines
+            .iter()
+            .position(|l| !l.trim().is_empty())
+            .unwrap_or(0);
+        let end = all_lines
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        let lines = &all_lines[start..end];
+        let min_indent = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
         let prefix = " ".repeat(spaces);
-        for line in text.lines() {
+        for line in lines {
+            let stripped = if line.len() > min_indent {
+                &line[min_indent..]
+            } else {
+                line.trim()
+            };
             out.push_str(&prefix);
-            out.push_str(line);
+            out.push_str(stripped);
             out.push('\n');
         }
     }
@@ -1087,7 +1111,14 @@ pipelines:
     #[test]
     fn test_schema_both_infer_and_fields_error() {
         let yaml = TestPipeline::default()
-            .schema("infer: true\nfields:\n  - name: id\n    type: string")
+            .schema(
+                r#"
+                infer: true
+                fields:
+                  - name: id
+                    type: string
+            "#,
+            )
             .build();
         assert_parse_err(&yaml, &["cannot specify both"]);
     }
@@ -1119,7 +1150,12 @@ pipelines:
     #[test]
     fn test_partition_by_config_yaml_parsing() {
         let yaml = TestPipeline::default()
-            .sink("partition_by:\n  prefix_template: \"date=%Y-%m-%d\"")
+            .sink(
+                r#"
+                partition_by:
+                  prefix_template: "date=%Y-%m-%d"
+            "#,
+            )
             .build();
         let pipeline = parse_first(&yaml);
         let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
@@ -1190,7 +1226,14 @@ pipelines:
     #[test]
     fn test_schema_infer_and_fields_error_at_parse_time() {
         let yaml = TestPipeline::default()
-            .schema("infer: true\nfields:\n  - name: id\n    type: string")
+            .schema(
+                r#"
+                infer: true
+                fields:
+                  - name: id
+                    type: string
+            "#,
+            )
             .build();
         assert_parse_err(&yaml, &["cannot specify both"]);
     }
@@ -1214,7 +1257,14 @@ pipelines:
     #[test]
     fn test_use_watermark_enabled() {
         let yaml = TestPipeline::default()
-            .source("use_watermark: true\npartition_filter:\n  prefix_template: \"date=%Y-%m-%d\"\n  lookback: 2")
+            .source(
+                r#"
+                use_watermark: true
+                partition_filter:
+                  prefix_template: "date=%Y-%m-%d"
+                  lookback: 2
+            "#,
+            )
             .build();
         let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert!(source.use_watermark);
@@ -1234,7 +1284,14 @@ pipelines:
     #[test]
     fn test_checkpoint_config_custom() {
         let yaml = TestPipeline::default()
-            .source("use_watermark: true\ncheckpoint:\n  interval_files: 50\n  interval_secs: 15")
+            .source(
+                r#"
+                use_watermark: true
+                checkpoint:
+                  interval_files: 50
+                  interval_secs: 15
+            "#,
+            )
             .build();
         let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 50);
@@ -1244,7 +1301,13 @@ pipelines:
     #[test]
     fn test_checkpoint_config_partial() {
         let yaml = TestPipeline::default()
-            .source("use_watermark: true\ncheckpoint:\n  interval_files: 200")
+            .source(
+                r#"
+                use_watermark: true
+                checkpoint:
+                  interval_files: 200
+            "#,
+            )
             .build();
         let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 200);
