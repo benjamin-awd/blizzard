@@ -75,7 +75,7 @@ pipelines:
     fn test_field_types() {
         use blizzard::config::FieldType;
 
-        let types = vec![
+        let types = [
             ("string", FieldType::String, DataType::Utf8),
             ("int32", FieldType::Int32, DataType::Int32),
             ("int64", FieldType::Int64, DataType::Int64),
