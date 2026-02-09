@@ -57,10 +57,10 @@ pub trait Mergeable: Sized + Default + DeserializeOwned {
 
     fn merge(&mut self, mut other: Self) -> Result<(), ConfigError> {
         let duplicates: Vec<String> = other
-            .components_mut()
+            .components()
             .keys()
-            .filter(|key: &&Self::Key| self.components_mut().contains_key(*key))
-            .map(|key: &Self::Key| key.to_string())
+            .filter(|key| self.components().contains_key(*key))
+            .map(|key| key.to_string())
             .collect();
 
         if !duplicates.is_empty() {
