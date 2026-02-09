@@ -47,11 +47,7 @@ pub async fn commit_to_delta_with_checkpoint(
     all_actions.extend(add_actions);
 
     // Convert partition_by to Option<Vec<String>> for Delta operation
-    let partition_by_opt = if partition_by.is_empty() {
-        None
-    } else {
-        Some(partition_by.to_vec())
-    };
+    let partition_by_opt = (!partition_by.is_empty()).then(|| partition_by.to_vec());
 
     let version = CommitBuilder::default()
         .with_actions(all_actions)
