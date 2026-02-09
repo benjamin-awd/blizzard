@@ -27,7 +27,7 @@ use crate::error::{DecoderBuildSnafu, JsonDecodeSnafu, ReaderError};
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BytesRead, FileDecompressionCompleted};
 
-use super::traits::FileReader;
+use super::FileReader;
 
 /// Configuration for the NDJSON reader.
 #[derive(Debug, Clone)]

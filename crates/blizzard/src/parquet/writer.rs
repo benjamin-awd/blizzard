@@ -25,7 +25,7 @@ use blizzard_core::FinishedFile;
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BufferedRecords, ParquetWriteCompleted};
 
-use super::traits::{BatchWriter, BatchWriterError};
+use super::{BatchWriter, BatchWriterError};
 
 /// Statistics for tracking writer state.
 #[derive(Debug, Clone, Copy)]
