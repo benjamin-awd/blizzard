@@ -70,6 +70,61 @@ impl AsRef<str> for ComponentKey {
     }
 }
 
+/// Define a newtype wrapper around `ComponentKey`.
+///
+/// Generates a struct with `new()`, `id()`, `from_uri()` delegation,
+/// plus `Display`, `AsRef<str>`, and serde transparency.
+///
+/// # Example
+///
+/// ```ignore
+/// blizzard_core::define_component_key!(PipelineKey);
+/// ```
+#[macro_export]
+macro_rules! define_component_key {
+    ($name:ident) => {
+        #[derive(
+            Debug,
+            Clone,
+            Eq,
+            Hash,
+            PartialEq,
+            Ord,
+            PartialOrd,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name($crate::ComponentKey);
+
+        impl $name {
+            pub fn new(id: impl Into<String>) -> Self {
+                Self($crate::ComponentKey::new(id))
+            }
+
+            pub fn id(&self) -> &str {
+                self.0.id()
+            }
+
+            pub fn from_uri(uri: &str) -> Self {
+                Self($crate::ComponentKey::from_uri(uri))
+            }
+        }
+
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.0.as_ref()
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
