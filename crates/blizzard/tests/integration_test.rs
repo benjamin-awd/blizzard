@@ -426,7 +426,7 @@ mod dlq_tests {
         // Verify file was written
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
             .expect("Failed to read DLQ directory")
-            .filter_map(|e| e.ok())
+            .flatten()
             .filter(|e| {
                 e.path()
                     .extension()
@@ -561,7 +561,7 @@ mod dlq_tests {
         // Read and verify it's valid JSON
         let entries: Vec<_> = std::fs::read_dir(&dlq_path)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .flatten()
             .filter(|e| {
                 e.path()
                     .extension()
