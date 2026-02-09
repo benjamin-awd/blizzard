@@ -683,24 +683,104 @@ pipelines:
         )
     }
 
+    /// Builder for single-pipeline test YAML. Defaults match `MINIMAL_YAML`.
+    struct TestPipeline {
+        source_path: String,
+        source_extra: String,
+        sink_uri: String,
+        sink_extra: String,
+        schema: String,
+        pipeline_extra: String,
+        top_extra: String,
+    }
+
+    impl Default for TestPipeline {
+        fn default() -> Self {
+            Self {
+                source_path: "gs://bucket/raw".into(),
+                source_extra: String::new(),
+                sink_uri: "gs://bucket/delta/events".into(),
+                sink_extra: String::new(),
+                schema: "fields:\n  - name: id\n    type: string".into(),
+                pipeline_extra: String::new(),
+                top_extra: String::new(),
+            }
+        }
+    }
+
+    impl TestPipeline {
+        fn source_path(mut self, p: &str) -> Self {
+            self.source_path = p.into();
+            self
+        }
+        fn source_extra(mut self, s: &str) -> Self {
+            self.source_extra = s.into();
+            self
+        }
+        fn sink_uri(mut self, u: &str) -> Self {
+            self.sink_uri = u.into();
+            self
+        }
+        fn sink_extra(mut self, s: &str) -> Self {
+            self.sink_extra = s.into();
+            self
+        }
+        fn schema(mut self, s: &str) -> Self {
+            self.schema = s.into();
+            self
+        }
+        fn schema_infer(self) -> Self {
+            self.schema("infer: true")
+        }
+        fn pipeline_extra(mut self, s: &str) -> Self {
+            self.pipeline_extra = s.into();
+            self
+        }
+        fn top_extra(mut self, s: &str) -> Self {
+            self.top_extra = s.into();
+            self
+        }
+
+        fn build(&self) -> String {
+            let mut y = String::from("pipelines:\n  events:\n    sources:\n      default:\n");
+            append_indented(&mut y, &format!("path: {}", self.source_path), 8);
+            if !self.source_extra.is_empty() {
+                append_indented(&mut y, &self.source_extra, 8);
+            }
+            y.push_str("    sink:\n");
+            append_indented(&mut y, &format!("table_uri: {}", self.sink_uri), 6);
+            if !self.sink_extra.is_empty() {
+                append_indented(&mut y, &self.sink_extra, 6);
+            }
+            y.push_str("    schema:\n");
+            append_indented(&mut y, &self.schema, 6);
+            if !self.pipeline_extra.is_empty() {
+                append_indented(&mut y, &self.pipeline_extra, 4);
+            }
+            if !self.top_extra.is_empty() {
+                append_indented(&mut y, &self.top_extra, 0);
+            }
+            y
+        }
+    }
+
+    fn append_indented(out: &mut String, text: &str, spaces: usize) {
+        let prefix = " ".repeat(spaces);
+        for line in text.lines() {
+            out.push_str(&prefix);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
     #[test]
     fn test_single_pipeline_parse() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw-data
-        compression: gzip
-    sink:
-      table_uri: gs://bucket/delta/events
-      file_size_mb: 128
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let config = Config::parse(yaml).unwrap();
+        let yaml = TestPipeline::default()
+            .source_path("gs://bucket/raw-data")
+            .source_extra("compression: gzip")
+            .sink_extra("file_size_mb: 128")
+            .build();
+        let config = Config::parse(&yaml).unwrap();
         assert_eq!(config.pipelines.len(), 1);
 
         let (key, pipeline) = config.pipelines.iter().next().unwrap();
@@ -897,39 +977,18 @@ pipelines:
 
     #[test]
     fn test_sink_config_rollover_timeout() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-      rollover_timeout_secs: 300
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        assert_eq!(first_pipeline(yaml).sink.rollover_timeout_secs, Some(300));
+        let yaml = TestPipeline::default()
+            .sink_extra("rollover_timeout_secs: 300")
+            .build();
+        assert_eq!(first_pipeline(&yaml).sink.rollover_timeout_secs, Some(300));
     }
 
     #[test]
     fn test_pipeline_config_resources() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw-events
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let resources = first_pipeline(yaml).resources();
+        let yaml = TestPipeline::default()
+            .source_path("gs://bucket/raw-events")
+            .build();
+        let resources = first_pipeline(&yaml).resources();
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
@@ -962,20 +1021,11 @@ pipelines:
 
     #[test]
     fn test_pipeline_config_resources_trailing_slash() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw-events/
-    sink:
-      table_uri: gs://bucket/delta/events/
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let resources = first_pipeline(yaml).resources();
+        let yaml = TestPipeline::default()
+            .source_path("gs://bucket/raw-events/")
+            .sink_uri("gs://bucket/delta/events/")
+            .build();
+        let resources = first_pipeline(&yaml).resources();
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
             resources[1],
@@ -1029,53 +1079,22 @@ pipelines:
 
     #[test]
     fn test_infer_schema_valid() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: true
-"#;
-        assert!(first_pipeline(yaml).schema.is_infer());
+        let yaml = TestPipeline::default().schema_infer().build();
+        assert!(first_pipeline(&yaml).schema.is_infer());
     }
 
     #[test]
     fn test_infer_schema_false_error() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: false
-"#;
-        assert_parse_err(yaml, &["events", "empty schema"]);
+        let yaml = TestPipeline::default().schema("infer: false").build();
+        assert_parse_err(&yaml, &["events", "empty schema"]);
     }
 
     #[test]
     fn test_schema_both_infer_and_fields_error() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: true
-      fields:
-        - name: id
-          type: string
-"#;
-        assert_parse_err(yaml, &["cannot specify both"]);
+        let yaml = TestPipeline::default()
+            .schema("infer: true\nfields:\n  - name: id\n    type: string")
+            .build();
+        assert_parse_err(&yaml, &["cannot specify both"]);
     }
 
     #[test]
@@ -1104,22 +1123,10 @@ pipelines:
 
     #[test]
     fn test_partition_by_config_yaml_parsing() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-      partition_by:
-        prefix_template: "date=%Y-%m-%d"
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let pipeline = first_pipeline(yaml);
+        let yaml = TestPipeline::default()
+            .sink_extra("partition_by:\n  prefix_template: \"date=%Y-%m-%d\"")
+            .build();
+        let pipeline = first_pipeline(&yaml);
         let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
         assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
@@ -1127,70 +1134,38 @@ pipelines:
 
     #[test]
     fn test_unknown_field_rejected_in_source() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-        batchsize: 100
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: true
-"#;
-        assert_parse_err(yaml, &["unknown field"]);
+        let yaml = TestPipeline::default()
+            .source_extra("batchsize: 100")
+            .schema_infer()
+            .build();
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
     fn test_unknown_field_rejected_in_sink() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-      filesize: 128
-    schema:
-      infer: true
-"#;
-        assert_parse_err(yaml, &["unknown field"]);
+        let yaml = TestPipeline::default()
+            .sink_extra("filesize: 128")
+            .schema_infer()
+            .build();
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
     fn test_unknown_field_rejected_in_pipeline() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: true
-    unknown_key: value
-"#;
-        assert_parse_err(yaml, &["unknown field"]);
+        let yaml = TestPipeline::default()
+            .schema_infer()
+            .pipeline_extra("unknown_key: value")
+            .build();
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
     fn test_unknown_field_rejected_at_top_level() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      infer: true
-unknown_top_level: value
-"#;
-        assert_parse_err(yaml, &["unknown field"]);
+        let yaml = TestPipeline::default()
+            .schema_infer()
+            .top_extra("unknown_top_level: value")
+            .build();
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
@@ -1219,37 +1194,16 @@ pipelines:
 
     #[test]
     fn test_schema_infer_and_fields_error_at_parse_time() {
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/a
-    sink:
-      table_uri: gs://bucket/delta/a
-    schema:
-      infer: true
-      fields:
-        - name: id
-          type: string
-"#;
-        assert_parse_err(yaml, &["cannot specify both"]);
+        let yaml = TestPipeline::default()
+            .schema("infer: true\nfields:\n  - name: id\n    type: string")
+            .build();
+        assert_parse_err(&yaml, &["cannot specify both"]);
     }
 
     #[test]
     fn test_schema_empty_error_at_parse_time() {
-        let yaml = r#"
-pipelines:
-  a:
-    sources:
-      default:
-        path: gs://bucket/a
-    sink:
-      table_uri: gs://bucket/delta/a
-    schema:
-      infer: false
-"#;
-        assert_parse_err(yaml, &["empty schema"]);
+        let yaml = TestPipeline::default().schema("infer: false").build();
+        assert_parse_err(&yaml, &["empty schema"]);
     }
 
     #[test]
@@ -1264,92 +1218,54 @@ pipelines:
 
     #[test]
     fn test_use_watermark_enabled() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-        use_watermark: true
-        partition_filter:
-          prefix_template: "date=%Y-%m-%d"
-          lookback: 2
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        let yaml = TestPipeline::default()
+            .source_extra(
+                "use_watermark: true\n\
+                 partition_filter:\n\
+                 \x20 prefix_template: \"date=%Y-%m-%d\"\n\
+                 \x20 lookback: 2",
+            )
+            .build();
+        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
         assert!(source.use_watermark);
         assert!(source.partition_filter.is_some());
     }
 
     #[test]
     fn test_checkpoint_config_defaults() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-        use_watermark: true
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        let yaml = TestPipeline::default()
+            .source_extra("use_watermark: true")
+            .build();
+        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 100);
         assert_eq!(source.checkpoint.interval_secs, 30);
     }
 
     #[test]
     fn test_checkpoint_config_custom() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-        use_watermark: true
-        checkpoint:
-          interval_files: 50
-          interval_secs: 15
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        let yaml = TestPipeline::default()
+            .source_extra(
+                "use_watermark: true\n\
+                 checkpoint:\n\
+                 \x20 interval_files: 50\n\
+                 \x20 interval_secs: 15",
+            )
+            .build();
+        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 50);
         assert_eq!(source.checkpoint.interval_secs, 15);
     }
 
     #[test]
     fn test_checkpoint_config_partial() {
-        let yaml = r#"
-pipelines:
-  events:
-    sources:
-      default:
-        path: gs://bucket/raw
-        use_watermark: true
-        checkpoint:
-          interval_files: 200
-    sink:
-      table_uri: gs://bucket/delta/events
-    schema:
-      fields:
-        - name: id
-          type: string
-"#;
-        let source = first_pipeline(yaml).sources.into_values().next().unwrap();
+        let yaml = TestPipeline::default()
+            .source_extra(
+                "use_watermark: true\n\
+                 checkpoint:\n\
+                 \x20 interval_files: 200",
+            )
+            .build();
+        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 200);
         assert_eq!(source.checkpoint.interval_secs, 30);
     }

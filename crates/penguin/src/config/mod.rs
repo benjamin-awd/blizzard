@@ -227,6 +227,44 @@ impl AppConfig for Config {
 mod tests {
     use super::*;
 
+    /// Minimal valid config YAML with a single table.
+    const MINIMAL_YAML: &str = "tables:\n  events:\n    table_uri: gs://bucket/events\n";
+
+    /// Parse YAML and return the first table's config.
+    fn first_table(yaml: &str) -> TableConfig {
+        Config::parse(yaml)
+            .unwrap()
+            .tables
+            .into_values()
+            .next()
+            .unwrap()
+    }
+
+    /// Assert that parsing the given YAML produces an error containing all substrings.
+    fn assert_parse_err(yaml: &str, substrings: &[&str]) {
+        let err = Config::parse(yaml).unwrap_err().to_string();
+        for s in substrings {
+            assert!(
+                err.contains(s),
+                "Expected error to contain '{s}', got: {err}"
+            );
+        }
+    }
+
+    /// Build a single-table YAML config. `extras` lines are indented under the table entry.
+    fn table_yaml(name: &str, uri: &str, extras: &str) -> String {
+        let mut yaml = format!("tables:\n  {name}:\n    table_uri: {uri}\n");
+        for line in extras.lines() {
+            yaml.push_str(&format!("    {line}\n"));
+        }
+        yaml
+    }
+
+    /// Build a two-table YAML config for resource conflict tests.
+    fn two_table_yaml(uri_a: &str, uri_b: &str) -> String {
+        format!("tables:\n  a:\n    table_uri: {uri_a}\n  b:\n    table_uri: {uri_b}\n")
+    }
+
     #[test]
     fn test_single_table_parse() {
         let yaml = r#"
@@ -290,35 +328,19 @@ tables:
 
     #[test]
     fn test_metrics_default() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-"#;
-        let config = Config::parse(yaml).unwrap();
+        let config = Config::parse(MINIMAL_YAML).unwrap();
         assert_eq!(config.metrics.address, "0.0.0.0:9090");
     }
 
     #[test]
     fn test_global_default() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-"#;
-        let config = Config::parse(yaml).unwrap();
+        let config = Config::parse(MINIMAL_YAML).unwrap();
         assert_eq!(config.global.total_concurrency, None);
     }
 
     #[test]
     fn test_table_config_defaults() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let table = first_table(MINIMAL_YAML);
 
         assert_eq!(table.poll_interval_secs, 10);
         assert_eq!(table.delta_checkpoint_interval, 10);
@@ -341,16 +363,12 @@ tables:
 
     #[test]
     fn test_partition_filter_config() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-    partition_filter:
-      prefix_template: "date=%Y-%m-%d"
-      lookback: 7
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "events",
+            "gs://bucket/events",
+            "partition_filter:\n  prefix_template: \"date=%Y-%m-%d\"\n  lookback: 7",
+        );
+        let table = first_table(&yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.prefix_template, "date=%Y-%m-%d");
@@ -360,18 +378,16 @@ tables:
 
     #[test]
     fn test_partition_filter_include_single_string() {
-        let yaml = r#"
-tables:
-  telemetry:
-    table_uri: s3://bucket/data/telemetry
-    partition_filter:
-      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
-      lookback: 0
-      include:
-        region: "us-east-1"
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "telemetry",
+            "s3://bucket/data/telemetry",
+            "partition_filter:\n\
+             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
+             \x20 lookback: 0\n\
+             \x20 include:\n\
+             \x20   region: \"us-east-1\"",
+        );
+        let table = first_table(&yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         let region = filter.include.get("region").unwrap();
@@ -380,21 +396,19 @@ tables:
 
     #[test]
     fn test_partition_filter_include_list() {
-        let yaml = r#"
-tables:
-  telemetry:
-    table_uri: s3://bucket/data/telemetry
-    partition_filter:
-      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
-      lookback: 0
-      include:
-        host:
-          - "web-prod-01"
-          - "web-prod-02"
-        category: ["events", "metrics"]
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "telemetry",
+            "s3://bucket/data/telemetry",
+            "partition_filter:\n\
+             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
+             \x20 lookback: 0\n\
+             \x20 include:\n\
+             \x20   host:\n\
+             \x20     - \"web-prod-01\"\n\
+             \x20     - \"web-prod-02\"\n\
+             \x20   category: [\"events\", \"metrics\"]",
+        );
+        let table = first_table(&yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         let host = filter.include.get("host").unwrap();
@@ -405,22 +419,20 @@ tables:
 
     #[test]
     fn test_partition_filter_include_mixed() {
-        let yaml = r#"
-tables:
-  telemetry:
-    table_uri: s3://bucket/data/telemetry
-    partition_filter:
-      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
-      lookback: 0
-      include:
-        host:
-          - "web-prod-01"
-          - "web-prod-02"
-        region: "us-east-1"
-        category: ["events", "metrics"]
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "telemetry",
+            "s3://bucket/data/telemetry",
+            "partition_filter:\n\
+             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
+             \x20 lookback: 0\n\
+             \x20 include:\n\
+             \x20   host:\n\
+             \x20     - \"web-prod-01\"\n\
+             \x20     - \"web-prod-02\"\n\
+             \x20   region: \"us-east-1\"\n\
+             \x20   category: [\"events\", \"metrics\"]",
+        );
+        let table = first_table(&yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.include.len(), 3);
@@ -440,38 +452,14 @@ tables:
 
     #[test]
     fn test_resource_conflict_same_uri() {
-        let yaml = r#"
-tables:
-  a:
-    table_uri: gs://bucket/delta/same
-  b:
-    table_uri: gs://bucket/delta/same
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Resource conflict"),
-            "Expected resource conflict error, got: {msg}"
-        );
-        assert!(
-            msg.contains("gs://bucket/delta/same"),
-            "Expected table URI in error, got: {msg}"
-        );
+        let yaml = two_table_yaml("gs://bucket/delta/same", "gs://bucket/delta/same");
+        assert_parse_err(&yaml, &["Resource conflict", "gs://bucket/delta/same"]);
     }
 
     #[test]
     fn test_no_resource_conflict_different_uris() {
-        let yaml = r#"
-tables:
-  a:
-    table_uri: gs://bucket/delta/table_a
-  b:
-    table_uri: gs://bucket/delta/table_b
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_ok());
+        let yaml = two_table_yaml("gs://bucket/delta/table_a", "gs://bucket/delta/table_b");
+        assert!(Config::parse(&yaml).is_ok());
     }
 
     #[test]
@@ -485,15 +473,12 @@ tables:
 
     #[test]
     fn test_partition_by_template_yaml_parsing() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-    partition_by:
-      prefix_template: "date=%Y-%m-%d"
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "events",
+            "gs://bucket/events",
+            "partition_by:\n  prefix_template: \"date=%Y-%m-%d\"",
+        );
+        let table = first_table(&yaml);
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::Template(_)));
@@ -502,14 +487,12 @@ tables:
 
     #[test]
     fn test_partition_by_list_yaml_parsing() {
-        let yaml = r#"
-tables:
-  logs:
-    table_uri: s3://bucket/logs
-    partition_by: [year, month, day, category, source]
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "logs",
+            "s3://bucket/logs",
+            "partition_by: [year, month, day, category, source]",
+        );
+        let table = first_table(&yaml);
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::List(_)));
@@ -521,15 +504,13 @@ tables:
 
     #[test]
     fn test_path_columns_yaml_parsing() {
-        let yaml = r#"
-tables:
-  logs:
-    table_uri: s3://bucket/logs
-    path_columns: "year=%Y/month=%m/day=%d/region={region}/category={category}/source={source}"
-    partition_by: [year, month, day, category, source]
-"#;
-        let config = Config::parse(yaml).unwrap();
-        let (_, table) = config.tables.iter().next().unwrap();
+        let yaml = table_yaml(
+            "logs",
+            "s3://bucket/logs",
+            "path_columns: \"year=%Y/month=%m/day=%d/region={region}/category={category}/source={source}\"\n\
+             partition_by: [year, month, day, category, source]",
+        );
+        let table = first_table(&yaml);
 
         assert_eq!(
             table.path_columns.as_deref(),
@@ -543,61 +524,19 @@ tables:
 
     #[test]
     fn test_unknown_field_rejected_in_table() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-    pollinterval: 30
-"#;
-        let result = Config::parse(yaml);
-        assert!(
-            result.is_err(),
-            "Should reject unknown field 'pollinterval'"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        let yaml = table_yaml("events", "gs://bucket/events", "pollinterval: 30");
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
     fn test_unknown_field_rejected_at_top_level() {
-        let yaml = r#"
-tables:
-  events:
-    table_uri: gs://bucket/events
-unknown_key: value
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should reject unknown field 'unknown_key'");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "Error should mention unknown field: {err}"
-        );
+        let yaml = format!("{MINIMAL_YAML}unknown_key: value\n");
+        assert_parse_err(&yaml, &["unknown field"]);
     }
 
     #[test]
     fn test_multiple_errors_collected() {
-        let yaml = r#"
-tables:
-  a:
-    table_uri: ""
-  b:
-    table_uri: ""
-  c:
-    table_uri: gs://bucket/valid
-"#;
-        let result = Config::parse(yaml);
-        assert!(result.is_err(), "Should have validation errors");
-        let err = result.unwrap_err().to_string();
-        // Should contain errors for both 'a' and 'b' tables
-        assert!(err.contains("Table 'a'"), "Should mention table 'a': {err}");
-        assert!(err.contains("Table 'b'"), "Should mention table 'b': {err}");
-        assert!(
-            err.contains("table_uri is empty"),
-            "Should mention empty table_uri: {err}"
-        );
+        let yaml = "tables:\n  a:\n    table_uri: \"\"\n  b:\n    table_uri: \"\"\n  c:\n    table_uri: gs://bucket/valid\n";
+        assert_parse_err(yaml, &["Table 'a'", "Table 'b'", "table_uri is empty"]);
     }
 }
