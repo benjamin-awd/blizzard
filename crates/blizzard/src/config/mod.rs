@@ -365,7 +365,7 @@ impl PipelineConfig {
 /// metrics:
 ///   enabled: true
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Named pipeline configurations.
@@ -379,47 +379,19 @@ pub struct Config {
     pub metrics: MetricsConfig,
 }
 
-impl Mergeable for Config {
-    type Key = PipelineKey;
-    type Component = PipelineConfig;
+blizzard_core::impl_mergeable!(Config, PipelineKey, PipelineConfig, pipelines);
 
-    fn components(&self) -> &IndexMap<Self::Key, Self::Component> {
-        &self.pipelines
-    }
-
-    fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component> {
-        &mut self.pipelines
-    }
-
-    fn global(&self) -> &GlobalConfig {
-        &self.global
-    }
-
-    fn global_mut(&mut self) -> &mut GlobalConfig {
-        &mut self.global
-    }
-
-    fn metrics(&self) -> &MetricsConfig {
-        &self.metrics
-    }
-
-    fn metrics_mut(&mut self) -> &mut MetricsConfig {
-        &mut self.metrics
-    }
-
-    fn validate(&self) -> Result<(), ConfigError> {
+impl Config {
+    fn validate_config(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
-        // Check for empty paths and schema
         for (key, pipeline) in &self.pipelines {
             let pipeline_id = key.id();
 
-            // Check that at least one source is configured
             if pipeline.sources.is_empty() {
                 errors.push(format!("Pipeline '{pipeline_id}': no sources configured"));
             }
 
-            // Check each source has a non-empty path
             for (source_name, source) in &pipeline.sources {
                 if source.path.is_empty() {
                     errors.push(format!(
@@ -432,7 +404,6 @@ impl Mergeable for Config {
                 errors.push(format!("Pipeline '{pipeline_id}': sink.table_uri is empty"));
             }
 
-            // Validate schema configuration
             let has_fields = !pipeline.schema.fields.is_empty();
             let wants_infer = pipeline.schema.infer;
 
@@ -448,7 +419,6 @@ impl Mergeable for Config {
             }
         }
 
-        // Check for resource conflicts
         let conflicts = Resource::conflicts(
             self.pipelines
                 .iter()

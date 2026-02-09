@@ -10,6 +10,66 @@ use crate::config::{ConfigPath, GlobalConfig, MetricsConfig, interpolate, is_yam
 use crate::error::ConfigError;
 use crate::topology::PipelineContext;
 
+/// Implement the boilerplate accessors for [`Mergeable`].
+///
+/// Generates the `Mergeable` trait impl and `Default` impl for a config struct
+/// that has `global: GlobalConfig`, `metrics: MetricsConfig`, and a components
+/// field of type `IndexMap<K, C>`. The `validate()` trait method delegates to
+/// an inherent `validate_config(&self)` method that you must provide.
+///
+/// # Usage
+///
+/// ```ignore
+/// blizzard_core::impl_mergeable!(Config, PipelineKey, PipelineConfig, pipelines);
+/// ```
+#[macro_export]
+macro_rules! impl_mergeable {
+    ($config:ty, $key:ty, $component:ty, $field:ident) => {
+        impl Default for $config {
+            fn default() -> Self {
+                Self {
+                    $field: ::indexmap::IndexMap::new(),
+                    global: $crate::GlobalConfig::default(),
+                    metrics: $crate::config::MetricsConfig::default(),
+                }
+            }
+        }
+
+        impl $crate::config::Mergeable for $config {
+            type Key = $key;
+            type Component = $component;
+
+            fn components(&self) -> &::indexmap::IndexMap<Self::Key, Self::Component> {
+                &self.$field
+            }
+
+            fn components_mut(&mut self) -> &mut ::indexmap::IndexMap<Self::Key, Self::Component> {
+                &mut self.$field
+            }
+
+            fn global(&self) -> &$crate::GlobalConfig {
+                &self.global
+            }
+
+            fn global_mut(&mut self) -> &mut $crate::GlobalConfig {
+                &mut self.global
+            }
+
+            fn metrics(&self) -> &$crate::config::MetricsConfig {
+                &self.metrics
+            }
+
+            fn metrics_mut(&mut self) -> &mut $crate::config::MetricsConfig {
+                &mut self.metrics
+            }
+
+            fn validate(&self) -> Result<(), $crate::error::ConfigError> {
+                self.validate_config()
+            }
+        }
+    };
+}
+
 /// Trait for configs that can be merged from multiple files.
 pub trait Mergeable: Sized + Default + DeserializeOwned {
     type Key: Eq + std::hash::Hash + Clone + std::fmt::Display;

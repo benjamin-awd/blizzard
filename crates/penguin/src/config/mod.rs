@@ -147,55 +147,18 @@ pub struct Config {
     pub metrics: MetricsConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            tables: IndexMap::new(),
-            global: GlobalConfig::default(),
-            metrics: MetricsConfig::default(),
-        }
-    }
-}
+blizzard_core::impl_mergeable!(Config, TableKey, TableConfig, tables);
 
-impl Mergeable for Config {
-    type Key = TableKey;
-    type Component = TableConfig;
-
-    fn components(&self) -> &IndexMap<Self::Key, Self::Component> {
-        &self.tables
-    }
-
-    fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component> {
-        &mut self.tables
-    }
-
-    fn global(&self) -> &GlobalConfig {
-        &self.global
-    }
-
-    fn global_mut(&mut self) -> &mut GlobalConfig {
-        &mut self.global
-    }
-
-    fn metrics(&self) -> &MetricsConfig {
-        &self.metrics
-    }
-
-    fn metrics_mut(&mut self) -> &mut MetricsConfig {
-        &mut self.metrics
-    }
-
-    fn validate(&self) -> Result<(), ConfigError> {
+impl Config {
+    fn validate_config(&self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
-        // Check for empty table_uri
         for (key, table) in &self.tables {
             if table.table_uri.is_empty() {
                 errors.push(format!("Table '{}': table_uri is empty", key.id()));
             }
         }
 
-        // Check for resource conflicts
         let conflicts = Resource::conflicts(
             self.tables
                 .iter()
