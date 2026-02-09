@@ -13,11 +13,7 @@ use metrics::{counter, gauge, histogram};
 use std::time::Duration;
 use tracing::trace;
 
-/// Trait for internal events that can be emitted as metrics.
-pub trait InternalEvent {
-    /// Emit this event as a metric.
-    fn emit(self);
-}
+pub use blizzard_core::metrics::events::InternalEvent;
 
 // ============================================================================
 // Delta Lake commit events

@@ -19,8 +19,8 @@ use blizzard_core::{
     get_or_create_storage,
 };
 
-use crate::emit;
 use crate::metrics::events::{DeltaTableVersion, FilesCommitted, PendingFiles, RecordsCommitted};
+use blizzard_core::emit;
 
 use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{Config, Mergeable, TableConfig, TableKey};

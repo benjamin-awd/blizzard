@@ -191,15 +191,4 @@ impl From<InferenceError> for PipelineError {
     }
 }
 
-impl From<blizzard_core::PipelineSetupError> for PipelineError {
-    fn from(source: blizzard_core::PipelineSetupError) -> Self {
-        match source {
-            blizzard_core::PipelineSetupError::AddressParse { source } => {
-                PipelineError::AddressParse { source }
-            }
-            blizzard_core::PipelineSetupError::Metrics { source } => {
-                PipelineError::Metrics { source }
-            }
-        }
-    }
-}
+blizzard_core::impl_from_pipeline_setup_error!(PipelineError);

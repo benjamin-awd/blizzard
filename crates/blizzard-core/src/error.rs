@@ -178,6 +178,29 @@ pub enum PipelineSetupError {
     Metrics { source: MetricsError },
 }
 
+/// Generate a `From<PipelineSetupError>` impl for a crate's pipeline error type.
+///
+/// # Usage
+///
+/// ```ignore
+/// blizzard_core::impl_from_pipeline_setup_error!(PipelineError);
+/// ```
+#[macro_export]
+macro_rules! impl_from_pipeline_setup_error {
+    ($target:ident) => {
+        impl From<$crate::PipelineSetupError> for $target {
+            fn from(source: $crate::PipelineSetupError) -> Self {
+                match source {
+                    $crate::PipelineSetupError::AddressParse { source } => {
+                        $target::AddressParse { source }
+                    }
+                    $crate::PipelineSetupError::Metrics { source } => $target::Metrics { source },
+                }
+            }
+        }
+    };
+}
+
 // ============ DLQ Errors ============
 
 /// Errors that can occur during Dead Letter Queue operations.

@@ -13,6 +13,10 @@ pub use blizzard_core::config::{
     ParquetCompression, PartitionByConfig, PartitionFilterConfig, Resource, StringOrVec,
     interpolate, load_from_paths,
 };
+use blizzard_core::config::{
+    default_max_concurrent_parts, default_max_concurrent_uploads, default_min_multipart_size_mb,
+    default_part_size_mb,
+};
 use blizzard_core::topology::PipelineContext;
 pub use blizzard_core::{GlobalConfig, KB, MB};
 pub use table_key::TableKey;
@@ -102,22 +106,6 @@ impl TableConfig {
 
 fn default_delta_checkpoint_interval() -> usize {
     10
-}
-
-fn default_max_concurrent_uploads() -> usize {
-    4
-}
-
-fn default_max_concurrent_parts() -> usize {
-    8
-}
-
-fn default_part_size_mb() -> usize {
-    10
-}
-
-fn default_min_multipart_size_mb() -> usize {
-    100
 }
 
 fn default_max_concurrent_metadata_reads() -> usize {

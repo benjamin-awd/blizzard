@@ -27,15 +27,10 @@ use blizzard_core::metrics::events::{CheckpointAge, SourceStateFiles};
 use blizzard_core::types::SourceState;
 use blizzard_core::watermark::WatermarkState;
 
+use blizzard_core::emit;
+
 use crate::error::DeltaError;
 use crate::sink::TableSink;
-
-/// Macro for emitting metrics events.
-macro_rules! emit {
-    ($event:expr) => {
-        <_ as blizzard_core::metrics::events::InternalEvent>::emit($event)
-    };
-}
 
 /// Consolidated checkpoint state protected by a single lock.
 struct CheckpointStateInner {

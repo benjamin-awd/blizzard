@@ -123,6 +123,32 @@ pub struct ErrorHandlingConfig {
     pub dlq_storage_options: HashMap<String, String>,
 }
 
+/// Default maximum concurrent upload operations.
+pub const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 4;
+/// Default maximum concurrent parts per multipart upload.
+pub const DEFAULT_MAX_CONCURRENT_PARTS: usize = 8;
+/// Default part size for multipart uploads in MB.
+pub const DEFAULT_PART_SIZE_MB: usize = 10;
+/// Default minimum file size to use multipart upload in MB.
+pub const DEFAULT_MIN_MULTIPART_SIZE_MB: usize = 100;
+
+/// Serde default for `max_concurrent_uploads`.
+pub fn default_max_concurrent_uploads() -> usize {
+    DEFAULT_MAX_CONCURRENT_UPLOADS
+}
+/// Serde default for `max_concurrent_parts`.
+pub fn default_max_concurrent_parts() -> usize {
+    DEFAULT_MAX_CONCURRENT_PARTS
+}
+/// Serde default for `part_size_mb`.
+pub fn default_part_size_mb() -> usize {
+    DEFAULT_PART_SIZE_MB
+}
+/// Serde default for `min_multipart_size_mb`.
+pub fn default_min_multipart_size_mb() -> usize {
+    DEFAULT_MIN_MULTIPART_SIZE_MB
+}
+
 /// Parquet compression codec.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
