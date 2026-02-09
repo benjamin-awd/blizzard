@@ -183,6 +183,10 @@ pub struct ParquetWriter {
     pipeline: String,
     /// Current source name for logging context.
     current_source: String,
+    /// Cumulative uncompressed bytes flushed (for compression ratio estimation).
+    total_uncompressed_flushed: usize,
+    /// Cumulative compressed bytes from flushes (for compression ratio estimation).
+    total_compressed_flushed: usize,
 }
 
 impl ParquetWriter {
@@ -218,6 +222,8 @@ impl ParquetWriter {
             current_partition_values: partition_values,
             pipeline,
             current_source: String::new(),
+            total_uncompressed_flushed: 0,
+            total_compressed_flushed: 0,
         })
     }
 
@@ -306,7 +312,7 @@ impl ParquetWriter {
         // Flush row group based on byte size
         let in_progress_size = writer.in_progress_size();
         if in_progress_size > self.config.row_group_size_bytes {
-            let buffer_len = self.buffer.len()?;
+            let buffer_before = self.buffer.len()?;
             tracing::info!(
                 target = %self.pipeline,
                 "Flushing row group: in_progress_size={} bytes ({:.2} MB), threshold={} bytes ({:.2} MB), total_records={}, row_group_records={}",
@@ -319,14 +325,26 @@ impl ParquetWriter {
             );
             writer.flush().context(ParquetWriteSnafu)?;
             self.row_group_records = 0;
+
+            // Track compression ratio from this flush
+            let buffer_after = self.buffer.len()?;
+            let compressed_delta = buffer_after - buffer_before;
+            self.total_uncompressed_flushed += in_progress_size;
+            self.total_compressed_flushed += compressed_delta;
+
             // Update bytes_written after flush
-            self.stats.bytes_written = self.buffer.len()?;
+            self.stats.bytes_written = buffer_after;
             tracing::info!(
                 target = %self.pipeline,
-                "After flush: buffer={} bytes ({:.2} MB), bytes_written={}",
-                buffer_len,
-                buffer_len as f64 / 1024.0 / 1024.0,
-                self.stats.bytes_written
+                "After flush: buffer={} bytes ({:.2} MB), bytes_written={}, compression_ratio={:.2}",
+                buffer_after,
+                buffer_after as f64 / 1024.0 / 1024.0,
+                self.stats.bytes_written,
+                if self.total_uncompressed_flushed > 0 {
+                    self.total_compressed_flushed as f64 / self.total_uncompressed_flushed as f64
+                } else {
+                    1.0
+                }
             );
         }
 
@@ -400,6 +418,8 @@ impl ParquetWriter {
         self.current_file_name = Self::generate_filename(&self.current_partition_values);
         self.stats = WriterStats::new();
         self.row_group_records = 0;
+        self.total_uncompressed_flushed = 0;
+        self.total_compressed_flushed = 0;
 
         Ok(())
     }
@@ -451,7 +471,12 @@ impl ParquetWriter {
         self.current_source = source.to_string();
     }
 
-    /// Get the current file size in bytes (including in-progress data).
+    /// Get the current estimated file size in bytes (including in-progress data).
+    ///
+    /// Applies the observed compression ratio from previous row group flushes
+    /// to estimate how large the in-progress (uncompressed) data will be once
+    /// compressed. Falls back to raw uncompressed size when no flushes have
+    /// occurred yet.
     pub fn current_file_size(&self) -> usize {
         let buffer_size = self.buffer.len().unwrap_or(0);
         let in_progress_size = self
@@ -459,7 +484,14 @@ impl ParquetWriter {
             .as_ref()
             .map(|w| w.in_progress_size())
             .unwrap_or(0);
-        buffer_size + in_progress_size
+        let estimated_in_progress = if self.total_uncompressed_flushed > 0 {
+            // ratio is always in [0, 1] so the product is non-negative and ≤ in_progress_size
+            in_progress_size * self.total_compressed_flushed / self.total_uncompressed_flushed
+        } else {
+            // No flushes yet — use uncompressed as conservative upper bound
+            in_progress_size
+        };
+        buffer_size + estimated_in_progress
     }
 }
 
@@ -635,6 +667,71 @@ mod tests {
             1,
             "rollover timeout should have triggered exactly one roll"
         );
+    }
+
+    #[test]
+    fn test_compressed_files_reach_target_size() {
+        use deltalake::arrow::array::StringArray;
+        use deltalake::arrow::datatypes::{DataType, Field, Schema};
+
+        // Build batches with low-entropy string data that compresses well,
+        // similar to real-world structured data (e.g. orderbooks).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+
+        let make_batch = |n: usize, offset: usize| {
+            let ids: Vec<String> = (0..n).map(|i| format!("id_{}", offset + i)).collect();
+            // ~200 bytes per row of repetitive structured data
+            let payloads: Vec<String> = (0..n)
+                .map(|i| format!("{{\"price\":\"12345.67\",\"qty\":\"0.001\",\"ts\":{},\"side\":\"buy\",\"exchange\":\"binance\"}}", offset + i))
+                .collect();
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(ids)),
+                    Arc::new(StringArray::from(payloads)),
+                ],
+            )
+            .unwrap()
+        };
+
+        // Use a 100KB target and 16KB row groups so the test runs fast
+        let target_size = 100 * 1024; // 100KB
+        let config = ParquetWriterConfig::default()
+            .with_rolling_policies(vec![RollingPolicy::SizeLimit(target_size)])
+            .with_row_group_size_bytes(16 * 1024) // 16KB row groups to get frequent flushes
+            .with_compression(ParquetCompression::Zstd);
+
+        let mut writer = ParquetWriter::new(schema.clone(), config, "test".to_string()).unwrap();
+
+        // Write enough data to trigger multiple file rolls.
+        // Each batch: 5000 rows × ~200 bytes ≈ 1MB uncompressed per batch.
+        for i in 0..100 {
+            let batch = make_batch(5000, i * 5000);
+            writer.write_batch(&batch).unwrap();
+        }
+
+        let finished_files = writer.take_finished_files();
+        assert!(
+            finished_files.len() >= 2,
+            "expected at least 2 rolled files, got {}",
+            finished_files.len()
+        );
+
+        // After the first file (which may not have ratio data yet), files should
+        // be within ±30% of the target size
+        for file in finished_files.iter().skip(1) {
+            let lower = target_size * 7 / 10;
+            let upper = target_size * 13 / 10;
+            assert!(
+                file.size >= lower && file.size <= upper,
+                "file size {} bytes outside ±30% of target {} bytes",
+                file.size,
+                target_size,
+            );
+        }
     }
 
     #[test]
