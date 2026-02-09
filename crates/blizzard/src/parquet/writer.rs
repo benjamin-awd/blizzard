@@ -169,8 +169,6 @@ pub struct ParquetWriter {
     current_file_name: String,
     /// Writer statistics (bytes written, records, timing).
     stats: WriterStats,
-    /// Records in the current row group (resets on flush).
-    row_group_records: usize,
     finished_files: Vec<FinishedFile>,
     /// Current partition values for file naming and metadata.
     current_partition_values: HashMap<String, String>,
@@ -208,7 +206,6 @@ impl ParquetWriter {
             buffer,
             current_file_name,
             stats: WriterStats::new(),
-            row_group_records: 0,
             finished_files: Vec::new(),
             current_partition_values: partition_values,
             pipeline,
@@ -296,7 +293,6 @@ impl ParquetWriter {
         writer.write(batch).context(ParquetWriteSnafu)?;
         self.stats.records_written += batch.num_rows();
         self.stats.last_write_at = Instant::now();
-        self.row_group_records += batch.num_rows();
 
         // Flush row group based on byte size
         let in_progress_size = writer.in_progress_size();
@@ -309,10 +305,9 @@ impl ParquetWriter {
                 self.config.row_group_size_bytes,
                 self.config.row_group_size_bytes as f64 / 1024.0 / 1024.0,
                 self.stats.records_written,
-                self.row_group_records,
+                writer.in_progress_rows(),
             );
             writer.flush().context(ParquetWriteSnafu)?;
-            self.row_group_records = 0;
 
             let bytes_written = writer.bytes_written();
             self.stats.bytes_written = bytes_written;
@@ -393,7 +388,6 @@ impl ParquetWriter {
         )?);
         self.current_file_name = Self::generate_filename(&self.current_partition_values);
         self.stats = WriterStats::new();
-        self.row_group_records = 0;
 
         Ok(())
     }
