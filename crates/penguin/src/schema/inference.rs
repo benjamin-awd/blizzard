@@ -14,6 +14,7 @@ use bytes::Bytes;
 use deltalake::arrow::datatypes::SchemaRef;
 use deltalake::parquet::arrow::parquet_to_arrow_schema;
 use deltalake::parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
+use parquet::arrow::async_reader::ParquetObjectReader;
 use tracing::{debug, warn};
 
 use blizzard_core::schema::coerce_schema;
@@ -92,20 +93,20 @@ pub async fn infer_schema_from_first_file(
     Err(last_error.unwrap_or(SchemaError::NoFilesAvailable))
 }
 
-/// Infer schema from a single file using a suffix-range read.
+/// Infer schema from a single file using a footer-only range read.
 async fn infer_schema_from_footer(
     storage: &StorageProvider,
     file_path: &str,
-    table: &str,
+    _table: &str,
 ) -> Result<SchemaRef, SchemaError> {
-    let (_, metadata) = crate::parquet::read_parquet_footer(storage, file_path, table)
+    let store = storage.object_store().clone();
+    let path = object_store::path::Path::from(file_path);
+    let qualified = storage.qualify_path(&path);
+
+    let mut reader = ParquetObjectReader::new(store, qualified.into_owned());
+    let metadata = parquet::arrow::async_reader::AsyncFileReader::get_metadata(&mut reader, None)
         .await
-        .map_err(|e| match e {
-            crate::parquet::FooterReadError::Storage(source) => SchemaError::StorageRead { source },
-            crate::parquet::FooterReadError::Parquet(source) => {
-                SchemaError::ParquetFooter { source }
-            }
-        })?;
+        .map_err(|source| SchemaError::ParquetFooter { source })?;
     schema_from_metadata(&metadata)
 }
 

@@ -22,6 +22,9 @@ deltalake = { version = "0.30", default-features = false, features = ["s3", "gcs
 # Arrow (schema types only — used by blizzard-core for shared coercion logic)
 arrow-schema = "57"
 
+# Parquet (footer-only metadata reads via object_store integration)
+parquet = { version = "57", default-features = false, features = ["object_store"] }
+
 # Arrow serialization (Value → RecordBatch without re-parse round-trip)
 serde_arrow = { version = "0.13", features = ["arrow-57"] }
 

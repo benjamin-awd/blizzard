@@ -17,10 +17,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, TryStreamExt, future::ready};
 use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
-use object_store::{
-    Attribute, AttributeValue, Attributes, GetOptions, GetRange, ObjectMeta, ObjectStore,
-    PutOptions, PutPayload,
-};
+use object_store::{Attribute, AttributeValue, Attributes, ObjectStore, PutOptions, PutPayload};
 use snafu::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -94,6 +91,14 @@ impl StorageProvider {
     /// Get the canonical URL for this storage provider.
     pub fn url(&self) -> &str {
         &self.canonical_url
+    }
+
+    /// Get the underlying object store.
+    ///
+    /// Use [`Self::qualify_path`] to convert relative paths to absolute
+    /// paths before calling methods on the returned store.
+    pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
+        &self.object_store
     }
 
     /// Create a storage provider for the given URL with storage options.
@@ -199,47 +204,6 @@ impl StorageProvider {
             .await
             .context(ObjectStoreSnafu)?;
         Ok(bytes)
-    }
-
-    /// Fetch the last `suffix_bytes` of a file in a single request.
-    ///
-    /// Returns both the full file metadata (including total size) and the
-    /// trailing bytes. Uses `GetRange::Suffix` which maps to an HTTP
-    /// `Range: bytes=-N` header — one round-trip instead of HEAD + GET.
-    pub async fn get_suffix(
-        &self,
-        path: impl Into<Path>,
-        suffix_bytes: u64,
-    ) -> Result<(ObjectMeta, Bytes), StorageError> {
-        let path = path.into();
-        let start = Instant::now();
-        let opts = GetOptions {
-            range: Some(GetRange::Suffix(suffix_bytes)),
-            ..Default::default()
-        };
-        let result = self
-            .object_store
-            .get_opts(&self.qualify_path(&path), opts)
-            .await;
-
-        let status = if result.is_ok() {
-            RequestStatus::Success
-        } else {
-            RequestStatus::Error
-        };
-        emit!(StorageRequest {
-            operation: StorageOperation::GetSuffix,
-            status,
-        });
-        emit!(StorageRequestDuration {
-            operation: StorageOperation::GetSuffix,
-            duration: start.elapsed(),
-        });
-
-        let get_result = result.context(ObjectStoreSnafu)?;
-        let meta = get_result.meta.clone();
-        let bytes = get_result.bytes().await.context(ObjectStoreSnafu)?;
-        Ok((meta, bytes))
     }
 
     /// Put bytes to a path.

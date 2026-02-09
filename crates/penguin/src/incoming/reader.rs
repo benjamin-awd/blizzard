@@ -263,27 +263,34 @@ impl IncomingReader {
 
     /// Read metadata from a parquet file and create a FinishedFile.
     ///
-    /// Fetches only the file footer (~64 KB) via a single suffix-range
-    /// request instead of downloading the entire file (10-100 MB).
-    /// Falls back to full download if footer parsing fails.
+    /// Uses `ParquetObjectReader` to fetch only the parquet footer via
+    /// suffix-range requests instead of downloading the entire file.
     pub async fn read_parquet_metadata(
         &self,
         incoming: &IncomingFile,
     ) -> Result<FinishedFile, IncomingError> {
-        let (file_size, metadata) =
-            crate::parquet::read_parquet_footer(&self.storage, incoming.path.as_str(), &self.table)
+        let store = self.storage.object_store().clone();
+        let path = object_store::path::Path::from(incoming.path.as_str());
+        let qualified = self.storage.qualify_path(&path);
+
+        let meta = store
+            .head(&qualified)
+            .await
+            .map_err(|source| IncomingError::Read {
+                path: incoming.path.clone(),
+                source: blizzard_core::error::StorageError::ObjectStore { source },
+            })?;
+        let file_size = meta.size;
+
+        let mut reader =
+            parquet::arrow::async_reader::ParquetObjectReader::new(store, qualified.into_owned())
+                .with_file_size(file_size);
+        let metadata =
+            parquet::arrow::async_reader::AsyncFileReader::get_metadata(&mut reader, None)
                 .await
-                .map_err(|e| match e {
-                    crate::parquet::FooterReadError::Storage(source) => IncomingError::Read {
-                        path: incoming.path.clone(),
-                        source,
-                    },
-                    crate::parquet::FooterReadError::Parquet(source) => {
-                        IncomingError::ParquetMetadata {
-                            path: incoming.path.clone(),
-                            source,
-                        }
-                    }
+                .map_err(|source| IncomingError::ParquetMetadata {
+                    path: incoming.path.clone(),
+                    source,
                 })?;
 
         let record_count = usize::try_from(metadata.file_metadata().num_rows()).unwrap_or(0);
@@ -301,8 +308,7 @@ impl IncomingReader {
 
         Ok(FinishedFile::without_bytes(
             incoming.path.clone(),
-            // u64 → usize: lossless on 64-bit, saturates on 32-bit
-            file_size.try_into().unwrap_or(usize::MAX),
+            usize::try_from(file_size).expect("64-bit platform required"),
             record_count,
             partition_values,
             None, // No source file for external writes

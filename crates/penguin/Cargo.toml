@@ -17,6 +17,9 @@ blizzard-core = { workspace = true }
 # Delta Lake
 deltalake = { workspace = true }
 
+# Parquet (footer-only metadata reads)
+parquet = { workspace = true }
+
 # Object storage
 object_store = { workspace = true }
 
