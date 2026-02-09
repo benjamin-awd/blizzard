@@ -41,7 +41,7 @@ pipelines:
         assert_eq!(pipeline.schema.fields.len(), 4);
 
         // Test schema conversion
-        let arrow_schema = pipeline.schema.to_arrow_schema();
+        let arrow_schema = pipeline.schema.to_arrow_schema().unwrap();
         assert_eq!(arrow_schema.fields().len(), 4);
         assert_eq!(arrow_schema.field(0).name(), "id");
         assert_eq!(arrow_schema.field(0).data_type(), &DataType::Utf8);
@@ -102,7 +102,7 @@ pipelines:
             );
             let config: blizzard::config::Config = serde_yaml::from_str(&yaml).unwrap();
             let (_, pipeline) = config.pipelines.iter().next().unwrap();
-            let schema = pipeline.schema.to_arrow_schema();
+            let schema = pipeline.schema.to_arrow_schema().unwrap();
             assert_eq!(
                 schema.field(0).data_type(),
                 &expected_arrow,

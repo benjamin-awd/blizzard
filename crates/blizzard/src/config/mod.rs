@@ -275,17 +275,19 @@ pub struct SchemaConfig {
 }
 
 impl SchemaConfig {
-    /// Convert to Arrow Schema. Panics if schema is set to infer mode.
-    pub fn to_arrow_schema(&self) -> SchemaRef {
+    /// Convert to Arrow Schema. Returns an error if schema is set to infer mode.
+    pub fn to_arrow_schema(&self) -> Result<SchemaRef, ConfigError> {
         if self.infer {
-            panic!("Cannot convert infer schema config to Arrow schema")
+            return Err(ConfigError::Internal {
+                message: "Cannot convert infer schema config to Arrow schema".to_string(),
+            });
         }
         let arrow_fields: Vec<Field> = self
             .fields
             .iter()
             .map(|f| Field::new(&f.name, f.field_type.to_arrow_type(), f.nullable))
             .collect();
-        Arc::new(Schema::new(arrow_fields))
+        Ok(Arc::new(Schema::new(arrow_fields)))
     }
 }
 
