@@ -47,6 +47,8 @@ const PARQUET_EXTENSION: &str = ".parquet";
 pub struct IncomingConfig {
     /// Partition filter for cold start (no watermark yet).
     pub partition_filter: Option<PartitionFilterConfig>,
+    /// Extractor for partition values from file paths.
+    pub partition_extractor: PartitionExtractor,
 }
 
 /// Information about an incoming file discovered in the table directory.
@@ -243,7 +245,7 @@ impl IncomingReader {
             .sum();
 
         // Parse partition values from path
-        let partition_values = PartitionExtractor::all().extract(&incoming.path);
+        let partition_values = self.config.partition_extractor.extract(&incoming.path);
 
         debug!(
             target = %self.table,
@@ -378,7 +380,8 @@ mod tests {
             storage.clone(),
             "test".to_string(),
             IncomingConfig {
-                partition_filter: None, // No filter for this test
+                partition_filter: None,
+                partition_extractor: PartitionExtractor::all(),
             },
         );
 
@@ -431,6 +434,7 @@ mod tests {
             "test".to_string(),
             IncomingConfig {
                 partition_filter: None,
+                partition_extractor: PartitionExtractor::all(),
             },
         );
 

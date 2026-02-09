@@ -25,6 +25,27 @@ fn default_poll_interval() -> u64 {
     10
 }
 
+/// Partition-by configuration: either a list of column names or a
+/// template-based config with a `prefix_template` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PenguinPartitionBy {
+    /// List of partition column names (e.g., `[year, month, day, exchange, symbol]`).
+    List(Vec<String>),
+    /// Template-based config with `prefix_template` (backward compatible).
+    Template(PartitionByConfig),
+}
+
+impl PenguinPartitionBy {
+    /// Return the partition column names for this configuration.
+    pub fn partition_columns(&self) -> Vec<String> {
+        match self {
+            PenguinPartitionBy::List(cols) => cols.clone(),
+            PenguinPartitionBy::Template(config) => config.partition_columns(),
+        }
+    }
+}
+
 /// Configuration for a Delta table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,8 +55,11 @@ pub struct TableConfig {
     /// Poll interval in seconds for checking new files.
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Partition configuration with strftime-style prefix template.
-    pub partition_by: Option<PartitionByConfig>,
+    /// Partition configuration: either a list of column names or a template config.
+    pub partition_by: Option<PenguinPartitionBy>,
+    /// Path template for extracting column values from positional path segments.
+    /// E.g., `"year=%Y/month=%m/day=%d/host={host}/exchange={exchange}/symbol={symbol}"`.
+    pub path_columns: Option<String>,
     /// Delta checkpoint interval (number of commits between checkpoints).
     #[serde(default = "default_delta_checkpoint_interval")]
     pub delta_checkpoint_interval: usize,
@@ -343,6 +367,7 @@ tables:
             table_uri: "gs://bucket/my_table".to_string(),
             poll_interval_secs: 10,
             partition_by: None,
+            path_columns: None,
             delta_checkpoint_interval: 10,
             max_concurrent_uploads: 4,
             max_concurrent_parts: 8,
@@ -422,7 +447,7 @@ tables:
     }
 
     #[test]
-    fn test_partition_by_config_yaml_parsing() {
+    fn test_partition_by_template_yaml_parsing() {
         let yaml = r#"
 tables:
   events:
@@ -434,8 +459,49 @@ tables:
         let (_, table) = config.tables().next().unwrap();
 
         let partition_by = table.partition_by.as_ref().unwrap();
-        assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
+        assert!(matches!(partition_by, PenguinPartitionBy::Template(_)));
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
+    }
+
+    #[test]
+    fn test_partition_by_list_yaml_parsing() {
+        let yaml = r#"
+tables:
+  logs:
+    table_uri: s3://bucket/logs
+    partition_by: [year, month, day, category, source]
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        let partition_by = table.partition_by.as_ref().unwrap();
+        assert!(matches!(partition_by, PenguinPartitionBy::List(_)));
+        assert_eq!(
+            partition_by.partition_columns(),
+            vec!["year", "month", "day", "category", "source"]
+        );
+    }
+
+    #[test]
+    fn test_path_columns_yaml_parsing() {
+        let yaml = r#"
+tables:
+  logs:
+    table_uri: s3://bucket/logs
+    path_columns: "year=%Y/month=%m/day=%d/region={region}/category={category}/source={source}"
+    partition_by: [year, month, day, category, source]
+"#;
+        let config = Config::parse(yaml).unwrap();
+        let (_, table) = config.tables().next().unwrap();
+
+        assert_eq!(
+            table.path_columns.as_deref(),
+            Some("year=%Y/month=%m/day=%d/region={region}/category={category}/source={source}")
+        );
+        assert!(matches!(
+            table.partition_by.as_ref().unwrap(),
+            PenguinPartitionBy::List(_)
+        ));
     }
 
     #[test]

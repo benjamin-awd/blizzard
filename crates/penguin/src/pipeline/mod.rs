@@ -15,7 +15,8 @@ use tracing::{debug, info};
 
 use blizzard_core::polling::{IterationResult, PollingProcessor, run_polling_loop};
 use blizzard_core::{
-    FinishedFile, PipelineContext, StoragePoolRef, StorageProvider, get_or_create_storage,
+    FinishedFile, PartitionExtractor, PipelineContext, StoragePoolRef, StorageProvider,
+    get_or_create_storage,
 };
 
 use crate::emit;
@@ -141,21 +142,31 @@ impl Processor {
             uri: table_config.table_uri.clone(),
         })?;
 
+        // Build partition extractor from config
+        let partition_columns = table_config
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
+
+        let partition_extractor = match &table_config.path_columns {
+            Some(template) => {
+                PartitionExtractor::from_template(template, Some(partition_columns.clone()))
+            }
+            None => PartitionExtractor::all(),
+        };
+
         // Create file reader for discovering uncommitted parquet files
         let file_reader = IncomingReader::new(
             sink_storage.clone(),
             table_key.id().to_string(),
             IncomingConfig {
                 partition_filter: table_config.partition_filter.clone(),
+                partition_extractor,
             },
         );
 
         // Try to open existing Delta table without creating it
-        let partition_columns = table_config
-            .partition_by
-            .as_ref()
-            .map(|p| p.partition_columns())
-            .unwrap_or_default();
         let delta_sink = match DeltaSink::try_open(
             &sink_storage,
             partition_columns.clone(),

@@ -12,6 +12,7 @@ use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
+use blizzard_core::PartitionExtractor;
 use blizzard_core::storage::StorageProvider;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::incoming::{IncomingConfig, IncomingReader};
@@ -78,6 +79,7 @@ async fn test_discover_and_commit_pipeline() {
         "e2e-test".to_string(),
         IncomingConfig {
             partition_filter: None,
+            partition_extractor: PartitionExtractor::all(),
         },
     );
 
@@ -235,6 +237,7 @@ async fn test_checkpoint_coordinator_with_delta_sink() {
         "coord-test".to_string(),
         IncomingConfig {
             partition_filter: None,
+            partition_extractor: PartitionExtractor::all(),
         },
     );
 
