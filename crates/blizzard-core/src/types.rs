@@ -78,9 +78,7 @@ pub struct SourceState {
 impl SourceState {
     /// Create a new empty source state.
     pub fn new() -> Self {
-        Self {
-            files: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Mark a file as finished.
