@@ -136,7 +136,7 @@ pub fn expand_include_prefixes(
         let mut combos: Vec<Vec<String>> = vec![vec![]];
         let mut hit_gap = false;
 
-        for (i, seg) in segments.iter().enumerate() {
+        for seg in &segments {
             if let Some(key) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
                 if !hit_gap {
                     if let Some(values) = include.get(key) {
@@ -169,11 +169,6 @@ pub fn expand_include_prefixes(
                 for combo in &mut combos {
                     combo.push(seg.to_string());
                 }
-            } else {
-                // Literal segment after gap: stop extending, but we already
-                // capture remaining {key} filters above. Nothing to do for
-                // literal segments after the gap.
-                let _ = i; // satisfy unused variable
             }
         }
 
