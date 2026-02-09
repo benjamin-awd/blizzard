@@ -313,14 +313,14 @@ impl PollingProcessor for Processor {
         }
 
         // Read parquet metadata with bounded concurrency.
-        // Each read fetches only the parquet footer (~64 KB) via a single suffix-range request.
-        const MAX_CONCURRENT_METADATA_READS: usize = 32;
+        // buffer_unordered: results may arrive out of order, which is fine since
+        // we zip them back with `uncommitted` by index below.
         let futs: Vec<_> = uncommitted
             .iter()
             .map(|incoming| self.file_reader.read_parquet_metadata(incoming))
             .collect();
         let metadata_results: Vec<_> = futures::stream::iter(futs)
-            .buffer_unordered(MAX_CONCURRENT_METADATA_READS)
+            .buffer_unordered(self.table_config.max_concurrent_metadata_reads)
             .collect()
             .await;
 

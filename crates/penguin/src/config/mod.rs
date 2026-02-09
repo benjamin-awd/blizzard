@@ -81,6 +81,9 @@ pub struct TableConfig {
     /// Schema evolution mode: "strict", "merge" (default), or "overwrite".
     #[serde(default)]
     pub schema_evolution: SchemaEvolutionMode,
+    /// Maximum concurrent parquet metadata reads per poll cycle.
+    #[serde(default = "default_max_concurrent_metadata_reads")]
+    pub max_concurrent_metadata_reads: usize,
     /// Partition filter for cold start when no watermark exists yet.
     /// Uses strftime-style templates for date-based filtering.
     /// E.g., `prefix_template: "date=%Y-%m-%d"` with `lookback: 7` scans last 7 days.
@@ -115,6 +118,10 @@ fn default_part_size_mb() -> usize {
 
 fn default_min_multipart_size_mb() -> usize {
     100
+}
+
+fn default_max_concurrent_metadata_reads() -> usize {
+    32
 }
 
 /// Main configuration for penguin.
@@ -375,6 +382,7 @@ tables:
             min_multipart_size_mb: 100,
             storage_options: HashMap::new(),
             schema_evolution: Default::default(),
+            max_concurrent_metadata_reads: 32,
             partition_filter: None,
         };
 
