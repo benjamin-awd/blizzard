@@ -63,6 +63,10 @@ macro_rules! impl_mergeable {
                 &mut self.metrics
             }
 
+            fn into_components(self) -> ::indexmap::IndexMap<Self::Key, Self::Component> {
+                self.$field
+            }
+
             fn validate(&self) -> Result<(), $crate::error::ConfigError> {
                 self.validate_config()
             }
@@ -77,6 +81,7 @@ pub trait Mergeable: Sized + Default + DeserializeOwned {
 
     fn components(&self) -> &IndexMap<Self::Key, Self::Component>;
     fn components_mut(&mut self) -> &mut IndexMap<Self::Key, Self::Component>;
+    fn into_components(self) -> IndexMap<Self::Key, Self::Component>;
     fn global(&self) -> &GlobalConfig;
     fn global_mut(&mut self) -> &mut GlobalConfig;
     fn metrics(&self) -> &MetricsConfig;
@@ -134,6 +139,11 @@ pub trait Mergeable: Sized + Default + DeserializeOwned {
         self.global_mut().merge_from(other.global());
         self.metrics_mut().merge_from(other.metrics());
         Ok(())
+    }
+
+    /// Consume the config and return the first component, if any.
+    fn into_first(self) -> Option<Self::Component> {
+        self.into_components().into_values().next()
     }
 
     /// Build pipeline instances from config components.

@@ -634,13 +634,8 @@ pipelines:
 "#;
 
     /// Parse YAML and return the first pipeline's config.
-    fn first_pipeline(yaml: &str) -> PipelineConfig {
-        Config::parse(yaml)
-            .unwrap()
-            .pipelines
-            .into_values()
-            .next()
-            .unwrap()
+    fn parse_first(yaml: &str) -> PipelineConfig {
+        Config::parse(yaml).unwrap().into_first().unwrap()
     }
 
     /// Assert that parsing the given YAML produces an error containing all substrings.
@@ -686,24 +681,24 @@ pipelines:
     /// Builder for single-pipeline test YAML. Defaults match `MINIMAL_YAML`.
     struct TestPipeline {
         source_path: String,
-        source_extra: String,
+        source_lines: String,
         sink_uri: String,
-        sink_extra: String,
+        sink_lines: String,
         schema: String,
-        pipeline_extra: String,
-        top_extra: String,
+        pipeline_lines: String,
+        top_level_lines: String,
     }
 
     impl Default for TestPipeline {
         fn default() -> Self {
             Self {
                 source_path: "gs://bucket/raw".into(),
-                source_extra: String::new(),
+                source_lines: String::new(),
                 sink_uri: "gs://bucket/delta/events".into(),
-                sink_extra: String::new(),
+                sink_lines: String::new(),
                 schema: "fields:\n  - name: id\n    type: string".into(),
-                pipeline_extra: String::new(),
-                top_extra: String::new(),
+                pipeline_lines: String::new(),
+                top_level_lines: String::new(),
             }
         }
     }
@@ -713,16 +708,16 @@ pipelines:
             self.source_path = p.into();
             self
         }
-        fn source_extra(mut self, s: &str) -> Self {
-            self.source_extra = s.into();
+        fn source(mut self, s: &str) -> Self {
+            self.source_lines = s.into();
             self
         }
         fn sink_uri(mut self, u: &str) -> Self {
             self.sink_uri = u.into();
             self
         }
-        fn sink_extra(mut self, s: &str) -> Self {
-            self.sink_extra = s.into();
+        fn sink(mut self, s: &str) -> Self {
+            self.sink_lines = s.into();
             self
         }
         fn schema(mut self, s: &str) -> Self {
@@ -732,33 +727,33 @@ pipelines:
         fn schema_infer(self) -> Self {
             self.schema("infer: true")
         }
-        fn pipeline_extra(mut self, s: &str) -> Self {
-            self.pipeline_extra = s.into();
+        fn pipeline(mut self, s: &str) -> Self {
+            self.pipeline_lines = s.into();
             self
         }
-        fn top_extra(mut self, s: &str) -> Self {
-            self.top_extra = s.into();
+        fn top_level(mut self, s: &str) -> Self {
+            self.top_level_lines = s.into();
             self
         }
 
         fn build(&self) -> String {
             let mut y = String::from("pipelines:\n  events:\n    sources:\n      default:\n");
             append_indented(&mut y, &format!("path: {}", self.source_path), 8);
-            if !self.source_extra.is_empty() {
-                append_indented(&mut y, &self.source_extra, 8);
+            if !self.source_lines.is_empty() {
+                append_indented(&mut y, &self.source_lines, 8);
             }
             y.push_str("    sink:\n");
             append_indented(&mut y, &format!("table_uri: {}", self.sink_uri), 6);
-            if !self.sink_extra.is_empty() {
-                append_indented(&mut y, &self.sink_extra, 6);
+            if !self.sink_lines.is_empty() {
+                append_indented(&mut y, &self.sink_lines, 6);
             }
             y.push_str("    schema:\n");
             append_indented(&mut y, &self.schema, 6);
-            if !self.pipeline_extra.is_empty() {
-                append_indented(&mut y, &self.pipeline_extra, 4);
+            if !self.pipeline_lines.is_empty() {
+                append_indented(&mut y, &self.pipeline_lines, 4);
             }
-            if !self.top_extra.is_empty() {
-                append_indented(&mut y, &self.top_extra, 0);
+            if !self.top_level_lines.is_empty() {
+                append_indented(&mut y, &self.top_level_lines, 0);
             }
             y
         }
@@ -777,8 +772,8 @@ pipelines:
     fn test_single_pipeline_parse() {
         let yaml = TestPipeline::default()
             .source_path("gs://bucket/raw-data")
-            .source_extra("compression: gzip")
-            .sink_extra("file_size_mb: 128")
+            .source("compression: gzip")
+            .sink("file_size_mb: 128")
             .build();
         let config = Config::parse(&yaml).unwrap();
         assert_eq!(config.pipelines.len(), 1);
@@ -958,7 +953,7 @@ pipelines:
 
     #[test]
     fn test_source_config_defaults() {
-        let pipeline = first_pipeline(MINIMAL_YAML);
+        let pipeline = parse_first(MINIMAL_YAML);
         let source = pipeline.sources.get("default").unwrap();
         assert_eq!(source.batch_size, 8192);
         assert_eq!(source.poll_interval_secs, 60);
@@ -968,7 +963,7 @@ pipelines:
 
     #[test]
     fn test_sink_config_defaults() {
-        let pipeline = first_pipeline(MINIMAL_YAML);
+        let pipeline = parse_first(MINIMAL_YAML);
         assert_eq!(pipeline.sink.file_size_mb, 128);
         assert_eq!(pipeline.sink.row_group_size_bytes, 128 * MB);
         assert!(pipeline.sink.partition_by.is_none());
@@ -978,9 +973,9 @@ pipelines:
     #[test]
     fn test_sink_config_rollover_timeout() {
         let yaml = TestPipeline::default()
-            .sink_extra("rollover_timeout_secs: 300")
+            .sink("rollover_timeout_secs: 300")
             .build();
-        assert_eq!(first_pipeline(&yaml).sink.rollover_timeout_secs, Some(300));
+        assert_eq!(parse_first(&yaml).sink.rollover_timeout_secs, Some(300));
     }
 
     #[test]
@@ -988,7 +983,7 @@ pipelines:
         let yaml = TestPipeline::default()
             .source_path("gs://bucket/raw-events")
             .build();
-        let resources = first_pipeline(&yaml).resources();
+        let resources = parse_first(&yaml).resources();
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
@@ -1012,7 +1007,7 @@ pipelines:
     schema:
       infer: true
 "#;
-        let resources = first_pipeline(yaml).resources();
+        let resources = parse_first(yaml).resources();
         assert_eq!(resources.len(), 3);
         assert!(resources.contains(&Resource::directory("gs://bucket/asia/events")));
         assert!(resources.contains(&Resource::directory("gs://bucket/europe/events")));
@@ -1025,7 +1020,7 @@ pipelines:
             .source_path("gs://bucket/raw-events/")
             .sink_uri("gs://bucket/delta/events/")
             .build();
-        let resources = first_pipeline(&yaml).resources();
+        let resources = parse_first(&yaml).resources();
         assert_eq!(resources[0], Resource::directory("gs://bucket/raw-events"));
         assert_eq!(
             resources[1],
@@ -1080,7 +1075,7 @@ pipelines:
     #[test]
     fn test_infer_schema_valid() {
         let yaml = TestPipeline::default().schema_infer().build();
-        assert!(first_pipeline(&yaml).schema.is_infer());
+        assert!(parse_first(&yaml).schema.is_infer());
     }
 
     #[test]
@@ -1124,9 +1119,9 @@ pipelines:
     #[test]
     fn test_partition_by_config_yaml_parsing() {
         let yaml = TestPipeline::default()
-            .sink_extra("partition_by:\n  prefix_template: \"date=%Y-%m-%d\"")
+            .sink("partition_by:\n  prefix_template: \"date=%Y-%m-%d\"")
             .build();
-        let pipeline = first_pipeline(&yaml);
+        let pipeline = parse_first(&yaml);
         let partition_by = pipeline.sink.partition_by.as_ref().unwrap();
         assert_eq!(partition_by.prefix_template, "date=%Y-%m-%d");
         assert_eq!(partition_by.partition_columns(), vec!["date"]);
@@ -1135,7 +1130,7 @@ pipelines:
     #[test]
     fn test_unknown_field_rejected_in_source() {
         let yaml = TestPipeline::default()
-            .source_extra("batchsize: 100")
+            .source("batchsize: 100")
             .schema_infer()
             .build();
         assert_parse_err(&yaml, &["unknown field"]);
@@ -1144,7 +1139,7 @@ pipelines:
     #[test]
     fn test_unknown_field_rejected_in_sink() {
         let yaml = TestPipeline::default()
-            .sink_extra("filesize: 128")
+            .sink("filesize: 128")
             .schema_infer()
             .build();
         assert_parse_err(&yaml, &["unknown field"]);
@@ -1154,7 +1149,7 @@ pipelines:
     fn test_unknown_field_rejected_in_pipeline() {
         let yaml = TestPipeline::default()
             .schema_infer()
-            .pipeline_extra("unknown_key: value")
+            .pipeline("unknown_key: value")
             .build();
         assert_parse_err(&yaml, &["unknown field"]);
     }
@@ -1163,7 +1158,7 @@ pipelines:
     fn test_unknown_field_rejected_at_top_level() {
         let yaml = TestPipeline::default()
             .schema_infer()
-            .top_extra("unknown_top_level: value")
+            .top_level("unknown_top_level: value")
             .build();
         assert_parse_err(&yaml, &["unknown field"]);
     }
@@ -1208,7 +1203,7 @@ pipelines:
 
     #[test]
     fn test_use_watermark_default_false() {
-        let source = first_pipeline(MINIMAL_YAML)
+        let source = parse_first(MINIMAL_YAML)
             .sources
             .into_values()
             .next()
@@ -1219,14 +1214,9 @@ pipelines:
     #[test]
     fn test_use_watermark_enabled() {
         let yaml = TestPipeline::default()
-            .source_extra(
-                "use_watermark: true\n\
-                 partition_filter:\n\
-                 \x20 prefix_template: \"date=%Y-%m-%d\"\n\
-                 \x20 lookback: 2",
-            )
+            .source("use_watermark: true\npartition_filter:\n  prefix_template: \"date=%Y-%m-%d\"\n  lookback: 2")
             .build();
-        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
+        let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert!(source.use_watermark);
         assert!(source.partition_filter.is_some());
     }
@@ -1234,9 +1224,9 @@ pipelines:
     #[test]
     fn test_checkpoint_config_defaults() {
         let yaml = TestPipeline::default()
-            .source_extra("use_watermark: true")
+            .source("use_watermark: true")
             .build();
-        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
+        let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 100);
         assert_eq!(source.checkpoint.interval_secs, 30);
     }
@@ -1244,14 +1234,9 @@ pipelines:
     #[test]
     fn test_checkpoint_config_custom() {
         let yaml = TestPipeline::default()
-            .source_extra(
-                "use_watermark: true\n\
-                 checkpoint:\n\
-                 \x20 interval_files: 50\n\
-                 \x20 interval_secs: 15",
-            )
+            .source("use_watermark: true\ncheckpoint:\n  interval_files: 50\n  interval_secs: 15")
             .build();
-        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
+        let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 50);
         assert_eq!(source.checkpoint.interval_secs, 15);
     }
@@ -1259,13 +1244,9 @@ pipelines:
     #[test]
     fn test_checkpoint_config_partial() {
         let yaml = TestPipeline::default()
-            .source_extra(
-                "use_watermark: true\n\
-                 checkpoint:\n\
-                 \x20 interval_files: 200",
-            )
+            .source("use_watermark: true\ncheckpoint:\n  interval_files: 200")
             .build();
-        let source = first_pipeline(&yaml).sources.into_values().next().unwrap();
+        let source = parse_first(&yaml).sources.into_values().next().unwrap();
         assert_eq!(source.checkpoint.interval_files, 200);
         assert_eq!(source.checkpoint.interval_secs, 30);
     }

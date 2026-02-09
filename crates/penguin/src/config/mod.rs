@@ -231,13 +231,8 @@ mod tests {
     const MINIMAL_YAML: &str = "tables:\n  events:\n    table_uri: gs://bucket/events\n";
 
     /// Parse YAML and return the first table's config.
-    fn first_table(yaml: &str) -> TableConfig {
-        Config::parse(yaml)
-            .unwrap()
-            .tables
-            .into_values()
-            .next()
-            .unwrap()
+    fn parse_first(yaml: &str) -> TableConfig {
+        Config::parse(yaml).unwrap().into_first().unwrap()
     }
 
     /// Assert that parsing the given YAML produces an error containing all substrings.
@@ -340,7 +335,7 @@ tables:
 
     #[test]
     fn test_table_config_defaults() {
-        let table = first_table(MINIMAL_YAML);
+        let table = parse_first(MINIMAL_YAML);
 
         assert_eq!(table.poll_interval_secs, 10);
         assert_eq!(table.delta_checkpoint_interval, 10);
@@ -368,7 +363,7 @@ tables:
             "gs://bucket/events",
             "partition_filter:\n  prefix_template: \"date=%Y-%m-%d\"\n  lookback: 7",
         );
-        let table = first_table(&yaml);
+        let table = parse_first(&yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.prefix_template, "date=%Y-%m-%d");
@@ -378,16 +373,17 @@ tables:
 
     #[test]
     fn test_partition_filter_include_single_string() {
-        let yaml = table_yaml(
-            "telemetry",
-            "s3://bucket/data/telemetry",
-            "partition_filter:\n\
-             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
-             \x20 lookback: 0\n\
-             \x20 include:\n\
-             \x20   region: \"us-east-1\"",
-        );
-        let table = first_table(&yaml);
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        region: "us-east-1"
+"#;
+        let table = parse_first(yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         let region = filter.include.get("region").unwrap();
@@ -396,19 +392,20 @@ tables:
 
     #[test]
     fn test_partition_filter_include_list() {
-        let yaml = table_yaml(
-            "telemetry",
-            "s3://bucket/data/telemetry",
-            "partition_filter:\n\
-             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
-             \x20 lookback: 0\n\
-             \x20 include:\n\
-             \x20   host:\n\
-             \x20     - \"web-prod-01\"\n\
-             \x20     - \"web-prod-02\"\n\
-             \x20   category: [\"events\", \"metrics\"]",
-        );
-        let table = first_table(&yaml);
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        host:
+          - "web-prod-01"
+          - "web-prod-02"
+        category: ["events", "metrics"]
+"#;
+        let table = parse_first(yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         let host = filter.include.get("host").unwrap();
@@ -419,20 +416,21 @@ tables:
 
     #[test]
     fn test_partition_filter_include_mixed() {
-        let yaml = table_yaml(
-            "telemetry",
-            "s3://bucket/data/telemetry",
-            "partition_filter:\n\
-             \x20 prefix_template: \"%Y/%m/%d/{host}/{region}/{category}\"\n\
-             \x20 lookback: 0\n\
-             \x20 include:\n\
-             \x20   host:\n\
-             \x20     - \"web-prod-01\"\n\
-             \x20     - \"web-prod-02\"\n\
-             \x20   region: \"us-east-1\"\n\
-             \x20   category: [\"events\", \"metrics\"]",
-        );
-        let table = first_table(&yaml);
+        let yaml = r#"
+tables:
+  telemetry:
+    table_uri: s3://bucket/data/telemetry
+    partition_filter:
+      prefix_template: "%Y/%m/%d/{host}/{region}/{category}"
+      lookback: 0
+      include:
+        host:
+          - "web-prod-01"
+          - "web-prod-02"
+        region: "us-east-1"
+        category: ["events", "metrics"]
+"#;
+        let table = parse_first(yaml);
 
         let filter = table.partition_filter.as_ref().unwrap();
         assert_eq!(filter.include.len(), 3);
@@ -478,7 +476,7 @@ tables:
             "gs://bucket/events",
             "partition_by:\n  prefix_template: \"date=%Y-%m-%d\"",
         );
-        let table = first_table(&yaml);
+        let table = parse_first(&yaml);
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::Template(_)));
@@ -492,7 +490,7 @@ tables:
             "s3://bucket/logs",
             "partition_by: [year, month, day, category, source]",
         );
-        let table = first_table(&yaml);
+        let table = parse_first(&yaml);
 
         let partition_by = table.partition_by.as_ref().unwrap();
         assert!(matches!(partition_by, PenguinPartitionBy::List(_)));
@@ -510,7 +508,7 @@ tables:
             "path_columns: \"year=%Y/month=%m/day=%d/region={region}/category={category}/source={source}\"\n\
              partition_by: [year, month, day, category, source]",
         );
-        let table = first_table(&yaml);
+        let table = parse_first(&yaml);
 
         assert_eq!(
             table.path_columns.as_deref(),
