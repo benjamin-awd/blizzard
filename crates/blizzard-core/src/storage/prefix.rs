@@ -131,7 +131,6 @@ pub fn expand_include_prefixes(
 
         // Find how far we can extend: walk segments, substituting {key} with
         // include values until we hit a {key} without a match.
-        let fixed_parts: Vec<String> = Vec::new();
         // Accumulates the cartesian product of all substituted segments so far.
         // Each entry is a vector of segments.
         let mut combos: Vec<Vec<String>> = vec![vec![]];
@@ -179,11 +178,8 @@ pub fn expand_include_prefixes(
         }
 
         // Build the final expanded prefixes from combos
-        // Prepend fixed_parts if any (there won't be since we push into combos)
         for combo in combos {
-            let mut parts = fixed_parts.clone();
-            parts.extend(combo);
-            result.push(parts.join("/"));
+            result.push(combo.join("/"));
         }
     }
 
