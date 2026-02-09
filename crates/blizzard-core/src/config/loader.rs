@@ -71,10 +71,8 @@ pub trait Mergeable: Sized + Default + DeserializeOwned {
             self.components_mut().insert(key, component);
         }
 
-        self.global_mut()
-            .merge_from(&std::mem::take(other.global_mut()));
-        self.metrics_mut()
-            .merge_from(&std::mem::take(other.metrics_mut()));
+        self.global_mut().merge_from(other.global());
+        self.metrics_mut().merge_from(other.metrics());
         Ok(())
     }
 
