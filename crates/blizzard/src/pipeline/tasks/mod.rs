@@ -392,6 +392,107 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].1, "b.json");
     }
+
+    /// Helper that simulates the success/failure handling from Downloader::run.
+    ///
+    /// On success: drain_contiguous results are collected (mark_processed would be called).
+    /// On failure: drain_contiguous results are discarded (mark_processed is NOT called).
+    ///
+    /// Returns the list of files that would have mark_processed called.
+    fn simulate_completions(
+        assigned: &[&str],
+        results: &[(&str, bool)], // (path, success) in completion order
+    ) -> Vec<String> {
+        let mut tracker = CompletionTracker::new();
+        for path in assigned {
+            tracker.assign("src", path);
+        }
+
+        let mut processed = Vec::new();
+        for &(path, success) in results {
+            tracker.mark_completed(path);
+            if success {
+                for (_source, path) in tracker.drain_contiguous() {
+                    processed.push(path);
+                }
+            } else {
+                // Discard drain results — mirrors Downloader::run failure path
+                tracker.drain_contiguous();
+            }
+        }
+        processed
+    }
+
+    /// Mid-batch failure: watermark advances past the failed file.
+    /// B fails between two successes — B is NOT in the processed list.
+    #[test]
+    fn test_mid_batch_failure_advances_watermark_past_failed_file() {
+        let processed = simulate_completions(
+            &["a.json", "b.json", "c.json"],
+            &[
+                ("a.json", true),  // success → processed
+                ("b.json", false), // failure → skipped
+                ("c.json", true),  // success → processed
+            ],
+        );
+
+        assert_eq!(processed, vec!["a.json", "c.json"]);
+        // Watermark would be at c.json — b.json is below it and won't be
+        // reprocessed on restart. It goes to the DLQ instead.
+    }
+
+    /// Tail failure: watermark stops before the failed file.
+    /// The failed file WILL be reprocessed on restart.
+    #[test]
+    fn test_tail_failure_allows_reprocessing_on_restart() {
+        let processed = simulate_completions(
+            &["a.json", "b.json", "c.json"],
+            &[
+                ("a.json", true),  // success → processed
+                ("b.json", true),  // success → processed
+                ("c.json", false), // failure → skipped
+            ],
+        );
+
+        assert_eq!(processed, vec!["a.json", "b.json"]);
+        // Watermark would be at b.json — c.json is above it and will be
+        // reprocessed on restart.
+    }
+
+    /// Head failure: first file fails, subsequent successes advance past it.
+    #[test]
+    fn test_head_failure_skipped_by_subsequent_successes() {
+        let processed = simulate_completions(
+            &["a.json", "b.json", "c.json"],
+            &[
+                ("a.json", false), // failure → skipped
+                ("b.json", true),  // success → processed
+                ("c.json", true),  // success → processed
+            ],
+        );
+
+        assert_eq!(processed, vec!["b.json", "c.json"]);
+        // Watermark would be at c.json — a.json is below it and won't be
+        // reprocessed on restart.
+    }
+
+    /// Out-of-order completion with failure: C completes first (success),
+    /// then B fails, unblocking drain of B (discarded) and C (also discarded).
+    #[test]
+    fn test_out_of_order_failure_discards_subsequent_completed() {
+        let processed = simulate_completions(
+            &["a.json", "b.json", "c.json"],
+            &[
+                ("a.json", true),  // success → drains a
+                ("c.json", true),  // success → c completed but b blocks drain
+                ("b.json", false), // failure → drains b,c but discards both
+            ],
+        );
+
+        assert_eq!(processed, vec!["a.json"]);
+        // Watermark would be at a.json — both b.json and c.json are above it.
+        // b.json goes to DLQ, c.json will be reprocessed on restart.
+    }
 }
 
 #[cfg(test)]

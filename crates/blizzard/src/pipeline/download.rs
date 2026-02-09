@@ -184,6 +184,7 @@ impl Downloader {
                 }
                 // All workers full — push back and fall through to select!
                 // to process completions or accept new downloads.
+                // to process completions or accept new downloads.
                 if let Some(returned) = file {
                     pending.push_front(returned);
                 }
@@ -228,9 +229,10 @@ impl Downloader {
                                 error = %error,
                                 "Sink worker failed to process file"
                             );
-                            // Mark completed to unblock contiguous drain —
-                            // the file will be reprocessed on restart since
-                            // its watermark was never advanced.
+                            // Mark completed to unblock contiguous drain.
+                            // The watermark is NOT advanced for this file, but
+                            // subsequent successes may advance it past this point.
+                            // The file goes to DLQ rather than being retried.
                             completion_tracker.mark_completed(&completed.path);
                             completion_tracker.drain_contiguous();
 
@@ -339,5 +341,238 @@ impl Downloader {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ops::ControlFlow;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use deltalake::arrow::array::RecordBatch;
+    use deltalake::arrow::datatypes::SchemaRef;
+    use indexmap::IndexMap;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use blizzard_core::PartitionExtractor;
+    use blizzard_core::metrics::UtilizationTimer;
+    use blizzard_core::polling::IterationResult;
+    use blizzard_core::storage::StorageProvider;
+
+    use super::*;
+    use crate::checkpoint::CheckpointManager;
+    use crate::dlq::FailureTracker;
+    use crate::error::ReaderError;
+    use crate::parquet::ParquetWriterConfig;
+    use crate::pipeline::sink::Sink;
+    use crate::pipeline::tasks::{MultipartConfig, UploadTask, run_sink_worker};
+    use crate::pipeline::tracker::{MultiSourceTracker, WatermarkTracker};
+    use crate::source::FileReader;
+    use crate::test_util::{test_batch, test_schema};
+
+    /// A mock reader that fails for a specific file path.
+    struct FailingReader {
+        schema: SchemaRef,
+        fail_path: String,
+    }
+
+    impl FileReader for FailingReader {
+        fn read_batches(
+            &self,
+            _data: Bytes,
+            path: &str,
+            on_batch: &mut dyn FnMut(RecordBatch) -> ControlFlow<()>,
+        ) -> Result<usize, ReaderError> {
+            if path == self.fail_path {
+                return Err(ReaderError::JsonDecode {
+                    path: path.to_string(),
+                    message: "simulated failure".to_string(),
+                });
+            }
+            let batch = test_batch(10);
+            let rows = batch.num_rows();
+            let _ = on_batch(batch);
+            Ok(rows)
+        }
+
+        fn schema(&self) -> &SchemaRef {
+            &self.schema
+        }
+    }
+
+    /// Integration test: a mid-batch reader failure causes the watermark to
+    /// advance past the failed file when subsequent files succeed.
+    ///
+    /// Scenario: files A, B, C are downloaded in order. B fails during read.
+    /// After processing, the checkpoint watermark should be at C.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mid_batch_failure_advances_watermark_past_failed_file() {
+        let source_dir = TempDir::new().unwrap();
+        let dest_dir = TempDir::new().unwrap();
+        let checkpoint_dir = TempDir::new().unwrap();
+
+        // Create source files on disk (FailingReader ignores content)
+        for name in &["a.ndjson.gz", "b.ndjson.gz", "c.ndjson.gz"] {
+            std::fs::write(source_dir.path().join(name), b"dummy").unwrap();
+        }
+
+        // Set up storage for source downloads and destination uploads
+        let source_storage = Arc::new(
+            StorageProvider::for_url_with_options(
+                source_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let dest_storage = Arc::new(
+            StorageProvider::for_url_with_options(
+                dest_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let checkpoint_storage = Arc::new(
+            StorageProvider::for_url_with_options(
+                checkpoint_dir.path().to_str().unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        // Create _blizzard directory for checkpoints
+        std::fs::create_dir_all(checkpoint_dir.path().join("_blizzard")).unwrap();
+
+        // Build FailingReader that errors on b.ndjson.gz
+        let reader: Arc<dyn FileReader> = Arc::new(FailingReader {
+            schema: test_schema(),
+            fail_path: "b.ndjson.gz".to_string(),
+        });
+        let mut readers = IndexMap::new();
+        readers.insert("src".to_string(), reader);
+
+        // Set up DownloadTask: feed files via a controlled discovery channel
+        let mut storages = IndexMap::new();
+        storages.insert("src".to_string(), source_storage as _);
+
+        let (discovery_tx, discovery_rx) = mpsc::channel(16);
+        let shutdown = CancellationToken::new();
+        let download_task = DownloadTask::spawn(
+            discovery_rx,
+            storages,
+            shutdown.clone(),
+            4,
+            None,
+            "test".into(),
+        );
+
+        // Send files in order: a, b, c
+        for name in &["a.ndjson.gz", "b.ndjson.gz", "c.ndjson.gz"] {
+            discovery_tx
+                .send(crate::pipeline::tracker::SourcedFile {
+                    source_name: "src".to_string(),
+                    path: name.to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        drop(discovery_tx); // Signal discovery complete
+
+        // Set up 1 sink worker
+        let upload_task = UploadTask::spawn(
+            dest_storage,
+            4,
+            None,
+            "test".to_string(),
+            MultipartConfig {
+                part_size: 10 * 1024 * 1024,
+                min_multipart_size: 100 * 1024 * 1024,
+                max_concurrent_parts: 8,
+            },
+        );
+        let sink = Sink::new(
+            test_schema(),
+            ParquetWriterConfig::default(),
+            upload_task,
+            PartitionExtractor::all(),
+            "test".to_string(),
+        )
+        .unwrap();
+
+        let (file_tx, file_rx) = mpsc::channel(1);
+        let (result_tx, result_rx) = mpsc::unbounded_channel();
+        tokio::spawn(run_sink_worker(sink, file_rx, result_tx));
+
+        let workers = SinkWorkerChannels {
+            file_txs: vec![file_tx],
+            result_rx,
+        };
+
+        // Set up WatermarkTracker backed by a real CheckpointManager
+        let checkpoint_manager = CheckpointManager::new(
+            checkpoint_storage.clone(),
+            "test".to_string(),
+            "src".to_string(),
+        );
+        let tracker: Box<dyn crate::pipeline::tracker::StateTracker> =
+            Box::new(WatermarkTracker::new(checkpoint_manager));
+        let mut trackers = IndexMap::new();
+        trackers.insert("src".to_string(), tracker);
+        let mut multi_tracker = MultiSourceTracker::new(trackers, "test".to_string());
+
+        // Set up FailureTracker (unlimited failures, no DLQ)
+        let mut failure_tracker = FailureTracker::new(0, None, "test".to_string());
+
+        let mut ctx = ProcessingContext {
+            multi_tracker: &mut multi_tracker,
+            failure_tracker: &mut failure_tracker,
+        };
+
+        let checkpoint_config = IncrementalCheckpointConfig {
+            interval_files: 1000,
+            interval: Duration::from_secs(3600),
+            enabled: false,
+        };
+
+        let downloader = Downloader::new(readers, 4, "test".to_string());
+        let mut util_timer = UtilizationTimer::new("test");
+
+        // Run the download processing loop
+        let result = downloader
+            .run(
+                download_task,
+                &mut ctx,
+                workers,
+                shutdown,
+                &checkpoint_config,
+                &mut util_timer,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, IterationResult::ProcessedItems);
+        assert_eq!(ctx.failure_tracker.count(), 1, "B should have failed");
+
+        // Save checkpoint and verify watermark
+        ctx.multi_tracker.save_all().await.unwrap();
+        let _ = ctx;
+
+        // Load with a fresh CheckpointManager and verify watermark is at C
+        let mut fresh_manager =
+            CheckpointManager::new(checkpoint_storage, "test".to_string(), "src".to_string());
+        let loaded = fresh_manager.load().await.unwrap();
+        assert!(loaded, "Checkpoint should have been saved");
+        assert_eq!(
+            fresh_manager.watermark(),
+            Some("c.ndjson.gz"),
+            "Watermark should advance past the failed file B to C"
+        );
     }
 }
