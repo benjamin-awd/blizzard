@@ -176,7 +176,7 @@ mod tests {
             .build();
 
         assert_eq!(config.max_concurrent_files, 4);
-        assert_eq!(config.sink_parallelism, 4);
+        assert_eq!(config.sink_parallelism, 1);
     }
 
     #[test]

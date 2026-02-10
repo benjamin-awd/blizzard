@@ -78,7 +78,7 @@ fn default_max_concurrent_files() -> usize {
 }
 
 fn default_sink_parallelism() -> usize {
-    4
+    1
 }
 
 fn default_poll_interval() -> u64 {

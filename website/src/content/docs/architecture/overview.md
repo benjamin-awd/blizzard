@@ -56,7 +56,7 @@ The pipeline consists of concurrent stages connected by bounded channels:
 
 1. **Download**: `DownloadTask` manages concurrent downloads via `FuturesUnordered`, sending `DownloadedFile` through a bounded channel
 2. **Process**: `spawn_blocking` decompresses (gzip/zstd) and parses NDJSON to Arrow RecordBatches. Read tasks are spawned eagerly — the downloader accepts incoming downloads via biased `select!` while dispatching processed files to workers, so decompression overlaps with sink writes
-3. **Sink**: N sink workers (configured by `sink_parallelism`, default 4) each run their own `ParquetWriter` + `UploadTask`. Workers pull files from a bounded channel (capacity 1), providing natural backpressure
+3. **Sink**: N sink workers (configured by `sink_parallelism`, default 1) each run their own `ParquetWriter` + `UploadTask`. Workers pull files from a bounded channel (capacity 1), providing natural backpressure
 4. **Upload**: Each worker's `UploadTask` runs concurrent uploads to the table directory
 
 ```d2
@@ -147,7 +147,7 @@ When channels fill, upstream stages block until downstream catches up.
 
 ```yaml
 max_concurrent_files: 4       # Parallel downloads/processing (default: 4)
-sink_parallelism: 4           # Number of sink workers (default: 4)
+sink_parallelism: 1           # Number of sink workers (default: 1)
 
 sink:
   max_concurrent_uploads: 4   # Parallel file uploads per worker (default: 4)
