@@ -5,7 +5,6 @@
 //! pipelines with multiple components. It includes:
 //!
 //! - [`Task`] - A wrapper around an async task with component identification
-//! - [`RunningTopology`] - A trait for managing running pipelines
 //! - [`Pipeline`] - A trait for self-contained pipeline units
 //! - [`PipelineContext`] - Shared resources for pipeline execution
 //! - [`PipelineRunner`] - Orchestration for multiple pipelines
@@ -14,9 +13,7 @@
 //! their respective multi-pipeline and multi-table orchestration.
 
 mod pipeline;
-mod running;
 mod task;
 
 pub use pipeline::{Pipeline, PipelineContext, PipelineRunner, random_jitter, run_pipelines};
-pub use running::RunningTopology;
 pub use task::{Task, TaskError, TaskOutput, TaskResult};
