@@ -547,6 +547,7 @@ impl InternalEvent for BufferedRecords {
 pub enum IterationResultType {
     Processed,
     NoItems,
+    Error,
 }
 
 impl IterationResultType {
@@ -554,6 +555,7 @@ impl IterationResultType {
         match self {
             IterationResultType::Processed => "processed",
             IterationResultType::NoItems => "no_items",
+            IterationResultType::Error => "error",
         }
     }
 }

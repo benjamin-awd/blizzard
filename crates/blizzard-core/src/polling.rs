@@ -5,11 +5,14 @@
 use async_trait::async_trait;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::emit;
 use crate::metrics::events::{IterationCompleted, IterationDuration, IterationResultType};
 use crate::topology::random_jitter;
+
+/// Maximum consecutive errors before the polling loop gives up.
+const MAX_CONSECUTIVE_ERRORS: usize = 10;
 
 /// Result of a single processing iteration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +80,7 @@ pub async fn run_polling_loop<P: PollingProcessor + Send>(
     service: &'static str,
 ) -> Result<(), P::Error> {
     let mut first_iteration = true;
+    let mut consecutive_errors: usize = 0;
 
     loop {
         let iteration_start = Instant::now();
@@ -94,7 +98,48 @@ pub async fn run_polling_loop<P: PollingProcessor + Send>(
                 let cold_start = first_iteration;
                 first_iteration = false;
                 processor.prepare(cold_start).await
-            } => result?,
+            } => match result {
+                Ok(state) => state,
+                Err(e) => {
+                    consecutive_errors += 1;
+                    error!(
+                        target = name,
+                        error = %e,
+                        consecutive_errors,
+                        max = MAX_CONSECUTIVE_ERRORS,
+                        "Prepare failed"
+                    );
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        error!(
+                            target = name,
+                            "Reached {MAX_CONSECUTIVE_ERRORS} consecutive errors, giving up"
+                        );
+                        return Err(e);
+                    }
+                    emit!(IterationCompleted {
+                        service,
+                        result: IterationResultType::Error,
+                        target: name.to_string(),
+                    });
+                    emit!(IterationDuration {
+                        service,
+                        duration: iteration_start.elapsed(),
+                        target: name.to_string(),
+                    });
+                    // Wait before retrying
+                    let jitter = random_jitter(poll_jitter_secs);
+                    let sleep_duration = poll_interval + jitter;
+                    if shutdown
+                        .run_until_cancelled(tokio::time::sleep(sleep_duration))
+                        .await
+                        .is_none()
+                    {
+                        info!(target = name, "Shutdown requested during error backoff");
+                        break;
+                    }
+                    continue;
+                }
+            },
         };
 
         let result = match state {
@@ -109,7 +154,48 @@ pub async fn run_polling_loop<P: PollingProcessor + Send>(
                         IterationResult::Shutdown
                     }
 
-                    result = processor.process(s) => result?,
+                    result = processor.process(s) => match result {
+                        Ok(r) => r,
+                        Err(e) => {
+                            consecutive_errors += 1;
+                            error!(
+                                target = name,
+                                error = %e,
+                                consecutive_errors,
+                                max = MAX_CONSECUTIVE_ERRORS,
+                                "Process failed"
+                            );
+                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                error!(
+                                    target = name,
+                                    "Reached {MAX_CONSECUTIVE_ERRORS} consecutive errors, giving up"
+                                );
+                                return Err(e);
+                            }
+                            emit!(IterationCompleted {
+                                service,
+                                result: IterationResultType::Error,
+                                target: name.to_string(),
+                            });
+                            emit!(IterationDuration {
+                                service,
+                                duration: iteration_start.elapsed(),
+                                target: name.to_string(),
+                            });
+                            // Wait before retrying
+                            let jitter = random_jitter(poll_jitter_secs);
+                            let sleep_duration = poll_interval + jitter;
+                            if shutdown
+                                .run_until_cancelled(tokio::time::sleep(sleep_duration))
+                                .await
+                                .is_none()
+                            {
+                                info!(target = name, "Shutdown requested during error backoff");
+                                break;
+                            }
+                            continue;
+                        }
+                    },
                 }
             }
             None => {
@@ -117,6 +203,9 @@ pub async fn run_polling_loop<P: PollingProcessor + Send>(
                 IterationResult::NoItems
             }
         };
+
+        // Reset consecutive error counter on success
+        consecutive_errors = 0;
 
         // Exit on shutdown
         if matches!(result, IterationResult::Shutdown) {
