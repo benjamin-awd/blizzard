@@ -324,6 +324,10 @@ impl CheckpointRecovery for DeltaSink {
         &mut self,
     ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
         use deltalake::logstore::{get_actions, read_commit_entry};
+        use futures::stream::{self, StreamExt};
+
+        /// Number of commit log entries to fetch concurrently.
+        const SCAN_CONCURRENCY: usize = 16;
 
         // Reload table to get latest state
         self.table
@@ -347,41 +351,58 @@ impl CheckpointRecovery for DeltaSink {
         // Use object_store() (prefixed) instead of root_object_store() (unprefixed)
         let object_store = log_store.object_store(None);
 
-        // Scan backwards through commit logs looking for our Txn action
+        // Scan backwards through commit logs looking for our Txn action.
+        // Fetch entries in parallel batches to reduce cloud storage latency.
         let start_version = (current_version - CHECKPOINT_RECOVERY_SCAN_LIMIT).max(0);
+        let versions: Vec<i64> = (start_version..=current_version).rev().collect();
 
-        for version in (start_version..=current_version).rev() {
-            let commit_bytes = match read_commit_entry(object_store.as_ref(), version)
-                .await
-                .map_err(|source| DeltaError::DeltaOperation { source })?
-            {
-                Some(bytes) => bytes,
-                None => continue,
-            };
+        for batch in versions.chunks(SCAN_CONCURRENCY) {
+            let fetched: Vec<(i64, Result<Option<bytes::Bytes>, _>)> =
+                stream::iter(batch.iter().copied())
+                    .map(|v| {
+                        let store = object_store.clone();
+                        async move { (v, read_commit_entry(store.as_ref(), v).await) }
+                    })
+                    .buffer_unordered(SCAN_CONCURRENCY)
+                    .collect()
+                    .await;
 
-            let actions = get_actions(version, &commit_bytes)
-                .map_err(|source| DeltaError::DeltaOperation { source })?;
+            // Process in descending version order (most recent first)
+            let mut fetched_sorted: Vec<_> = fetched.into_iter().collect();
+            fetched_sorted.sort_by(|a, b| b.0.cmp(&a.0));
 
-            for action in &actions {
-                if let Action::Txn(txn) = action
-                    && txn.app_id.starts_with(TXN_APP_ID_PREFIX)
-                {
-                    let encoded = txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).ok_or_else(|| {
-                        DeltaError::InvalidCheckpoint {
-                            message: "Missing blizzard prefix".to_string(),
-                        }
-                    })?;
-                    let json_bytes = base64::engine::general_purpose::STANDARD
-                        .decode(encoded)
-                        .map_err(|source| DeltaError::Base64 { source })?;
-                    let state: CheckpointState = serde_json::from_slice(&json_bytes)
-                        .map_err(|source| DeltaError::CheckpointJsonDecode { source })?;
+            for (version, result) in fetched_sorted {
+                let commit_bytes =
+                    match result.map_err(|source| DeltaError::DeltaOperation { source })? {
+                        Some(bytes) => bytes,
+                        None => continue,
+                    };
 
-                    // Update internal state
-                    self.checkpoint_version = txn.version;
-                    self.last_version = current_version;
+                let actions = get_actions(version, &commit_bytes)
+                    .map_err(|source| DeltaError::DeltaOperation { source })?;
 
-                    return Ok(Some((state, txn.version)));
+                for action in &actions {
+                    if let Action::Txn(txn) = action
+                        && txn.app_id.starts_with(TXN_APP_ID_PREFIX)
+                    {
+                        let encoded =
+                            txn.app_id.strip_prefix(TXN_APP_ID_PREFIX).ok_or_else(|| {
+                                DeltaError::InvalidCheckpoint {
+                                    message: "Missing blizzard prefix".to_string(),
+                                }
+                            })?;
+                        let json_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .map_err(|source| DeltaError::Base64 { source })?;
+                        let state: CheckpointState = serde_json::from_slice(&json_bytes)
+                            .map_err(|source| DeltaError::CheckpointJsonDecode { source })?;
+
+                        // Update internal state
+                        self.checkpoint_version = txn.version;
+                        self.last_version = current_version;
+
+                        return Ok(Some((state, txn.version)));
+                    }
                 }
             }
         }
