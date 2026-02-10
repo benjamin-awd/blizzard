@@ -216,6 +216,7 @@ impl TableCommitter for DeltaSink {
         // Only update state after successful commit
         self.checkpoint_version = next_checkpoint_version;
         self.last_version = new_version;
+        self.cached_schema = Self::cached_schema_from_table(&self.table);
         info!(
             target = %self.table_name,
             "Committed {} files with checkpoint v{} to Delta Lake, version {}",
@@ -329,6 +330,7 @@ impl CheckpointRecovery for DeltaSink {
             .load()
             .await
             .map_err(|source| DeltaError::DeltaOperation { source })?;
+        self.cached_schema = Self::cached_schema_from_table(&self.table);
 
         let current_version = self.table.version().unwrap_or(-1);
         debug!(
