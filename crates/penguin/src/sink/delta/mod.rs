@@ -384,14 +384,11 @@ impl CheckpointRecovery for DeltaSink {
         Ok(None)
     }
 
-    fn get_committed_paths(&self) -> HashSet<String> {
-        match self.table.get_file_uris() {
-            Ok(iter) => iter.collect(),
-            Err(e) => {
-                warn!(target = %self.table_name, "Failed to get committed paths: {e}");
-                HashSet::new()
-            }
-        }
+    fn get_committed_paths(&self) -> Result<HashSet<String>, DeltaError> {
+        self.table
+            .get_file_uris()
+            .map(|iter| iter.collect())
+            .map_err(|source| DeltaError::DeltaOperation { source })
     }
 }
 

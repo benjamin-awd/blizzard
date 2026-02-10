@@ -148,7 +148,7 @@ async fn test_discover_and_commit_pipeline() {
         "version should be >= 1 after commit"
     );
 
-    let committed_paths = delta_sink.get_committed_paths();
+    let committed_paths = delta_sink.get_committed_paths().unwrap();
     assert_eq!(
         committed_paths.len(),
         2,

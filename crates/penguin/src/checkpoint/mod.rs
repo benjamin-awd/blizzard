@@ -179,7 +179,7 @@ impl CheckpointCoordinator {
             // This prevents infinite cold start loops for tables where all files are
             // already committed but no penguin checkpoint exists (e.g., tables created
             // by other writers or after checkpoint state was lost).
-            let committed_paths = sink.get_committed_paths();
+            let committed_paths = sink.get_committed_paths()?;
             if let Some(highest_path) = committed_paths.iter().max() {
                 info!(
                     target = %self.table,
@@ -298,6 +298,7 @@ mod tests {
         committed_paths: HashSet<String>,
         checkpoint: Option<(CheckpointState, i64)>,
         should_fail: bool,
+        fail_get_committed_paths: bool,
     }
 
     impl MockTableSink {
@@ -306,6 +307,7 @@ mod tests {
                 committed_paths: paths.into_iter().map(String::from).collect(),
                 checkpoint: None,
                 should_fail: false,
+                fail_get_committed_paths: false,
             }
         }
 
@@ -319,6 +321,16 @@ mod tests {
                 committed_paths: HashSet::new(),
                 checkpoint: None,
                 should_fail: true,
+                fail_get_committed_paths: false,
+            }
+        }
+
+        fn failing_get_committed_paths() -> Self {
+            Self {
+                committed_paths: HashSet::new(),
+                checkpoint: None,
+                should_fail: false,
+                fail_get_committed_paths: true,
             }
         }
     }
@@ -378,8 +390,13 @@ mod tests {
             Ok(self.checkpoint.clone())
         }
 
-        fn get_committed_paths(&self) -> HashSet<String> {
-            self.committed_paths.clone()
+        fn get_committed_paths(&self) -> Result<HashSet<String>, DeltaError> {
+            if self.fail_get_committed_paths {
+                return Err(DeltaError::InvalidCheckpoint {
+                    message: "mock get_committed_paths failure".to_string(),
+                });
+            }
+            Ok(self.committed_paths.clone())
         }
     }
 
@@ -568,5 +585,17 @@ mod tests {
 
         let result = coordinator.commit_files(&mut sink, &files, 10).await;
         assert!(result.is_err(), "commit_files should return Err on failure");
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_table_log_propagates_get_committed_paths_error() {
+        let mut sink = MockTableSink::failing_get_committed_paths();
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        let result = coordinator.restore_from_table_log(&mut sink).await;
+        assert!(
+            result.is_err(),
+            "restore_from_table_log should propagate get_committed_paths error"
+        );
     }
 }

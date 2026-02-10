@@ -83,7 +83,7 @@ pub trait CheckpointRecovery: Send + Sync {
     ///
     /// Returns a set of paths for all files currently in the table.
     /// Used to avoid double-commits.
-    fn get_committed_paths(&self) -> HashSet<String>;
+    fn get_committed_paths(&self) -> Result<HashSet<String>, DeltaError>;
 }
 
 /// Combined trait for table sinks that support all operations.

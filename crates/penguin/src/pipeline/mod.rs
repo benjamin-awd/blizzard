@@ -293,10 +293,10 @@ impl PollingProcessor for Processor {
         }
 
         // Get committed paths from Delta log to avoid double-commits
-        let committed_paths = self
-            .delta_sink
-            .as_ref()
-            .map_or_else(HashSet::new, |s| s.get_committed_paths());
+        let committed_paths = match self.delta_sink.as_ref() {
+            Some(s) => s.get_committed_paths()?,
+            None => HashSet::new(),
+        };
 
         // Get current watermark
         let watermark = self.checkpoint_coordinator.watermark().await;
