@@ -19,6 +19,14 @@ use crate::metrics::events::{CheckpointStateSize, InternalEvent};
 /// Prefix for Blizzard checkpoint app_id in Delta Txn actions.
 pub const TXN_APP_ID_PREFIX: &str = "blizzard:";
 
+/// Current time as milliseconds since the Unix epoch.
+fn epoch_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
 /// Create a Delta Lake Add action for a finished file.
 pub fn create_add_action(file: &FinishedFile) -> Action {
     use deltalake::kernel::Add;
@@ -39,10 +47,7 @@ pub fn create_add_action(file: &FinishedFile) -> Action {
         path: subpath.to_string(),
         size: i64::try_from(file.size).unwrap_or(i64::MAX),
         partition_values,
-        modification_time: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
-            .unwrap_or(0),
+        modification_time: epoch_millis(),
         data_change: true,
         ..Default::default()
     })
@@ -73,12 +78,7 @@ pub fn create_txn_action(
     Ok(Action::Txn(Transaction {
         app_id,
         version,
-        last_updated: Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
-                .unwrap_or(0),
-        ),
+        last_updated: Some(epoch_millis()),
     }))
 }
 
