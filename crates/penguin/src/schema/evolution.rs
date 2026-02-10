@@ -147,10 +147,8 @@ fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
             if a_fields.len() != b_fields.len() {
                 return false;
             }
-            let b_map: HashMap<&str, &Arc<Field>> =
-                b_fields.iter().map(|f| (f.name().as_str(), f)).collect();
             a_fields.iter().all(|a_field| {
-                b_map.get(a_field.name().as_str()).is_some_and(|b_field| {
+                b_fields.find(a_field.name()).is_some_and(|(_, b_field)| {
                     a_field.is_nullable() == b_field.is_nullable()
                         && are_data_types_equivalent(a_field.data_type(), b_field.data_type())
                 })
@@ -205,10 +203,8 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
         if from_fields.len() != to_fields.len() {
             return false;
         }
-        let to_map: HashMap<&str, &Arc<Field>> =
-            to_fields.iter().map(|f| (f.name().as_str(), f)).collect();
         for from_field in from_fields.iter() {
-            let Some(to_field) = to_map.get(from_field.name().as_str()) else {
+            let Some((_, to_field)) = to_fields.find(from_field.name()) else {
                 return false;
             };
             // If types differ, check if it's a valid widening
