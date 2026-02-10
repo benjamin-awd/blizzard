@@ -18,10 +18,6 @@ use std::hash::Hash;
 pub enum Resource {
     /// A directory path (staging dir, output dir, checkpoint dir, etc.)
     Directory(String),
-    /// A network port (metrics endpoint, API server, etc.)
-    Port(u16),
-    /// A file path (lock file, state file, etc.)
-    File(String),
 }
 
 impl Resource {
@@ -42,17 +38,6 @@ impl Resource {
     pub fn directory(path: &str) -> Self {
         let normalized = path.trim_end_matches('/');
         Self::Directory(normalized.to_string())
-    }
-
-    /// Create a port resource.
-    pub fn port(port: u16) -> Self {
-        Self::Port(port)
-    }
-
-    /// Create a file resource with normalized path.
-    pub fn file(path: &str) -> Self {
-        let normalized = path.trim_end_matches('/');
-        Self::File(normalized.to_string())
     }
 
     /// Detect resource conflicts from a set of component declarations.
@@ -143,8 +128,6 @@ impl fmt::Display for Resource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Directory(path) => write!(f, "directory:{path}"),
-            Self::Port(port) => write!(f, "port:{port}"),
-            Self::File(path) => write!(f, "file:{path}"),
         }
     }
 }
@@ -172,7 +155,6 @@ mod tests {
         let components = vec![
             ("a", vec![Resource::directory("/path/a")]),
             ("b", vec![Resource::directory("/path/b")]),
-            ("c", vec![Resource::port(9090)]),
         ];
 
         let conflicts = Resource::conflicts(components);
@@ -199,79 +181,10 @@ mod tests {
     }
 
     #[test]
-    fn test_port_conflict() {
-        let components = vec![
-            ("metrics_a", vec![Resource::port(9090)]),
-            ("metrics_b", vec![Resource::port(9091)]),
-            ("metrics_c", vec![Resource::port(9090)]),
-        ];
-
-        let conflicts = Resource::conflicts(components);
-        assert_eq!(conflicts.len(), 1);
-
-        let keys = conflicts.get(&Resource::port(9090)).unwrap();
-        assert!(keys.contains(&"metrics_a"));
-        assert!(keys.contains(&"metrics_c"));
-    }
-
-    #[test]
-    fn test_multiple_conflicts() {
-        let components = vec![
-            (
-                "a",
-                vec![Resource::directory("/staging"), Resource::port(9090)],
-            ),
-            (
-                "b",
-                vec![Resource::directory("/staging"), Resource::port(9091)],
-            ),
-            (
-                "c",
-                vec![Resource::directory("/other"), Resource::port(9090)],
-            ),
-        ];
-
-        let conflicts = Resource::conflicts(components);
-        assert_eq!(conflicts.len(), 2);
-
-        // Directory conflict between a and b
-        let dir_keys = conflicts.get(&Resource::directory("/staging")).unwrap();
-        assert!(dir_keys.contains(&"a"));
-        assert!(dir_keys.contains(&"b"));
-
-        // Port conflict between a and c
-        let port_keys = conflicts.get(&Resource::port(9090)).unwrap();
-        assert!(port_keys.contains(&"a"));
-        assert!(port_keys.contains(&"c"));
-    }
-
-    #[test]
-    fn test_three_way_conflict() {
-        let components = vec![
-            ("a", vec![Resource::file("/var/lock/app.lock")]),
-            ("b", vec![Resource::file("/var/lock/app.lock")]),
-            ("c", vec![Resource::file("/var/lock/app.lock")]),
-        ];
-
-        let conflicts = Resource::conflicts(components);
-        assert_eq!(conflicts.len(), 1);
-
-        let keys = conflicts
-            .get(&Resource::file("/var/lock/app.lock"))
-            .unwrap();
-        assert_eq!(keys.len(), 3);
-    }
-
-    #[test]
     fn test_display() {
         assert_eq!(
             format!("{}", Resource::directory("/path/to/dir")),
             "directory:/path/to/dir"
-        );
-        assert_eq!(format!("{}", Resource::port(9090)), "port:9090");
-        assert_eq!(
-            format!("{}", Resource::file("/var/lock/app.lock")),
-            "file:/var/lock/app.lock"
         );
     }
 
