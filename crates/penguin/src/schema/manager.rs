@@ -7,7 +7,10 @@
 use deltalake::arrow::datatypes::{Schema, SchemaRef};
 use tracing::info;
 
+use blizzard_core::emit;
+
 use crate::error::SchemaError;
+use crate::metrics::events::SchemaEvolutionFailed;
 
 use super::evolution::{EvolutionAction, SchemaEvolutionMode, validate_schema_evolution};
 
@@ -73,9 +76,25 @@ impl SchemaManager {
     /// Validate and log the schema evolution action.
     ///
     /// This method validates the incoming schema and logs appropriate
-    /// messages about what action will be taken.
+    /// messages about what action will be taken. Emits a
+    /// `penguin_schema_evolution_errors_total` counter on validation failure.
     pub fn validate_and_log(&self, incoming: &Schema) -> Result<EvolutionAction, SchemaError> {
-        let action = self.validate(incoming)?;
+        let action = match self.validate(incoming) {
+            Ok(action) => action,
+            Err(e) => {
+                let reason = match &e {
+                    SchemaError::TypeChangeNotAllowed { .. } => "type_change",
+                    SchemaError::RequiredFieldAddition { .. } => "required_field",
+                    SchemaError::IncompatibleSchema { .. } => "incompatible",
+                    _ => "other",
+                };
+                emit!(SchemaEvolutionFailed {
+                    target: self.table_name.clone(),
+                    reason: reason.to_string(),
+                });
+                return Err(e);
+            }
+        };
 
         match &action {
             EvolutionAction::None => {

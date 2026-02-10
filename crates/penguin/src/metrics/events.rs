@@ -103,6 +103,22 @@ impl InternalEvent for SchemaEvolved {
     }
 }
 
+/// Event emitted when schema validation fails.
+pub struct SchemaEvolutionFailed {
+    /// Target identifier for multi-target deployments.
+    pub target: String,
+    /// Reason for the failure: "type_change", "required_field", or "incompatible".
+    pub reason: String,
+}
+
+impl InternalEvent for SchemaEvolutionFailed {
+    fn emit(self) {
+        trace!(target = %self.target, reason = %self.reason, "Schema evolution failed");
+        counter!("penguin_schema_evolution_errors_total", "target" => self.target, "reason" => self.reason)
+            .increment(1);
+    }
+}
+
 // ============================================================================
 // File discovery events
 // ============================================================================
