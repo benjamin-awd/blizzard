@@ -4,7 +4,6 @@
 //! This module provides common abstractions for building and running
 //! pipelines with multiple components. It includes:
 //!
-//! - [`Task`] - A wrapper around an async task with component identification
 //! - [`Pipeline`] - A trait for self-contained pipeline units
 //! - [`PipelineContext`] - Shared resources for pipeline execution
 //! - [`PipelineRunner`] - Orchestration for multiple pipelines
@@ -13,7 +12,5 @@
 //! their respective multi-pipeline and multi-table orchestration.
 
 mod pipeline;
-mod task;
 
 pub use pipeline::{Pipeline, PipelineContext, PipelineRunner, random_jitter, run_pipelines};
-pub use task::{Task, TaskError, TaskOutput, TaskResult};
