@@ -243,6 +243,199 @@
         "x": 0,
         "y": 5
       },
+      "id": 300,
+      "panels": [],
+      "title": "Pipeline Activity",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Per-target pipeline activity over time. Active (green) = processed iterations in the last 5 minutes. Inactive (orange) = polling but no work found.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "orange",
+                  "index": 0,
+                  "text": "Inactive"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "Active"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 6
+      },
+      "id": 301,
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "clamp_max(sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\"}[5m])), 1) or sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m])) * 0",
+          "legendFormat": "{{target}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Pipeline Activity",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Pipelines currently polling but with no files committed in the last 5 minutes",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 6
+      },
+      "id": 302,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "target"
+          }
+        ]
+      },
+      "pluginVersion": "12.2.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "(sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m]))) unless (sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\"}[5m])) > 0)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Inactive Pipelines",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
       "id": 101,
       "panels": [],
       "title": "Delta Lake Commits",
@@ -311,7 +504,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 13
       },
       "id": 10,
       "options": {
@@ -408,7 +601,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 13
       },
       "id": 11,
       "options": {
@@ -448,7 +641,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 21
       },
       "id": 102,
       "panels": [],
@@ -480,7 +673,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 22
       },
       "id": 20,
       "options": {
@@ -499,7 +692,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-9
+          "le": 1e-09
         },
         "legend": {
           "show": true
@@ -597,7 +790,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 22
       },
       "id": 21,
       "options": {
@@ -655,7 +848,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 30
       },
       "id": 106,
       "panels": [],
@@ -771,7 +964,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 31
       },
       "id": 107,
       "options": {
@@ -830,7 +1023,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 31
       },
       "id": 108,
       "options": {
@@ -849,7 +1042,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-9
+          "le": 1e-09
         },
         "legend": {
           "show": true
@@ -947,7 +1140,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 32
+        "y": 39
       },
       "id": 30,
       "options": {
@@ -1043,7 +1236,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 32
+        "y": 39
       },
       "id": 31,
       "options": {
@@ -1082,7 +1275,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 47
       },
       "id": 103,
       "panels": [],
@@ -1152,7 +1345,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 48
       },
       "id": 204,
       "options": {
@@ -1248,7 +1441,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 49
+        "y": 56
       },
       "id": 40,
       "options": {
@@ -1346,7 +1539,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 49
+        "y": 56
       },
       "id": 41,
       "options": {
@@ -1386,7 +1579,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 64
       },
       "id": 104,
       "panels": [],
@@ -1399,7 +1592,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 65
       },
       "id": 105,
       "panels": [],
@@ -1469,7 +1662,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 66
       },
       "id": 50,
       "options": {
@@ -1510,7 +1703,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 67
+        "y": 74
       },
       "id": 200,
       "panels": [],
@@ -1590,7 +1783,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 68
+        "y": 75
       },
       "id": 201,
       "options": {
@@ -1699,7 +1892,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 68
+        "y": 75
       },
       "id": 202,
       "options": {
@@ -1808,7 +2001,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 68
+        "y": 75
       },
       "id": 203,
       "options": {
