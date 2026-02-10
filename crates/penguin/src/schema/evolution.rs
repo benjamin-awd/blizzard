@@ -130,21 +130,18 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
 }
 
 /// Check if two data types are structurally equivalent, ignoring field names
-/// in container types (List, LargeList).
+/// in container types like List and LargeList (Arrow uses "element", Parquet
+/// uses "item"), while still requiring matching field names in Struct types.
 ///
-/// Arrow and Parquet use different default names for list elements ("element"
-/// vs "item"), which are not semantically meaningful. This function treats
-/// such types as equivalent.
+/// Delegates to [`DataType::equals_datatype`] for non-Struct types, which
+/// handles List, LargeList, FixedSizeList, ListView, Map, Dictionary, etc.
 fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
     if a == b {
         return true;
     }
     match (a, b) {
-        (DataType::List(a_field), DataType::List(b_field))
-        | (DataType::LargeList(a_field), DataType::LargeList(b_field)) => {
-            a_field.is_nullable() == b_field.is_nullable()
-                && are_data_types_equivalent(a_field.data_type(), b_field.data_type())
-        }
+        // Struct field names are semantically meaningful (unlike list element names),
+        // so renaming a struct field is a real schema change.
         (DataType::Struct(a_fields), DataType::Struct(b_fields)) => {
             a_fields.len() == b_fields.len()
                 && a_fields.iter().zip(b_fields.iter()).all(|(a, b)| {
@@ -153,7 +150,7 @@ fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
                         && are_data_types_equivalent(a.data_type(), b.data_type())
                 })
         }
-        _ => false,
+        _ => a.equals_datatype(b),
     }
 }
 
