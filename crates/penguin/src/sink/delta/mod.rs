@@ -127,7 +127,11 @@ impl DeltaSink {
     ///
     /// Uses Delta Lake's metadata action to update the schema.
     /// Applies a timeout to prevent hanging forever on commit or reload.
-    async fn apply_schema_change(&mut self, new_schema: &Schema) -> Result<(), DeltaError> {
+    async fn apply_schema_change(
+        &mut self,
+        new_schema: &Schema,
+        new_fields: Vec<deltalake::kernel::StructField>,
+    ) -> Result<(), DeltaError> {
         use deltalake::kernel::MetadataExt;
         use deltalake::kernel::transaction::CommitBuilder;
 
@@ -155,9 +159,7 @@ impl DeltaSink {
             CommitBuilder::default().with_actions(actions).build(
                 Some(snapshot),
                 self.table.log_store(),
-                deltalake::protocol::DeltaOperation::SetTableProperties {
-                    properties: std::collections::HashMap::new(),
-                },
+                deltalake::protocol::DeltaOperation::AddColumn { fields: new_fields },
             ),
         )
         .await
@@ -266,13 +268,23 @@ impl SchemaEvolution for DeltaSink {
         match action {
             EvolutionAction::None => {}
             EvolutionAction::Merge { new_schema } => {
+                // Compute only the newly added fields for the Delta operation log
+                let existing_names: HashSet<&str> =
+                    self.cached_schema.as_ref().map_or_else(HashSet::new, |s| {
+                        s.fields().iter().map(|f| f.name().as_str()).collect()
+                    });
+                let new_fields: Vec<_> = arrow_schema_to_delta(&new_schema)?
+                    .fields()
+                    .filter(|f| !existing_names.contains(f.name().as_str()))
+                    .cloned()
+                    .collect();
+
                 info!(
                     target = %self.table_name,
                     "Evolving schema: adding {} new fields",
-                    new_schema.fields().len()
-                        - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
+                    new_fields.len(),
                 );
-                self.apply_schema_change(&new_schema).await?;
+                self.apply_schema_change(&new_schema, new_fields).await?;
                 self.cached_schema = Some(new_schema);
                 SchemaEvolved {
                     target: self.table_name.clone(),
@@ -281,12 +293,17 @@ impl SchemaEvolution for DeltaSink {
                 .emit();
             }
             EvolutionAction::Overwrite { new_schema } => {
+                let all_fields = arrow_schema_to_delta(&new_schema)?
+                    .fields()
+                    .cloned()
+                    .collect();
+
                 warn!(
                     target = %self.table_name,
                     "Overwriting schema with {} fields",
                     new_schema.fields().len()
                 );
-                self.apply_schema_change(&new_schema).await?;
+                self.apply_schema_change(&new_schema, all_fields).await?;
                 self.cached_schema = Some(new_schema);
                 SchemaEvolved {
                     target: self.table_name.clone(),
