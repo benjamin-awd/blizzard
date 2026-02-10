@@ -263,13 +263,7 @@ impl SchemaEvolution for DeltaSink {
     }
 
     async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
-        let action_name = match &action {
-            EvolutionAction::None => "none",
-            EvolutionAction::Merge { .. } => "merge",
-            EvolutionAction::Overwrite { .. } => "overwrite",
-        };
-
-        match &action {
+        match action {
             EvolutionAction::None => {}
             EvolutionAction::Merge { new_schema } => {
                 info!(
@@ -278,6 +272,13 @@ impl SchemaEvolution for DeltaSink {
                     new_schema.fields().len()
                         - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
                 );
+                self.apply_schema_change(&new_schema).await?;
+                self.cached_schema = Some(new_schema);
+                SchemaEvolved {
+                    target: self.table_name.clone(),
+                    action: "merge".to_string(),
+                }
+                .emit();
             }
             EvolutionAction::Overwrite { new_schema } => {
                 warn!(
@@ -285,22 +286,14 @@ impl SchemaEvolution for DeltaSink {
                     "Overwriting schema with {} fields",
                     new_schema.fields().len()
                 );
+                self.apply_schema_change(&new_schema).await?;
+                self.cached_schema = Some(new_schema);
+                SchemaEvolved {
+                    target: self.table_name.clone(),
+                    action: "overwrite".to_string(),
+                }
+                .emit();
             }
-        }
-
-        if let EvolutionAction::Merge { new_schema } | EvolutionAction::Overwrite { new_schema } =
-            action
-        {
-            self.apply_schema_change(&new_schema).await?;
-            self.cached_schema = Some(new_schema);
-        }
-
-        if !matches!(action_name, "none") {
-            SchemaEvolved {
-                target: self.table_name.clone(),
-                action: action_name.to_string(),
-            }
-            .emit();
         }
 
         Ok(())
