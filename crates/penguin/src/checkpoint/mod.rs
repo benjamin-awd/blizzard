@@ -278,6 +278,7 @@ impl CheckpointCoordinator {
             }
             Err(e) => {
                 tracing::error!(target = %self.table, "Failed to commit {} files to table: {}", count, e);
+                return 0;
             }
         }
         count
@@ -297,6 +298,7 @@ mod tests {
     struct MockTableSink {
         committed_paths: HashSet<String>,
         checkpoint: Option<(CheckpointState, i64)>,
+        should_fail: bool,
     }
 
     impl MockTableSink {
@@ -304,12 +306,21 @@ mod tests {
             Self {
                 committed_paths: paths.into_iter().map(String::from).collect(),
                 checkpoint: None,
+                should_fail: false,
             }
         }
 
         fn with_checkpoint(mut self, checkpoint: CheckpointState, version: i64) -> Self {
             self.checkpoint = Some((checkpoint, version));
             self
+        }
+
+        fn failing() -> Self {
+            Self {
+                committed_paths: HashSet::new(),
+                checkpoint: None,
+                should_fail: true,
+            }
         }
     }
 
@@ -320,6 +331,11 @@ mod tests {
             _files: &[FinishedFile],
             _checkpoint: &CheckpointState,
         ) -> Result<Option<i64>, DeltaError> {
+            if self.should_fail {
+                return Err(DeltaError::InvalidCheckpoint {
+                    message: "mock commit failure".to_string(),
+                });
+            }
             Ok(Some(1))
         }
 
@@ -536,5 +552,22 @@ mod tests {
 
         let captured = coordinator.capture_state().await;
         assert!(captured.watermark.is_initial());
+    }
+
+    #[tokio::test]
+    async fn test_commit_files_returns_zero_on_error() {
+        let mut sink = MockTableSink::failing();
+        let coordinator = CheckpointCoordinator::new("test".to_string());
+
+        let files = vec![FinishedFile::without_bytes(
+            "date=2026-01-28/test.parquet".to_string(),
+            1024,
+            100,
+            std::collections::HashMap::new(),
+            None,
+        )];
+
+        let committed = coordinator.commit_files(&mut sink, &files, 10).await;
+        assert_eq!(committed, 0, "commit_files should return 0 on error");
     }
 }
