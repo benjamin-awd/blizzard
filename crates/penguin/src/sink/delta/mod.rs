@@ -123,138 +123,6 @@ impl DeltaSink {
         })
     }
 
-    /// Commit files with an atomic checkpoint.
-    ///
-    /// The checkpoint state is embedded in a `Txn` action and committed
-    /// atomically with the Add actions for the files. This ensures that
-    /// file commits and checkpoint state are always consistent.
-    ///
-    /// Returns the new version number if a commit was made.
-    pub async fn commit_files_with_checkpoint(
-        &mut self,
-        files: &[FinishedFile],
-        checkpoint: &CheckpointState,
-    ) -> Result<Option<i64>, DeltaError> {
-        let next_checkpoint_version = self.checkpoint_version + 1;
-
-        // Create add actions for files
-        let add_actions: Vec<Action> = files.iter().map(create_add_action).collect();
-
-        // Create checkpoint state with current delta version
-        let mut checkpoint_with_version = checkpoint.clone();
-        checkpoint_with_version.delta_version = self.last_version;
-
-        // Commit with checkpoint
-        let new_version = commit_to_delta_with_checkpoint(
-            &mut self.table,
-            add_actions,
-            Some((&checkpoint_with_version, next_checkpoint_version)),
-            &self.partition_by,
-            &self.table_name,
-        )
-        .await?;
-
-        // Only update state after successful commit
-        self.checkpoint_version = next_checkpoint_version;
-        self.last_version = new_version;
-        info!(
-            target = %self.table_name,
-            "Committed {} files with checkpoint v{} to Delta Lake, version {}",
-            files.len(),
-            self.checkpoint_version,
-            new_version
-        );
-
-        Ok(Some(new_version))
-    }
-
-    /// Get the current table version.
-    pub fn version(&self) -> i64 {
-        self.last_version
-    }
-
-    /// Get the current checkpoint version.
-    pub fn checkpoint_version(&self) -> i64 {
-        self.checkpoint_version
-    }
-
-    /// Get a reference to the underlying Delta table.
-    pub fn table(&self) -> &DeltaTable {
-        &self.table
-    }
-
-    /// Get the cached table schema, if available.
-    pub fn schema(&self) -> Option<&SchemaRef> {
-        self.cached_schema.as_ref()
-    }
-
-    /// Validate an incoming schema against the table schema.
-    ///
-    /// Returns the evolution action to take based on the configured mode.
-    pub fn validate_schema(
-        &self,
-        incoming: &Schema,
-        mode: SchemaEvolutionMode,
-    ) -> Result<EvolutionAction, crate::error::SchemaError> {
-        let table_schema = match &self.cached_schema {
-            Some(schema) => schema,
-            None => {
-                // No cached schema - accept incoming schema
-                return Ok(EvolutionAction::None);
-            }
-        };
-
-        validate_schema_evolution(table_schema, incoming, mode)
-    }
-
-    /// Apply a schema evolution action to the table.
-    ///
-    /// For `Merge` and `Overwrite` actions, this updates the table metadata
-    /// with the new schema using Delta Lake's native schema evolution.
-    pub async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
-        let action_name = match &action {
-            EvolutionAction::None => "none",
-            EvolutionAction::Merge { .. } => "merge",
-            EvolutionAction::Overwrite { .. } => "overwrite",
-        };
-
-        match &action {
-            EvolutionAction::None => {}
-            EvolutionAction::Merge { new_schema } => {
-                info!(
-                    target = %self.table_name,
-                    "Evolving schema: adding {} new fields",
-                    new_schema.fields().len()
-                        - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
-                );
-            }
-            EvolutionAction::Overwrite { new_schema } => {
-                warn!(
-                    target = %self.table_name,
-                    "Overwriting schema with {} fields",
-                    new_schema.fields().len()
-                );
-            }
-        }
-
-        if let EvolutionAction::Merge { new_schema } | EvolutionAction::Overwrite { new_schema } =
-            action
-        {
-            self.apply_schema_change(&new_schema).await?;
-            self.cached_schema = Some(new_schema);
-        }
-
-        if !matches!(action_name, "none") {
-            SchemaEvolved {
-                target: self.table_name.clone(),
-                action: action_name.to_string(),
-            }
-            .emit();
-        }
-
-        Ok(())
-    }
-
     /// Apply a schema change to the Delta table.
     ///
     /// Uses Delta Lake's metadata action to update the schema.
@@ -315,30 +183,133 @@ impl DeltaSink {
 
         Ok(())
     }
+}
 
-    /// Get all committed file paths from the Delta table snapshot.
-    ///
-    /// Returns a set of paths (relative to table root) for all files
-    /// currently in the table. This is used to cross-check against
-    /// incoming files to avoid double-commits.
-    pub fn get_committed_paths(&self) -> HashSet<String> {
-        match self.table.get_file_uris() {
-            Ok(iter) => iter.collect(),
-            Err(e) => {
-                warn!(target = %self.table_name, "Failed to get committed paths: {e}");
-                HashSet::new()
-            }
-        }
+#[async_trait]
+impl TableCommitter for DeltaSink {
+    async fn commit_files_with_checkpoint(
+        &mut self,
+        files: &[FinishedFile],
+        checkpoint: &CheckpointState,
+    ) -> Result<Option<i64>, DeltaError> {
+        let next_checkpoint_version = self.checkpoint_version + 1;
+
+        // Create add actions for files
+        let add_actions: Vec<Action> = files.iter().map(create_add_action).collect();
+
+        // Create checkpoint state with current delta version
+        let mut checkpoint_with_version = checkpoint.clone();
+        checkpoint_with_version.delta_version = self.last_version;
+
+        // Commit with checkpoint
+        let new_version = commit_to_delta_with_checkpoint(
+            &mut self.table,
+            add_actions,
+            Some((&checkpoint_with_version, next_checkpoint_version)),
+            &self.partition_by,
+            &self.table_name,
+        )
+        .await?;
+
+        // Only update state after successful commit
+        self.checkpoint_version = next_checkpoint_version;
+        self.last_version = new_version;
+        info!(
+            target = %self.table_name,
+            "Committed {} files with checkpoint v{} to Delta Lake, version {}",
+            files.len(),
+            self.checkpoint_version,
+            new_version
+        );
+
+        Ok(Some(new_version))
     }
 
-    /// Recover checkpoint state from the Delta transaction log.
-    ///
-    /// Scans the transaction log backwards from the latest version looking for
-    /// a `Txn` action with app_id starting with "blizzard:" and decodes the
-    /// embedded checkpoint state.
-    ///
-    /// Returns `Some((checkpoint_state, checkpoint_version))` if found.
-    pub async fn recover_checkpoint_from_log(
+    async fn create_checkpoint(&self) -> Result<(), DeltaError> {
+        deltalake::checkpoints::create_checkpoint(&self.table, None)
+            .await
+            .map_err(|source| DeltaError::DeltaOperation { source })
+    }
+
+    fn version(&self) -> i64 {
+        self.last_version
+    }
+
+    fn checkpoint_version(&self) -> i64 {
+        self.checkpoint_version
+    }
+}
+
+#[async_trait]
+impl SchemaEvolution for DeltaSink {
+    fn schema(&self) -> Option<&SchemaRef> {
+        self.cached_schema.as_ref()
+    }
+
+    fn validate_schema(
+        &self,
+        incoming: &Schema,
+        mode: SchemaEvolutionMode,
+    ) -> Result<EvolutionAction, crate::error::SchemaError> {
+        let table_schema = match &self.cached_schema {
+            Some(schema) => schema,
+            None => {
+                // No cached schema - accept incoming schema
+                return Ok(EvolutionAction::None);
+            }
+        };
+
+        validate_schema_evolution(table_schema, incoming, mode)
+    }
+
+    async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
+        let action_name = match &action {
+            EvolutionAction::None => "none",
+            EvolutionAction::Merge { .. } => "merge",
+            EvolutionAction::Overwrite { .. } => "overwrite",
+        };
+
+        match &action {
+            EvolutionAction::None => {}
+            EvolutionAction::Merge { new_schema } => {
+                info!(
+                    target = %self.table_name,
+                    "Evolving schema: adding {} new fields",
+                    new_schema.fields().len()
+                        - self.cached_schema.as_ref().map_or(0, |s| s.fields().len())
+                );
+            }
+            EvolutionAction::Overwrite { new_schema } => {
+                warn!(
+                    target = %self.table_name,
+                    "Overwriting schema with {} fields",
+                    new_schema.fields().len()
+                );
+            }
+        }
+
+        if let EvolutionAction::Merge { new_schema } | EvolutionAction::Overwrite { new_schema } =
+            action
+        {
+            self.apply_schema_change(&new_schema).await?;
+            self.cached_schema = Some(new_schema);
+        }
+
+        if !matches!(action_name, "none") {
+            SchemaEvolved {
+                target: self.table_name.clone(),
+                action: action_name.to_string(),
+            }
+            .emit();
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CheckpointRecovery for DeltaSink {
+    async fn recover_checkpoint_from_log(
         &mut self,
     ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
         use deltalake::logstore::{get_actions, read_commit_entry};
@@ -419,62 +390,15 @@ impl DeltaSink {
         }
         Ok(None)
     }
-}
-
-#[async_trait]
-impl TableCommitter for DeltaSink {
-    async fn commit_files_with_checkpoint(
-        &mut self,
-        files: &[FinishedFile],
-        checkpoint: &CheckpointState,
-    ) -> Result<Option<i64>, DeltaError> {
-        DeltaSink::commit_files_with_checkpoint(self, files, checkpoint).await
-    }
-
-    async fn create_checkpoint(&self) -> Result<(), DeltaError> {
-        deltalake::checkpoints::create_checkpoint(self.table(), None)
-            .await
-            .map_err(|source| DeltaError::DeltaOperation { source })
-    }
-
-    fn version(&self) -> i64 {
-        DeltaSink::version(self)
-    }
-
-    fn checkpoint_version(&self) -> i64 {
-        DeltaSink::checkpoint_version(self)
-    }
-}
-
-#[async_trait]
-impl SchemaEvolution for DeltaSink {
-    fn schema(&self) -> Option<&SchemaRef> {
-        DeltaSink::schema(self)
-    }
-
-    fn validate_schema(
-        &self,
-        incoming: &Schema,
-        mode: SchemaEvolutionMode,
-    ) -> Result<EvolutionAction, crate::error::SchemaError> {
-        DeltaSink::validate_schema(self, incoming, mode)
-    }
-
-    async fn evolve_schema(&mut self, action: EvolutionAction) -> Result<(), DeltaError> {
-        DeltaSink::evolve_schema(self, action).await
-    }
-}
-
-#[async_trait]
-impl CheckpointRecovery for DeltaSink {
-    async fn recover_checkpoint_from_log(
-        &mut self,
-    ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
-        DeltaSink::recover_checkpoint_from_log(self).await
-    }
 
     fn get_committed_paths(&self) -> HashSet<String> {
-        DeltaSink::get_committed_paths(self)
+        match self.table.get_file_uris() {
+            Ok(iter) => iter.collect(),
+            Err(e) => {
+                warn!(target = %self.table_name, "Failed to get committed paths: {e}");
+                HashSet::new()
+            }
+        }
     }
 }
 

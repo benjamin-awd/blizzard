@@ -15,7 +15,7 @@ use blizzard_core::watermark::WatermarkState;
 use penguin::SchemaEvolutionMode;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::schema::infer_schema_from_first_file;
-use penguin::sink::DeltaSink;
+use penguin::sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter};
 
 /// Test: Checkpoint commit and recovery via Delta Lake Txn actions.
 ///

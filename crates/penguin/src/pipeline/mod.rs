@@ -29,7 +29,7 @@ use crate::error::{DeltaSinkNotInitializedSnafu, PipelineError, StorageSnafu};
 use crate::incoming::{IncomingConfig, IncomingReader};
 use crate::schema::infer_schema_from_first_file;
 use crate::schema::manager::SchemaManager;
-use crate::sink::DeltaSink;
+use crate::sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter};
 
 /// A penguin pipeline unit for committing parquet files to Delta Lake.
 pub struct Pipeline {

@@ -18,7 +18,7 @@ use blizzard_core::storage::StorageProvider;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
 use penguin::incoming::{IncomingConfig, IncomingReader};
 use penguin::schema::inference::infer_schema_from_first_file;
-use penguin::sink::DeltaSink;
+use penguin::sink::{CheckpointRecovery, DeltaSink, TableCommitter};
 
 fn test_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
