@@ -135,8 +135,7 @@ impl DeltaSink {
         files: &[FinishedFile],
         checkpoint: &CheckpointState,
     ) -> Result<Option<i64>, DeltaError> {
-        // Increment checkpoint version
-        self.checkpoint_version += 1;
+        let next_checkpoint_version = self.checkpoint_version + 1;
 
         // Create add actions for files
         let add_actions: Vec<Action> = files.iter().map(create_add_action).collect();
@@ -149,12 +148,14 @@ impl DeltaSink {
         let new_version = commit_to_delta_with_checkpoint(
             &mut self.table,
             add_actions,
-            Some((&checkpoint_with_version, self.checkpoint_version)),
+            Some((&checkpoint_with_version, next_checkpoint_version)),
             &self.partition_by,
             &self.table_name,
         )
         .await?;
 
+        // Only update state after successful commit
+        self.checkpoint_version = next_checkpoint_version;
         self.last_version = new_version;
         info!(
             target = %self.table_name,
@@ -569,5 +570,49 @@ mod tests {
             message: "bad checkpoint".to_string(),
         };
         assert!(!err.is_table_not_found());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_version_unchanged_on_failed_commit() {
+        use blizzard_core::FinishedFile;
+        use deltalake::arrow::datatypes::{DataType, Field, Schema};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = StorageProvider::for_url_with_options(
+            temp_dir.path().to_str().unwrap(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
+        let mut sink = DeltaSink::new(&storage, &schema, vec![], "test".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(sink.checkpoint_version(), 0);
+
+        // Delete the _delta_log directory to make commits fail
+        std::fs::remove_dir_all(temp_dir.path().join("_delta_log")).unwrap();
+
+        let files = vec![FinishedFile::without_bytes(
+            "test.parquet".to_string(),
+            1024,
+            100,
+            HashMap::new(),
+            None,
+        )];
+        let checkpoint = crate::checkpoint::CheckpointState::default();
+
+        let result = sink.commit_files_with_checkpoint(&files, &checkpoint).await;
+        assert!(result.is_err(), "commit should fail with missing log dir");
+
+        // checkpoint_version must not have been incremented
+        assert_eq!(
+            sink.checkpoint_version(),
+            0,
+            "checkpoint_version should be unchanged after failed commit"
+        );
     }
 }
