@@ -94,6 +94,10 @@ pub enum DeltaError {
     /// Failed to parse path.
     #[snafu(display("Failed to parse path: {path}"))]
     PathParse { path: String },
+
+    /// Operation timed out.
+    #[snafu(display("Delta operation timed out after {seconds}s: {operation}"))]
+    Timeout { operation: String, seconds: u64 },
 }
 
 impl DeltaError {

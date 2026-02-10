@@ -15,6 +15,7 @@ mod table;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -22,6 +23,9 @@ use deltalake::DeltaTable;
 use deltalake::arrow::datatypes::{Schema, SchemaRef};
 use deltalake::kernel::Action;
 use tracing::{debug, info, warn};
+
+/// Timeout for schema evolution commits.
+const SCHEMA_EVOLUTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
@@ -253,6 +257,7 @@ impl DeltaSink {
     /// Apply a schema change to the Delta table.
     ///
     /// Uses Delta Lake's metadata action to update the schema.
+    /// Applies a timeout to prevent hanging forever on commit or reload.
     async fn apply_schema_change(&mut self, new_schema: &Schema) -> Result<(), DeltaError> {
         use deltalake::kernel::MetadataExt;
         use deltalake::kernel::transaction::CommitBuilder;
@@ -273,26 +278,35 @@ impl DeltaSink {
                 source: deltalake::DeltaTableError::Kernel { source },
             })?;
 
-        // Commit the metadata change
+        // Commit the metadata change (with timeout to prevent hanging)
         let actions = vec![Action::Metadata(new_metadata)];
 
-        let version = CommitBuilder::default()
-            .with_actions(actions)
-            .build(
+        let commit_result = tokio::time::timeout(
+            SCHEMA_EVOLUTION_TIMEOUT,
+            CommitBuilder::default().with_actions(actions).build(
                 Some(snapshot),
                 self.table.log_store(),
                 deltalake::protocol::DeltaOperation::SetTableProperties {
                     properties: std::collections::HashMap::new(),
                 },
-            )
-            .await
-            .map_err(|source| DeltaError::DeltaOperation { source })?
-            .version;
+            ),
+        )
+        .await
+        .map_err(|_| DeltaError::Timeout {
+            operation: "schema evolution commit".to_string(),
+            seconds: SCHEMA_EVOLUTION_TIMEOUT.as_secs(),
+        })?
+        .map_err(|source| DeltaError::DeltaOperation { source })?;
 
-        // Reload table to get new state
-        self.table
-            .load()
+        let version = commit_result.version;
+
+        // Reload table to get new state (with timeout)
+        tokio::time::timeout(SCHEMA_EVOLUTION_TIMEOUT, self.table.load())
             .await
+            .map_err(|_| DeltaError::Timeout {
+                operation: "table reload after schema evolution".to_string(),
+                seconds: SCHEMA_EVOLUTION_TIMEOUT.as_secs(),
+            })?
             .map_err(|source| DeltaError::DeltaOperation { source })?;
 
         self.last_version = version;
