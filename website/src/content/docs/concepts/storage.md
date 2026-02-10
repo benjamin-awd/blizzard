@@ -187,18 +187,21 @@ let data = storage.get("file1.parquet").await?;  // Gets s3://bucket/prefix/file
 
 ## File Listing
 
-The `list_ndjson_files()` function recursively lists `.ndjson.gz` files:
+The `list_files_cold_start()` function recursively lists files matching a configured extension:
 
 ```rust
-let files = list_ndjson_files(&storage).await?;
+let config = FileListingConfig { extension: ".ndjson.gz", target: "my-pipeline" };
+let files = list_files_cold_start(&storage, prefixes, &config).await?;
 // Returns sorted list: ["path/file1.ndjson.gz", "path/file2.ndjson.gz", ...]
 ```
 
 Behavior:
 - Recursively lists all subdirectories
-- Filters to `.ndjson.gz` extension only
+- Filters by the configured extension (e.g., `.ndjson.gz` or `.parquet`)
+- Skips `_`-prefixed directories (e.g., `_delta_log`, `_blizzard`)
 - Returns paths sorted alphabetically
 - Paths are relative to the configured prefix
+- Supports optional partition prefix filtering for efficient scoped listing
 
 ## Metrics
 

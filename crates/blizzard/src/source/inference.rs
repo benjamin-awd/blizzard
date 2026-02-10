@@ -18,9 +18,10 @@ use deltalake::arrow::json::reader::infer_json_schema;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use blizzard_core::StorageProviderRef;
 use blizzard_core::emit;
 use blizzard_core::metrics::events::SchemaTypeConflicts;
-use blizzard_core::{StorageProviderRef, storage::list_ndjson_files_with_limit};
+use blizzard_core::watermark::{FileListingConfig, list_files_with_limit};
 
 use super::compression::CompressionCodecExt;
 use crate::config::CompressionFormat;
@@ -307,7 +308,11 @@ pub async fn infer_schema_from_source(
     coerce_conflicts_to_utf8: bool,
 ) -> Result<SchemaRef, InferenceError> {
     // List only enough files for inference (stop early to avoid listing thousands)
-    let files = list_ndjson_files_with_limit(storage, prefixes, Some(MAX_FILE_ATTEMPTS), pipeline)
+    let config = FileListingConfig {
+        extension: ".ndjson.gz",
+        target: pipeline,
+    };
+    let files = list_files_with_limit(storage, prefixes, MAX_FILE_ATTEMPTS, &config)
         .await
         .map_err(|e| InferenceError::ReadFile { source: e })?;
 

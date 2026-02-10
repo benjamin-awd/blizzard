@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use blizzard_core::StorageProviderRef;
-use blizzard_core::storage::list_ndjson_files_with_prefixes;
 use blizzard_core::types::SourceState;
+use blizzard_core::watermark::{FileListingConfig, list_files_cold_start};
 use indexmap::IndexMap;
 use tracing::{info, warn};
 
@@ -101,7 +101,11 @@ impl DiscoverySnapshot {
                 .context(StorageSnafu { uri })
             }
             DiscoverySnapshot::Processed { processed_files } => {
-                let all_files = list_ndjson_files_with_prefixes(storage, prefixes, pipeline_key)
+                let config = FileListingConfig {
+                    extension: ".ndjson.gz",
+                    target: pipeline_key,
+                };
+                let all_files = list_files_cold_start(storage, prefixes, &config)
                     .await
                     .context(StorageSnafu {
                         uri: storage.url().to_string(),

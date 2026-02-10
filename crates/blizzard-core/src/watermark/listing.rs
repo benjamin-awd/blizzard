@@ -307,6 +307,137 @@ pub async fn list_files_cold_start(
     }
 }
 
+/// List files with a limit for efficient early termination.
+///
+/// Scans files with the configured extension and stops once `limit` files
+/// are found. When prefixes are provided, scans them sequentially to allow
+/// early termination across prefixes.
+///
+/// This is useful for operations that only need a few files (e.g., schema
+/// inference which only needs 1-3 files).
+///
+/// # Arguments
+///
+/// * `storage` - Storage provider for the source directory
+/// * `prefixes` - Optional partition prefixes to scan
+/// * `limit` - Maximum number of files to return (callers without a limit
+///   should use `list_files_cold_start` instead)
+/// * `config` - File listing configuration (extension and target for logging)
+///
+/// # Returns
+///
+/// Up to `limit` file paths (relative to storage root),
+/// sorted lexicographically for deterministic ordering.
+pub async fn list_files_with_limit(
+    storage: &StorageProvider,
+    prefixes: Option<&[String]>,
+    limit: usize,
+    config: &FileListingConfig<'_>,
+) -> Result<Vec<String>, StorageError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::with_capacity(limit);
+
+    match prefixes {
+        Some(prefixes) if !prefixes.is_empty() => {
+            debug!(
+                target = %config.target,
+                limit = limit,
+                prefix_count = prefixes.len(),
+                "Listing files with limit under prefixes"
+            );
+
+            for prefix in prefixes {
+                let prefix_str = if prefix.ends_with('/') {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix}/")
+                };
+
+                let mut stream = match storage.list_with_prefix(&prefix_str).await {
+                    Ok(s) => s,
+                    Err(e) if e.is_not_found() => {
+                        debug!(target = %config.target, prefix = %prefix, "Prefix not found, skipping");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(path) => {
+                            let path_str = path.to_string();
+                            // Skip internal directories
+                            if path_str.starts_with('_') {
+                                continue;
+                            }
+                            if path_str.ends_with(config.extension) {
+                                files.push(path_str);
+                                if files.len() >= limit {
+                                    debug!(
+                                        target = %config.target,
+                                        count = files.len(),
+                                        "Reached file limit, stopping early"
+                                    );
+                                    files.sort();
+                                    return Ok(files);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                target = %config.target,
+                                "Error listing file in prefix {}: {}", prefix, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            debug!(
+                target = %config.target,
+                limit = limit,
+                "Listing files with limit (no prefix filter)"
+            );
+
+            let mut stream = storage.list(true).await?;
+
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(path) => {
+                        let path_str = path.to_string();
+                        // Skip internal directories
+                        if path_str.starts_with('_') {
+                            continue;
+                        }
+                        if path_str.ends_with(config.extension) {
+                            files.push(path_str);
+                            if files.len() >= limit {
+                                debug!(
+                                    target = %config.target,
+                                    count = files.len(),
+                                    "Reached file limit, stopping early"
+                                );
+                                files.sort();
+                                return Ok(files);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target = %config.target, "Error listing file: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
 /// List files using per-partition watermarks for efficient filtering.
 ///
 /// For each partition:
@@ -945,6 +1076,105 @@ mod tests {
         assert!(files.contains(&"date=2026-01-28/file1.parquet".to_string()));
         assert!(!files.contains(&"date=2026-01-26/old-file.parquet".to_string()));
         assert!(!files.contains(&"date=2026-01-27/file1.parquet".to_string()));
+    }
+
+    // =========================================================================
+    // list_files_with_limit
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_list_files_with_limit_stops_early() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create many files (more than the limit)
+        let partition = temp_dir.path().join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        for i in 0..10 {
+            std::fs::write(partition.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
+        }
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Request only 3 files
+        let files = list_files_with_limit(&storage, None, 3, &config)
+            .await
+            .unwrap();
+
+        // Should return exactly 3 files (early termination)
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_files_with_limit_with_prefixes() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create multiple partitions with files
+        let partition1 = temp_dir.path().join("date=2024-01-01");
+        let partition2 = temp_dir.path().join("date=2024-01-02");
+        std::fs::create_dir_all(&partition1).unwrap();
+        std::fs::create_dir_all(&partition2).unwrap();
+
+        for i in 0..5 {
+            std::fs::write(partition1.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
+            std::fs::write(partition2.join(format!("file{i:02}.ndjson.gz")), b"").unwrap();
+        }
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        let prefixes = vec!["date=2024-01-01".to_string(), "date=2024-01-02".to_string()];
+
+        // Request only 3 files with prefix filter
+        let files = list_files_with_limit(&storage, Some(&prefixes), 3, &config)
+            .await
+            .unwrap();
+
+        // Should return exactly 3 files (early termination)
+        assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_files_with_limit_zero_returns_empty() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let partition = temp_dir.path().join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+        std::fs::write(partition.join("file.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Limit of 0 should return empty
+        let files = list_files_with_limit(&storage, None, 0, &config)
+            .await
+            .unwrap();
+
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_files_with_limit_fewer_files_than_limit() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let partition = temp_dir.path().join("date=2024-01-01");
+        std::fs::create_dir_all(&partition).unwrap();
+
+        // Create only 2 files
+        std::fs::write(partition.join("file01.ndjson.gz"), b"").unwrap();
+        std::fs::write(partition.join("file02.ndjson.gz"), b"").unwrap();
+
+        let storage = create_test_storage(&temp_dir).await;
+        let config = ndjson_config("test");
+
+        // Request 10 files but only 2 exist
+        let files = list_files_with_limit(&storage, None, 10, &config)
+            .await
+            .unwrap();
+
+        // Should return all 2 files
+        assert_eq!(files.len(), 2);
     }
 
     #[tokio::test]

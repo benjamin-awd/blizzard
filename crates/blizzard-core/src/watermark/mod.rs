@@ -20,8 +20,8 @@ pub mod state;
 
 pub use listing::{
     FileListingConfig, list_files_above_partition_watermarks, list_files_above_watermark,
-    list_files_above_watermark_with_prefixes, list_files_cold_start, list_partitions,
-    parse_watermark,
+    list_files_above_watermark_with_prefixes, list_files_cold_start, list_files_with_limit,
+    list_partitions, parse_watermark,
 };
 pub use state::WatermarkState;
 
