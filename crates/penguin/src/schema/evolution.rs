@@ -237,48 +237,6 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
     )
 }
 
-/// Merge a table schema with an incoming schema.
-///
-/// Returns a new schema that includes:
-/// - All fields from the table schema
-/// - New nullable fields from the incoming schema
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The incoming schema has new required (non-nullable) fields
-/// - There are incompatible type changes
-pub fn merge_schemas(table: &Schema, incoming: &Schema) -> Result<SchemaRef, SchemaError> {
-    let comparison = compare_schemas(table, incoming);
-
-    // Check for type changes that aren't allowed
-    if !comparison.type_changes.is_empty() {
-        let (field, from, to) = &comparison.type_changes[0];
-        return Err(SchemaError::TypeChangeNotAllowed {
-            field: field.clone(),
-            from: format!("{from:?}"),
-            to: format!("{to:?}"),
-        });
-    }
-
-    // Check for new required fields
-    if let Some(field) = comparison.first_new_required_field() {
-        return Err(SchemaError::RequiredFieldAddition {
-            field_name: field.name().clone(),
-        });
-    }
-
-    // Build merged schema: start with table fields, add new nullable fields
-    let mut merged_fields: Vec<Arc<Field>> = table.fields().iter().cloned().collect();
-
-    // Add new nullable fields from incoming schema
-    for field in &comparison.new_fields {
-        merged_fields.push(Arc::new(field.clone()));
-    }
-
-    Ok(Arc::new(Schema::new(merged_fields)))
-}
-
 /// Describes an evolution action to be taken on the table schema.
 #[derive(Debug, Clone)]
 pub enum EvolutionAction {
@@ -336,8 +294,11 @@ pub fn validate_schema_evolution(
                 // Only missing fields - no schema change needed
                 Ok(EvolutionAction::None)
             } else {
-                let new_schema = merge_schemas(table_schema, incoming_schema)?;
-                Ok(EvolutionAction::Merge { new_schema })
+                let mut fields: Vec<Arc<Field>> = table_schema.fields().iter().cloned().collect();
+                fields.extend(comparison.new_fields.iter().map(|f| Arc::new(f.clone())));
+                Ok(EvolutionAction::Merge {
+                    new_schema: Arc::new(Schema::new(fields)),
+                })
             }
         }
         SchemaEvolutionMode::Overwrite => {
@@ -613,56 +574,6 @@ mod tests {
         assert!(comparison.new_fields.is_empty());
         assert_eq!(comparison.missing_fields.len(), 1);
         assert_eq!(comparison.missing_fields[0].name(), "name");
-    }
-
-    #[test]
-    fn test_merge_schemas_adds_nullable_field() {
-        let table = make_schema(vec![("id", DataType::Int64, false)]);
-        let incoming = make_schema(vec![
-            ("id", DataType::Int64, false),
-            ("email", DataType::Utf8, true),
-        ]);
-
-        let merged = merge_schemas(&table, &incoming).unwrap();
-
-        assert_eq!(merged.fields().len(), 2);
-        assert_eq!(merged.field(0).name(), "id");
-        assert_eq!(merged.field(1).name(), "email");
-    }
-
-    #[test]
-    fn test_merge_schemas_rejects_required_field() {
-        let table = make_schema(vec![("id", DataType::Int64, false)]);
-        let incoming = make_schema(vec![
-            ("id", DataType::Int64, false),
-            ("required", DataType::Utf8, false), // not nullable
-        ]);
-
-        let result = merge_schemas(&table, &incoming);
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SchemaError::RequiredFieldAddition { field_name } => {
-                assert_eq!(field_name, "required");
-            }
-            e => panic!("Expected RequiredFieldAddition error, got: {e:?}"),
-        }
-    }
-
-    #[test]
-    fn test_merge_schemas_rejects_type_change() {
-        let table = make_schema(vec![("id", DataType::Int64, false)]);
-        let incoming = make_schema(vec![("id", DataType::Utf8, false)]);
-
-        let result = merge_schemas(&table, &incoming);
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SchemaError::TypeChangeNotAllowed { field, .. } => {
-                assert_eq!(field, "id");
-            }
-            e => panic!("Expected TypeChangeNotAllowed error, got: {e:?}"),
-        }
     }
 
     #[test]

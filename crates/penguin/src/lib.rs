@@ -20,9 +20,7 @@ pub use config::Config;
 pub use error::PipelineError;
 pub use incoming::{FileReader, IncomingFile, IncomingReader};
 pub use pipeline::Pipeline;
-pub use schema::{
-    SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas, merge_schemas,
-};
+pub use schema::{SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas};
 pub use sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter, TableSink};
 
 // Re-export from blizzard-core

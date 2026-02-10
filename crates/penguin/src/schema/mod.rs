@@ -7,6 +7,6 @@ pub mod evolution;
 pub mod inference;
 pub mod manager;
 
-pub use evolution::{SchemaComparison, SchemaEvolutionMode, compare_schemas, merge_schemas};
+pub use evolution::{SchemaComparison, SchemaEvolutionMode, compare_schemas};
 pub use inference::infer_schema_from_first_file;
 pub use manager::SchemaManager;
