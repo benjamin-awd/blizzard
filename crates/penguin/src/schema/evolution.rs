@@ -8,7 +8,6 @@
 
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use blizzard_core::schema::{coerce_field, coerce_schema};
@@ -37,8 +36,6 @@ pub struct SchemaComparison {
     pub missing_fields: Vec<Field>,
     /// Type changes: (field_name, table_type, incoming_type).
     pub type_changes: Vec<(String, DataType, DataType)>,
-    /// Whether the schemas are compatible for merge mode.
-    pub is_compatible: bool,
 }
 
 impl SchemaComparison {
@@ -56,6 +53,11 @@ impl SchemaComparison {
     pub fn first_new_required_field(&self) -> Option<&Field> {
         self.new_fields.iter().find(|f| !f.is_nullable())
     }
+
+    /// Whether the schemas are compatible for merge mode.
+    pub fn is_compatible(&self) -> bool {
+        self.type_changes.is_empty() && !self.has_new_required_fields()
+    }
 }
 
 /// Compare a table schema against an incoming schema.
@@ -71,53 +73,29 @@ impl SchemaComparison {
 /// - Date32 -> Date64
 /// - Timestamp precision coercion to Microsecond (Delta Lake requirement)
 pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
-    let table_fields: HashMap<&str, &Field> = table
-        .fields()
-        .iter()
-        .map(|f| (f.name().as_str(), f.as_ref()))
-        .collect();
-
-    let incoming_fields: HashMap<&str, &Field> = incoming
-        .fields()
-        .iter()
-        .map(|f| (f.name().as_str(), f.as_ref()))
-        .collect();
-
     let mut new_fields = Vec::new();
     let mut missing_fields = Vec::new();
     let mut type_changes = Vec::new();
-    let mut is_compatible = true;
 
-    // Find new fields (in incoming but not in table)
+    // Find new fields and type changes (incoming vs table)
     for field in incoming.fields() {
-        if let Some(table_field) = table_fields.get(field.name().as_str()) {
-            // Field exists in both - check for type changes
-            if !are_data_types_equivalent(table_field.data_type(), field.data_type()) {
-                // Check if this is an allowed type widening
-                if !is_type_widening(table_field.data_type(), field.data_type()) {
-                    type_changes.push((
-                        field.name().clone(),
-                        table_field.data_type().clone(),
-                        field.data_type().clone(),
-                    ));
-                    is_compatible = false;
-                }
+        if let Some((_, table_field)) = table.column_with_name(field.name()) {
+            if !are_types_compatible(table_field.data_type(), field.data_type()) {
+                type_changes.push((
+                    field.name().clone(),
+                    table_field.data_type().clone(),
+                    field.data_type().clone(),
+                ));
             }
         } else {
-            // New field
             new_fields.push(field.as_ref().clone());
-            // New required fields make the schema incompatible for merge
-            if !field.is_nullable() {
-                is_compatible = false;
-            }
         }
     }
 
     // Find missing fields (in table but not in incoming)
     for field in table.fields() {
-        if !incoming_fields.contains_key(field.name().as_str()) {
+        if incoming.column_with_name(field.name()).is_none() {
             missing_fields.push(field.as_ref().clone());
-            // Missing fields are OK - they'll be filled with NULL on read
         }
     }
 
@@ -125,116 +103,71 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
         new_fields,
         missing_fields,
         type_changes,
-        is_compatible,
     }
 }
 
-/// Check if two data types are structurally equivalent, ignoring field names
-/// in container types like List and LargeList (Arrow uses "element", Parquet
-/// uses "item"), while still requiring matching field names in Struct types.
+/// Check if two data types are compatible for schema evolution.
 ///
-/// Delegates to [`DataType::equals_datatype`] for non-Struct types, which
-/// handles List, LargeList, FixedSizeList, ListView, Map, Dictionary, etc.
-fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
+/// Returns true if types are structurally equivalent or represent valid widening/coercion:
+/// - Struct: name-based field matching with recursive compatibility
+/// - Timestamp: coercion to microsecond precision (same timezone, Delta Lake requirement)
+/// - List/LargeList: recursive inner type check (ignores field names like "element" vs "item")
+/// - Scalar widening: Int8→Int16→Int32→Int64, UInt8→…→UInt64, Float32→Float64, Date32→Date64
+/// - All other types: structural equality via [`DataType::equals_datatype`]
+fn are_types_compatible(a: &DataType, b: &DataType) -> bool {
     if a == b {
         return true;
     }
     match (a, b) {
         // Struct fields are matched by name (not position) since JSON field
         // ordering is not guaranteed and different writers may emit fields in
-        // different orders.
+        // different orders. Recurse into each field's data type.
         (DataType::Struct(a_fields), DataType::Struct(b_fields)) => {
-            if a_fields.len() != b_fields.len() {
-                return false;
-            }
-            a_fields.iter().all(|a_field| {
-                b_fields.find(a_field.name()).is_some_and(|(_, b_field)| {
-                    a_field.is_nullable() == b_field.is_nullable()
-                        && are_data_types_equivalent(a_field.data_type(), b_field.data_type())
+            a_fields.len() == b_fields.len()
+                && a_fields.iter().all(|a_field| {
+                    b_fields.find(a_field.name()).is_some_and(|(_, b_field)| {
+                        are_types_compatible(a_field.data_type(), b_field.data_type())
+                    })
                 })
-            })
         }
-        _ => a.equals_datatype(b),
-    }
-}
-
-/// Check if a type change represents valid type widening or coercion.
-///
-/// Allowed widenings:
-/// - Integer widening: Int8 -> Int16 -> Int32 -> Int64
-/// - Unsigned integer widening: UInt8 -> UInt16 -> UInt32 -> UInt64
-/// - Float widening: Float32 -> Float64
-/// - Date widening: Date32 -> Date64
-/// - Timestamp precision coercion: Nanosecond/Millisecond -> Microsecond
-///   (Delta Lake requires microsecond precision for timestamps)
-/// - Nested types (List, Struct): recursively checks inner types
-fn is_type_widening(from: &DataType, to: &DataType) -> bool {
-    // Handle timestamp precision coercion (Delta Lake requires microsecond precision)
-    if let (DataType::Timestamp(from_unit, from_tz), DataType::Timestamp(to_unit, to_tz)) =
-        (from, to)
-    {
-        // Timezone must match (or both be None)
-        if from_tz != to_tz {
-            return false;
+        // Timestamp: allow coercion to microsecond precision (Delta Lake requirement).
+        (DataType::Timestamp(from_unit, from_tz), DataType::Timestamp(to_unit, to_tz)) => {
+            from_tz == to_tz
+                && matches!(
+                    (from_unit, to_unit),
+                    (TimeUnit::Nanosecond, TimeUnit::Microsecond)
+                        | (TimeUnit::Millisecond, TimeUnit::Microsecond)
+                )
         }
-        // Allow coercion to microseconds from nanoseconds or milliseconds
-        return matches!(
-            (from_unit, to_unit),
-            (TimeUnit::Nanosecond, TimeUnit::Microsecond)
-                | (TimeUnit::Millisecond, TimeUnit::Microsecond)
-        );
-    }
-
-    // Handle List types - recursively check inner field type
-    if let (DataType::List(from_field), DataType::List(to_field)) = (from, to) {
-        return are_data_types_equivalent(from_field.data_type(), to_field.data_type())
-            || is_type_widening(from_field.data_type(), to_field.data_type());
-    }
-
-    // Handle LargeList types
-    if let (DataType::LargeList(from_field), DataType::LargeList(to_field)) = (from, to) {
-        return are_data_types_equivalent(from_field.data_type(), to_field.data_type())
-            || is_type_widening(from_field.data_type(), to_field.data_type());
-    }
-
-    // Handle Struct types - all fields must be compatible (matched by name)
-    if let (DataType::Struct(from_fields), DataType::Struct(to_fields)) = (from, to) {
-        // Must have same number of fields for widening
-        if from_fields.len() != to_fields.len() {
-            return false;
+        // List/LargeList: recursive inner type check.
+        // Ignores inner field names ("element" vs "item") since Arrow and Parquet differ.
+        (DataType::List(a_field), DataType::List(b_field))
+        | (DataType::LargeList(a_field), DataType::LargeList(b_field)) => {
+            are_types_compatible(a_field.data_type(), b_field.data_type())
         }
-        for from_field in from_fields.iter() {
-            let Some((_, to_field)) = to_fields.find(from_field.name()) else {
-                return false;
-            };
-            // If types differ, check if it's a valid widening
-            if !are_data_types_equivalent(from_field.data_type(), to_field.data_type())
-                && !is_type_widening(from_field.data_type(), to_field.data_type())
-            {
-                return false;
-            }
+        // Scalar widening or structural equality for everything else.
+        _ => {
+            a.equals_datatype(b)
+                || matches!(
+                    (a, b),
+                    // Integer widening
+                    (DataType::Int8, DataType::Int16 | DataType::Int32 | DataType::Int64)
+                        | (DataType::Int16, DataType::Int32 | DataType::Int64)
+                        | (DataType::Int32, DataType::Int64)
+                        // Unsigned integer widening
+                        | (
+                            DataType::UInt8,
+                            DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+                        )
+                        | (DataType::UInt16, DataType::UInt32 | DataType::UInt64)
+                        | (DataType::UInt32, DataType::UInt64)
+                        // Float widening
+                        | (DataType::Float32, DataType::Float64)
+                        // Date widening
+                        | (DataType::Date32, DataType::Date64)
+                )
         }
-        return true;
     }
-
-    matches!(
-        (from, to),
-        // Integer widening
-        (DataType::Int8, DataType::Int16 | DataType::Int32 | DataType::Int64)
-            | (DataType::Int16, DataType::Int32 | DataType::Int64)
-            | (DataType::Int32, DataType::Int64)
-            // Unsigned integer widening
-            | (
-                DataType::UInt8,
-                DataType::UInt16 | DataType::UInt32 | DataType::UInt64
-            )
-            | (DataType::UInt16, DataType::UInt32 | DataType::UInt64)
-            | (DataType::UInt32, DataType::UInt64)
-            // Float widening
-            | (DataType::Float32, DataType::Float64)
-            // Date widening
-            | (DataType::Date32, DataType::Date64)
-    )
 }
 
 /// Describes an evolution action to be taken on the table schema.
@@ -270,32 +203,29 @@ pub fn validate_schema_evolution(
             Err(SchemaError::IncompatibleSchema { details })
         }
         SchemaEvolutionMode::Merge => {
-            if !comparison.is_compatible {
-                // Check for specific error cases
-                if !comparison.type_changes.is_empty() {
-                    let (field, from, to) = &comparison.type_changes[0];
-                    return Err(SchemaError::TypeChangeNotAllowed {
-                        field: field.clone(),
-                        from: format!("{from:?}"),
-                        to: format!("{to:?}"),
-                    });
-                }
-                if let Some(field) = comparison.first_new_required_field() {
-                    return Err(SchemaError::RequiredFieldAddition {
-                        field_name: field.name().clone(),
-                    });
-                }
-                let details = format_incompatibility(&comparison);
-                return Err(SchemaError::IncompatibleSchema { details });
+            if !comparison.type_changes.is_empty() {
+                let (field, from, to) = &comparison.type_changes[0];
+                return Err(SchemaError::TypeChangeNotAllowed {
+                    field: field.clone(),
+                    from: format!("{from:?}"),
+                    to: format!("{to:?}"),
+                });
+            }
+            if let Some(field) = comparison.first_new_required_field() {
+                return Err(SchemaError::RequiredFieldAddition {
+                    field_name: field.name().clone(),
+                });
             }
 
-            // Merge is possible
             if comparison.new_fields.is_empty() {
-                // Only missing fields - no schema change needed
                 Ok(EvolutionAction::None)
             } else {
-                let mut fields: Vec<Arc<Field>> = table_schema.fields().iter().cloned().collect();
-                fields.extend(comparison.new_fields.iter().map(|f| Arc::new(f.clone())));
+                let fields: Vec<Arc<Field>> = table_schema
+                    .fields()
+                    .iter()
+                    .cloned()
+                    .chain(comparison.new_fields.iter().map(|f| Arc::new(f.clone())))
+                    .collect();
                 Ok(EvolutionAction::Merge {
                     new_schema: Arc::new(Schema::new(fields)),
                 })
@@ -370,7 +300,7 @@ mod tests {
         let comparison = compare_schemas(&schema, &schema);
 
         assert!(comparison.is_identical());
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.new_fields.is_empty());
         assert!(comparison.missing_fields.is_empty());
         assert!(comparison.type_changes.is_empty());
@@ -387,7 +317,7 @@ mod tests {
         let comparison = compare_schemas(&table, &incoming);
 
         assert!(!comparison.is_identical());
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert_eq!(comparison.new_fields.len(), 1);
         assert_eq!(comparison.new_fields[0].name(), "email");
         assert!(comparison.missing_fields.is_empty());
@@ -405,7 +335,7 @@ mod tests {
         let comparison = compare_schemas(&table, &incoming);
 
         assert!(!comparison.is_identical());
-        assert!(!comparison.is_compatible); // incompatible due to required field
+        assert!(!comparison.is_compatible()); // incompatible due to required field
         assert!(comparison.has_new_required_fields());
         assert_eq!(comparison.new_fields.len(), 1);
         assert_eq!(comparison.new_fields[0].name(), "required_field");
@@ -419,7 +349,7 @@ mod tests {
         let comparison = compare_schemas(&table, &incoming);
 
         // Type widening is allowed
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -430,7 +360,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -441,7 +371,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
         assert_eq!(comparison.type_changes[0].0, "id");
         assert_eq!(comparison.type_changes[0].1, DataType::Int64);
@@ -463,7 +393,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -482,7 +412,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -502,7 +432,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -521,7 +451,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
     }
 
@@ -541,7 +471,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
     }
 
@@ -552,7 +482,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
     }
 
@@ -570,7 +500,7 @@ mod tests {
         let comparison = compare_schemas(&table, &incoming);
 
         assert!(!comparison.is_identical());
-        assert!(comparison.is_compatible); // missing fields are OK
+        assert!(comparison.is_compatible()); // missing fields are OK
         assert!(comparison.new_fields.is_empty());
         assert_eq!(comparison.missing_fields.len(), 1);
         assert_eq!(comparison.missing_fields[0].name(), "name");
@@ -693,7 +623,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -714,7 +644,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -736,7 +666,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
         assert!(comparison.is_identical());
     }
@@ -758,7 +688,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
     }
 
@@ -799,7 +729,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -820,7 +750,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(!comparison.is_compatible);
+        assert!(!comparison.is_compatible());
         assert_eq!(comparison.type_changes.len(), 1);
     }
 
@@ -863,7 +793,7 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 
@@ -909,7 +839,7 @@ mod tests {
         let comparison = compare_schemas(&table, &incoming);
 
         assert!(comparison.is_identical());
-        assert!(comparison.is_compatible);
+        assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
     }
 }
