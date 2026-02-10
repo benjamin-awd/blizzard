@@ -392,7 +392,7 @@ impl PollingProcessor for Processor {
                 &files,
                 self.table_config.delta_checkpoint_interval,
             )
-            .await;
+            .await?;
 
         if committed_count > 0 {
             // Update watermark to highest committed path

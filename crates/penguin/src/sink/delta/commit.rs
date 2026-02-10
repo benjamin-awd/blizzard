@@ -2,7 +2,7 @@
 //!
 //! This module provides functions for committing actions to Delta Lake tables.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use deltalake::DeltaTable;
 use deltalake::kernel::Action;
@@ -14,6 +14,9 @@ use crate::error::DeltaError;
 use crate::metrics::events::{DeltaCommitCompleted, InternalEvent};
 
 use super::actions::create_txn_action;
+
+/// Timeout for Delta commit operations (commit + table reload).
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Commit actions to Delta table with optional checkpoint.
 ///
@@ -49,9 +52,9 @@ pub async fn commit_to_delta_with_checkpoint(
     // Convert partition_by to Option<Vec<String>> for Delta operation
     let partition_by_opt = (!partition_by.is_empty()).then(|| partition_by.to_vec());
 
-    let version = CommitBuilder::default()
-        .with_actions(all_actions)
-        .build(
+    let version = tokio::time::timeout(
+        COMMIT_TIMEOUT,
+        CommitBuilder::default().with_actions(all_actions).build(
             Some(
                 table
                     .snapshot()
@@ -63,15 +66,23 @@ pub async fn commit_to_delta_with_checkpoint(
                 partition_by: partition_by_opt,
                 predicate: None,
             },
-        )
-        .await
-        .map_err(|source| DeltaError::DeltaOperation { source })?
-        .version;
+        ),
+    )
+    .await
+    .map_err(|_| DeltaError::Timeout {
+        operation: "delta commit".to_string(),
+        seconds: COMMIT_TIMEOUT.as_secs(),
+    })?
+    .map_err(|source| DeltaError::DeltaOperation { source })?
+    .version;
 
-    // Reload table to get new state
-    table
-        .load()
+    // Reload table to get new state (with timeout)
+    tokio::time::timeout(COMMIT_TIMEOUT, table.load())
         .await
+        .map_err(|_| DeltaError::Timeout {
+            operation: "table reload after commit".to_string(),
+            seconds: COMMIT_TIMEOUT.as_secs(),
+        })?
         .map_err(|source| DeltaError::DeltaOperation { source })?;
 
     DeltaCommitCompleted {

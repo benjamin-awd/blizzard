@@ -245,9 +245,9 @@ impl CheckpointCoordinator {
         sink: &mut dyn TableCommitter,
         files: &[FinishedFile],
         checkpoint_interval: usize,
-    ) -> usize {
+    ) -> Result<usize, DeltaError> {
         if files.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         let count = files.len();
@@ -277,11 +277,10 @@ impl CheckpointCoordinator {
                 debug!(target = %self.table, "No commit needed (duplicate files)");
             }
             Err(e) => {
-                tracing::error!(target = %self.table, "Failed to commit {} files to table: {}", count, e);
-                return 0;
+                return Err(e);
             }
         }
-        count
+        Ok(count)
     }
 }
 
@@ -555,7 +554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_files_returns_zero_on_error() {
+    async fn test_commit_files_returns_error_on_failure() {
         let mut sink = MockTableSink::failing();
         let coordinator = CheckpointCoordinator::new("test".to_string());
 
@@ -567,7 +566,7 @@ mod tests {
             None,
         )];
 
-        let committed = coordinator.commit_files(&mut sink, &files, 10).await;
-        assert_eq!(committed, 0, "commit_files should return 0 on error");
+        let result = coordinator.commit_files(&mut sink, &files, 10).await;
+        assert!(result.is_err(), "commit_files should return Err on failure");
     }
 }

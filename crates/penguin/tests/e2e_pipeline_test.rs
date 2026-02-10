@@ -268,7 +268,8 @@ async fn test_checkpoint_coordinator_with_delta_sink() {
     // Commit files through the coordinator
     let committed_count = coordinator
         .commit_files(&mut delta_sink, &finished_files, 10)
-        .await;
+        .await
+        .expect("commit should succeed");
 
     assert_eq!(committed_count, 1, "should commit 1 file");
     assert!(delta_sink.version() >= 1);
