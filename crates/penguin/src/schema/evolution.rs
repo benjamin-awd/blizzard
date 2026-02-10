@@ -92,7 +92,7 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
     for field in incoming.fields() {
         if let Some(table_field) = table_fields.get(field.name().as_str()) {
             // Field exists in both - check for type changes
-            if table_field.data_type() != field.data_type() {
+            if !are_data_types_equivalent(table_field.data_type(), field.data_type()) {
                 // Check if this is an allowed type widening
                 if !is_type_widening(table_field.data_type(), field.data_type()) {
                     type_changes.push((
@@ -129,6 +129,34 @@ pub fn compare_schemas(table: &Schema, incoming: &Schema) -> SchemaComparison {
     }
 }
 
+/// Check if two data types are structurally equivalent, ignoring field names
+/// in container types (List, LargeList).
+///
+/// Arrow and Parquet use different default names for list elements ("element"
+/// vs "item"), which are not semantically meaningful. This function treats
+/// such types as equivalent.
+fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a, b) {
+        (DataType::List(a_field), DataType::List(b_field))
+        | (DataType::LargeList(a_field), DataType::LargeList(b_field)) => {
+            a_field.is_nullable() == b_field.is_nullable()
+                && are_data_types_equivalent(a_field.data_type(), b_field.data_type())
+        }
+        (DataType::Struct(a_fields), DataType::Struct(b_fields)) => {
+            a_fields.len() == b_fields.len()
+                && a_fields.iter().zip(b_fields.iter()).all(|(a, b)| {
+                    a.name() == b.name()
+                        && a.is_nullable() == b.is_nullable()
+                        && are_data_types_equivalent(a.data_type(), b.data_type())
+                })
+        }
+        _ => false,
+    }
+}
+
 /// Check if a type change represents valid type widening or coercion.
 ///
 /// Allowed widenings:
@@ -158,12 +186,14 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
 
     // Handle List types - recursively check inner field type
     if let (DataType::List(from_field), DataType::List(to_field)) = (from, to) {
-        return is_type_widening(from_field.data_type(), to_field.data_type());
+        return are_data_types_equivalent(from_field.data_type(), to_field.data_type())
+            || is_type_widening(from_field.data_type(), to_field.data_type());
     }
 
     // Handle LargeList types
     if let (DataType::LargeList(from_field), DataType::LargeList(to_field)) = (from, to) {
-        return is_type_widening(from_field.data_type(), to_field.data_type());
+        return are_data_types_equivalent(from_field.data_type(), to_field.data_type())
+            || is_type_widening(from_field.data_type(), to_field.data_type());
     }
 
     // Handle Struct types - all fields must be compatible
@@ -178,7 +208,7 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
                 return false;
             }
             // If types differ, check if it's a valid widening
-            if from_field.data_type() != to_field.data_type()
+            if !are_data_types_equivalent(from_field.data_type(), to_field.data_type())
                 && !is_type_widening(from_field.data_type(), to_field.data_type())
             {
                 return false;
@@ -775,6 +805,29 @@ mod tests {
 
         assert!(comparison.is_compatible);
         assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_list_element_field_name_mismatch_is_equivalent() {
+        use std::sync::Arc;
+
+        // Delta/Arrow uses "element", Parquet uses "item" — these are semantically identical
+        let table = make_schema(vec![(
+            "tags",
+            DataType::List(Arc::new(Field::new("element", DataType::Utf8, true))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+        assert!(comparison.is_identical());
     }
 
     #[test]
