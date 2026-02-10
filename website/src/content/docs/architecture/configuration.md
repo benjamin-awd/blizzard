@@ -8,6 +8,10 @@ Blizzard is configured using a YAML file that defines source, sink, schema, and 
 ## Configuration File
 
 ```yaml
+global:
+  connection_pooling: true
+  poll_jitter_secs: 30
+
 source:
   path: "s3://my-bucket/input/*.ndjson.gz"
   compression: gzip
@@ -41,6 +45,29 @@ error_handling:
   max_failures: 0
   dlq_path: "s3://my-bucket/dlq"
 ```
+
+## Global Configuration
+
+The `global` section controls process-wide resource management. All fields are optional and have sensible defaults.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `total_concurrency` | integer | none | Max concurrent operations (uploads/downloads) across all pipelines |
+| `connection_pooling` | boolean | `true` | Share storage connections between pipelines reading from the same bucket |
+| `poll_jitter_secs` | integer | `30` | Max random jitter (seconds) added to poll intervals to prevent thundering herd |
+| `runtime_worker_threads` | integer | none | Number of Tokio runtime worker threads (important for containers) |
+
+```yaml
+global:
+  connection_pooling: true
+  poll_jitter_secs: 30
+  total_concurrency: 16
+  runtime_worker_threads: 4
+```
+
+:::note
+In containerized environments, set `runtime_worker_threads` to match the container's CPU limit. By default Tokio uses the host's core count, which can cause CFS throttling when the container has fewer cores allocated.
+:::
 
 ## Environment Variable Interpolation
 
@@ -271,6 +298,12 @@ error_handling:
 ## Full Configuration Example
 
 ```yaml
+# Global: Process-wide resource management
+global:
+  connection_pooling: true
+  poll_jitter_secs: 30
+  total_concurrency: 16
+
 # Source: Where to read NDJSON files from
 source:
   path: "s3://data-lake/raw/events/2024"
