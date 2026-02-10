@@ -41,6 +41,7 @@ impl CoercedField {
 ///
 /// Converts incompatible types into compatible ones. Specifically:
 ///
+/// - Null types are coerced to nullable Utf8 (Delta Lake has no Null type)
 /// - Timestamp precision is coerced to microseconds (Delta Lake requirement)
 /// - Nested types (List, LargeList, Struct) are recursively processed
 pub fn coerce_field(field: FieldRef) -> FieldRef {
@@ -50,6 +51,11 @@ pub fn coerce_field(field: FieldRef) -> FieldRef {
 /// Inner implementation that tracks whether coercion occurred.
 fn coerce_field_inner(field: FieldRef) -> CoercedField {
     match field.data_type() {
+        // Coerce Null to nullable Utf8 (Delta Lake has no Null type;
+        // this occurs when all values in an NDJSON field are null)
+        DataType::Null => {
+            CoercedField::changed(Arc::new(Field::new(field.name(), DataType::Utf8, true)))
+        }
         // Coerce timestamp precision to microseconds
         DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Millisecond, tz) => {
             CoercedField::changed(Arc::new(Field::new(
@@ -177,6 +183,16 @@ mod tests {
 
         // Should return the same Arc (no change needed)
         assert!(Arc::ptr_eq(&field, &coerced));
+    }
+
+    #[test]
+    fn test_coerce_field_null_to_utf8() {
+        let field = Arc::new(Field::new("unknown", DataType::Null, true));
+
+        let coerced = coerce_field(field);
+
+        assert_eq!(coerced.data_type(), &DataType::Utf8);
+        assert!(coerced.is_nullable());
     }
 
     #[test]
