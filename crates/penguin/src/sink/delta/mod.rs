@@ -30,7 +30,7 @@ const SCHEMA_EVOLUTION_TIMEOUT: Duration = Duration::from_secs(60);
 use blizzard_core::FinishedFile;
 use blizzard_core::storage::StorageProvider;
 
-use super::{CheckpointRecovery, SchemaEvolution, TableCommitter, TableSink};
+use super::{CheckpointRecovery, SchemaEvolution, TableCommitter};
 use crate::checkpoint::CheckpointState;
 use crate::error::DeltaError;
 use crate::metrics::events::{InternalEvent, SchemaEvolved};
@@ -429,13 +429,6 @@ impl CheckpointRecovery for DeltaSink {
             .get_file_uris()
             .map(|iter| iter.collect())
             .map_err(|source| DeltaError::DeltaOperation { source })
-    }
-}
-
-#[async_trait]
-impl TableSink for DeltaSink {
-    fn table_name(&self) -> &str {
-        &self.table_name
     }
 }
 

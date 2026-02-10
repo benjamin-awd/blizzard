@@ -21,7 +21,7 @@ pub use error::PipelineError;
 pub use incoming::{FileReader, IncomingFile, IncomingReader};
 pub use pipeline::Pipeline;
 pub use schema::{SchemaComparison, SchemaEvolutionMode, SchemaManager, compare_schemas};
-pub use sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter, TableSink};
+pub use sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter};
 
 // Re-export from blizzard-core
 pub use blizzard_core::{

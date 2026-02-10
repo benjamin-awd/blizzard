@@ -288,20 +288,20 @@ impl CheckpointCoordinator {
 mod tests {
     use super::*;
     use crate::schema::evolution::{EvolutionAction, SchemaEvolutionMode};
-    use crate::sink::{CheckpointRecovery, SchemaEvolution, TableCommitter, TableSink};
+    use crate::sink::{CheckpointRecovery, SchemaEvolution, TableCommitter};
     use async_trait::async_trait;
     use deltalake::arrow::datatypes::{Schema, SchemaRef};
     use std::collections::HashSet;
 
-    /// Mock TableSink for testing checkpoint recovery behavior.
-    struct MockTableSink {
+    /// Mock sink for testing checkpoint recovery behavior.
+    struct MockSink {
         committed_paths: HashSet<String>,
         checkpoint: Option<(CheckpointState, i64)>,
         should_fail: bool,
         fail_get_committed_paths: bool,
     }
 
-    impl MockTableSink {
+    impl MockSink {
         fn with_committed_paths(paths: Vec<&str>) -> Self {
             Self {
                 committed_paths: paths.into_iter().map(String::from).collect(),
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl TableCommitter for MockTableSink {
+    impl TableCommitter for MockSink {
         async fn commit_files_with_checkpoint(
             &mut self,
             _files: &[FinishedFile],
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl SchemaEvolution for MockTableSink {
+    impl SchemaEvolution for MockSink {
         fn schema(&self) -> Option<&SchemaRef> {
             None
         }
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl CheckpointRecovery for MockTableSink {
+    impl CheckpointRecovery for MockSink {
         async fn recover_checkpoint_from_log(
             &mut self,
         ) -> Result<Option<(CheckpointState, i64)>, DeltaError> {
@@ -400,17 +400,10 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl TableSink for MockTableSink {
-        fn table_name(&self) -> &str {
-            "mock_table"
-        }
-    }
-
     #[tokio::test]
     async fn test_restore_from_table_log_initializes_watermark_from_committed_paths() {
         // Create a mock sink with committed paths but no checkpoint
-        let mut sink = MockTableSink::with_committed_paths(vec![
+        let mut sink = MockSink::with_committed_paths(vec![
             "date=2026-01-28/file1.parquet",
             "date=2026-01-28/file2.parquet",
             "date=2026-01-29/file3.parquet",
@@ -441,7 +434,7 @@ mod tests {
         };
 
         // Create sink with committed paths AND a checkpoint
-        let mut sink = MockTableSink::with_committed_paths(vec![
+        let mut sink = MockSink::with_committed_paths(vec![
             "date=2026-01-29/newer-file.parquet", // Higher than checkpoint watermark
         ])
         .with_checkpoint(checkpoint, 1);
@@ -463,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_from_table_log_empty_table_no_watermark() {
         // Create a mock sink with no committed paths and no checkpoint
-        let mut sink = MockTableSink::with_committed_paths(vec![]);
+        let mut sink = MockSink::with_committed_paths(vec![]);
 
         let coordinator = CheckpointCoordinator::new("test".to_string());
 
@@ -572,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_files_returns_error_on_failure() {
-        let mut sink = MockTableSink::failing();
+        let mut sink = MockSink::failing();
         let coordinator = CheckpointCoordinator::new("test".to_string());
 
         let files = vec![FinishedFile::without_bytes(
@@ -589,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_from_table_log_propagates_get_committed_paths_error() {
-        let mut sink = MockTableSink::failing_get_committed_paths();
+        let mut sink = MockSink::failing_get_committed_paths();
         let coordinator = CheckpointCoordinator::new("test".to_string());
 
         let result = coordinator.restore_from_table_log(&mut sink).await;

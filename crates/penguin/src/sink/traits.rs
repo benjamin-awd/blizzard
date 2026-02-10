@@ -4,9 +4,6 @@
 //! - [`TableCommitter`]: Commit files and manage versions
 //! - [`SchemaEvolution`]: Schema validation and evolution
 //! - [`CheckpointRecovery`]: Checkpoint recovery and deduplication
-//!
-//! [`TableSink`] combines all three as a supertrait, preserving a single `dyn TableSink`
-//! for code that needs the full interface.
 
 use async_trait::async_trait;
 use deltalake::arrow::datatypes::{Schema, SchemaRef};
@@ -84,15 +81,4 @@ pub trait CheckpointRecovery: Send + Sync {
     /// Returns a set of paths for all files currently in the table.
     /// Used to avoid double-commits.
     fn get_committed_paths(&self) -> Result<HashSet<String>, DeltaError>;
-}
-
-/// Combined trait for table sinks that support all operations.
-///
-/// This supertrait combines [`TableCommitter`], [`SchemaEvolution`], and
-/// [`CheckpointRecovery`], providing a single `dyn TableSink` for code that
-/// needs the full interface.
-#[async_trait]
-pub trait TableSink: TableCommitter + SchemaEvolution + CheckpointRecovery {
-    /// Get the table name/identifier for logging and metrics.
-    fn table_name(&self) -> &str;
 }

@@ -4,4 +4,4 @@ pub mod delta;
 mod traits;
 
 pub use delta::DeltaSink;
-pub use traits::{CheckpointRecovery, SchemaEvolution, TableCommitter, TableSink};
+pub use traits::{CheckpointRecovery, SchemaEvolution, TableCommitter};
