@@ -81,9 +81,13 @@ Storage: "Load spread across 7s" {
   style.stroke-dash: 3
 }
 
-users -> Storage: "t=60s: fetch"
-orders -> Storage: "t=63s: fetch"
-products -> Storage: "t=67s: fetch"
+users -> Storage: "t=62s: fetch"
+orders -> Storage: "t=65s: fetch"
+products -> Storage: "t=68s: fetch"
+
+Storage: "Different jitter each cycle" {
+  style.stroke-dash: 3
+}
 ```
 
 Configuration:
@@ -93,37 +97,18 @@ global:
   poll_jitter_secs: 10  # Max jitter in seconds (default: 30, 0 to disable)
 ```
 
-## Concurrency Control
+## Graceful Shutdown
 
-A global concurrency limit restricts the total concurrent operations across all pipelines:
+All pipelines share a single `CancellationToken`. When a shutdown signal is received (SIGINT, SIGTERM, or SIGQUIT), the token is cancelled and every pipeline finishes its current work before exiting:
 
-```yaml
-global:
-  total_concurrency: 32  # Max concurrent operations (optional)
-```
+1. **Signal received** — the shutdown handler cancels the shared token
+2. **Pipelines notice** — each pipeline checks the token at its next poll boundary
+3. **Drain** — in-flight files finish downloading, processing, and uploading
+4. **Exit** — the runner waits for all pipelines to complete, then exits cleanly
 
-Without a global limit, each pipeline operates independently with its own concurrency settings.
+Pipelines that haven't started yet (still waiting on their jitter delay) exit immediately without doing any work.
 
-**When to use global concurrency:**
+## See Also
 
-| Scenario | Recommendation |
-|----------|----------------|
-| Few pipelines with independent resources | Skip global limit, use per-pipeline settings |
-| Many pipelines hitting same storage | Set global limit to prevent throttling |
-| Memory-constrained environment | Set limit based on available memory |
-| Mixed workloads (some heavy, some light) | Use global limit as a safety cap |
-
-## Connection Pooling
-
-Connection pooling is enabled by default. Pipelines reading from the same bucket share storage connections, reducing connection overhead and improving HTTP/2 multiplexing.
-
-```yaml
-global:
-  connection_pooling: true  # default: true
-```
-
-**When NOT to use pooling:**
-
-- Pipelines require different authentication credentials
-- Source and destination use incompatible client configurations
-- You need to isolate connection failures between pipelines
+- [Scaling](/architecture/scaling/) — tuning concurrency, connection pooling, and jitter for different workload sizes
+- [Configuration Reference](/architecture/configuration/) — full field reference for `global` settings

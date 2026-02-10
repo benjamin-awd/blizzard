@@ -53,7 +53,7 @@ The `global` section controls process-wide resource management. All fields are o
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `total_concurrency` | integer | none | Max concurrent operations (uploads/downloads) across all pipelines |
-| `connection_pooling` | boolean | `true` | Share storage connections between pipelines reading from the same bucket |
+| `connection_pooling` | boolean | `true` | Share storage connections between pipelines reading from the same bucket. Disable if pipelines need different credentials, incompatible client configs, or connection failure isolation |
 | `poll_jitter_secs` | integer | `30` | Max random jitter (seconds) added to poll intervals to prevent thundering herd |
 | `runtime_worker_threads` | integer | none | Number of Tokio runtime worker threads (important for containers) |
 
