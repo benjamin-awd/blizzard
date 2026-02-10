@@ -2,6 +2,7 @@
 //!
 //! This module provides functions for creating and loading Delta Lake tables.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use deltalake::DeltaTable;
@@ -14,6 +15,19 @@ use url::Url;
 use blizzard_core::storage::{BackendConfig, StorageProvider};
 
 use crate::error::DeltaError;
+
+/// Prepare storage options for Delta Lake, ensuring sensible defaults.
+///
+/// Sets `retry_timeout` to 30s if not already configured, so that a single
+/// hung HTTP request cannot consume the entire operation timeout budget
+/// (e.g. the 60s schema evolution timeout).
+fn delta_storage_options(storage: &StorageProvider) -> HashMap<String, String> {
+    let mut options = storage.storage_options().clone();
+    options
+        .entry("retry_timeout".to_string())
+        .or_insert_with(|| "30s".to_string());
+    options
+}
 
 /// Ensure Delta Lake cloud storage handlers are registered.
 ///
@@ -101,7 +115,7 @@ pub async fn try_open_table(
 
     let table = deltalake::open_table_with_storage_options(
         parsed_url,
-        storage_provider.storage_options().clone(),
+        delta_storage_options(storage_provider),
     )
     .await
     .map_err(|source| DeltaError::DeltaOperation { source })?;
@@ -147,55 +161,40 @@ pub async fn load_or_create_table(
     partition_by: &[String],
     table_name: &str,
 ) -> Result<DeltaTable, DeltaError> {
-    let table_url = build_table_url(storage_provider)?;
-
     // Try to open existing table
-    let parsed_url = Url::parse(&table_url).map_err(|_| DeltaError::UrlParse {
-        url: table_url.clone(),
-    })?;
-    match deltalake::open_table_with_storage_options(
-        parsed_url.clone(),
-        storage_provider.storage_options().clone(),
-    )
-    .await
-    {
-        Ok(table) => {
-            info!(
-                target = %table_name,
-                "Loaded existing Delta table at version {}",
-                table.version().unwrap_or(-1)
-            );
-            Ok(table)
-        }
-        Err(_) => {
-            // Table doesn't exist, create it
-            info!(target = %table_name, "Creating new Delta table at {table_url}");
-
-            // Add partition columns to schema if they don't exist
-            // (Hive-style partitioning stores them in paths, not in parquet files)
-            let schema_with_partitions = add_partition_columns_to_schema(schema, partition_by);
-
-            // Convert Arrow schema to Delta schema
-            let delta_schema = arrow_schema_to_delta(&schema_with_partitions)?;
-
-            let mut builder = CreateBuilder::new()
-                .with_location(&table_url)
-                .with_columns(delta_schema.fields().cloned())
-                .with_storage_options(storage_provider.storage_options().clone());
-
-            // Add partition columns if configured
-            if !partition_by.is_empty() {
-                info!(target = %table_name, "Creating table with partition columns: {:?}", partition_by);
-                builder = builder.with_partition_columns(partition_by);
-            }
-
-            let table = builder
-                .await
-                .map_err(|source| DeltaError::DeltaOperation { source })?;
-
-            Ok(table)
-        }
+    match try_open_table(storage_provider, table_name).await {
+        Ok(table) => return Ok(table),
+        Err(e) if e.is_table_not_found() => {}
+        Err(e) => return Err(e),
     }
+
+    // Table doesn't exist, create it
+    let table_url = build_table_url(storage_provider)?;
+    info!(target = %table_name, "Creating new Delta table at {table_url}");
+
+    // Add partition columns to schema if they don't exist
+    // (Hive-style partitioning stores them in paths, not in parquet files)
+    let schema_with_partitions = add_partition_columns_to_schema(schema, partition_by);
+
+    // Convert Arrow schema to Delta schema
+    let delta_schema = arrow_schema_to_delta(&schema_with_partitions)?;
+
+    let mut builder = CreateBuilder::new()
+        .with_location(&table_url)
+        .with_columns(delta_schema.fields().cloned())
+        .with_storage_options(delta_storage_options(storage_provider));
+
+    // Add partition columns if configured
+    if !partition_by.is_empty() {
+        info!(target = %table_name, "Creating table with partition columns: {:?}", partition_by);
+        builder = builder.with_partition_columns(partition_by);
+    }
+
+    let table = builder
+        .await
+        .map_err(|source| DeltaError::DeltaOperation { source })?;
+
+    Ok(table)
 }
 
 #[cfg(test)]
