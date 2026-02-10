@@ -51,7 +51,7 @@ pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, Schem
 ///
 /// Tries up to 3 files in case some are corrupted or inaccessible.
 /// Returns the schema from the first file that can be successfully read.
-pub async fn infer_schema_from_first_file(
+pub async fn infer_schema_from_files(
     storage: &StorageProvider,
     files: &[FinishedFile],
     table: &str,
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_infer_schema_from_first_file_with_storage() {
+    async fn test_infer_schema_from_files_with_storage() {
         use std::collections::HashMap;
         use tempfile::TempDir;
 
@@ -282,7 +282,7 @@ mod tests {
             None,
         )];
 
-        let schema = infer_schema_from_first_file(&storage, &files, "test")
+        let schema = infer_schema_from_files(&storage, &files, "test")
             .await
             .unwrap();
 
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_infer_schema_from_first_file_empty_list() {
+    async fn test_infer_schema_from_files_empty_list() {
         use std::collections::HashMap;
         use tempfile::TempDir;
 
@@ -304,7 +304,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = infer_schema_from_first_file(&storage, &[], "test").await;
+        let result = infer_schema_from_files(&storage, &[], "test").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SchemaError::NoFilesAvailable));
     }
@@ -351,7 +351,7 @@ mod tests {
         ];
 
         // Should succeed by trying the second file
-        let schema = infer_schema_from_first_file(&storage, &files, "test")
+        let schema = infer_schema_from_files(&storage, &files, "test")
             .await
             .unwrap();
 

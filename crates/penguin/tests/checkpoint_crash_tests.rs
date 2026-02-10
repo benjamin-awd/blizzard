@@ -14,7 +14,7 @@ use blizzard_core::types::SourceState;
 use blizzard_core::watermark::WatermarkState;
 use penguin::SchemaEvolutionMode;
 use penguin::checkpoint::{CheckpointCoordinator, CheckpointState};
-use penguin::schema::infer_schema_from_first_file;
+use penguin::schema::infer_schema_from_files;
 use penguin::sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter};
 
 /// Test: Checkpoint commit and recovery via Delta Lake Txn actions.
@@ -276,7 +276,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         None,
     )];
 
-    let inferred_schema = infer_schema_from_first_file(&storage, &files, "test")
+    let inferred_schema = infer_schema_from_files(&storage, &files, "test")
         .await
         .unwrap();
 

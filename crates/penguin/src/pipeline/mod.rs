@@ -27,7 +27,7 @@ use crate::checkpoint::CheckpointCoordinator;
 use crate::config::{Config, Mergeable, TableConfig, TableKey};
 use crate::error::{DeltaSinkNotInitializedSnafu, PipelineError, StorageSnafu};
 use crate::incoming::{IncomingConfig, IncomingReader};
-use crate::schema::infer_schema_from_first_file;
+use crate::schema::infer_schema_from_files;
 use crate::schema::manager::SchemaManager;
 use crate::sink::{CheckpointRecovery, DeltaSink, SchemaEvolution, TableCommitter};
 
@@ -212,8 +212,7 @@ impl Processor {
 
         // Infer schema from files
         let incoming_schema =
-            infer_schema_from_first_file(&self.sink_storage, files, self.table_key.as_ref())
-                .await?;
+            infer_schema_from_files(&self.sink_storage, files, self.table_key.as_ref()).await?;
 
         if self.delta_sink.is_none() {
             info!(target = %self.table_key, "Creating new Delta table with inferred schema");

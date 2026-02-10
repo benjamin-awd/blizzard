@@ -8,5 +8,5 @@ pub mod inference;
 pub mod manager;
 
 pub use evolution::{SchemaComparison, SchemaEvolutionMode, compare_schemas};
-pub use inference::infer_schema_from_first_file;
+pub use inference::infer_schema_from_files;
 pub use manager::SchemaManager;
