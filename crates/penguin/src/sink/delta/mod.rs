@@ -239,11 +239,13 @@ impl DeltaSink {
             self.cached_schema = Some(new_schema);
         }
 
-        SchemaEvolved {
-            target: self.table_name.clone(),
-            action: action_name.to_string(),
+        if !matches!(action_name, "none") {
+            SchemaEvolved {
+                target: self.table_name.clone(),
+                action: action_name.to_string(),
+            }
+            .emit();
         }
-        .emit();
 
         Ok(())
     }
