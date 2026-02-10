@@ -140,15 +140,21 @@ fn are_data_types_equivalent(a: &DataType, b: &DataType) -> bool {
         return true;
     }
     match (a, b) {
-        // Struct field names are semantically meaningful (unlike list element names),
-        // so renaming a struct field is a real schema change.
+        // Struct fields are matched by name (not position) since JSON field
+        // ordering is not guaranteed and different writers may emit fields in
+        // different orders.
         (DataType::Struct(a_fields), DataType::Struct(b_fields)) => {
-            a_fields.len() == b_fields.len()
-                && a_fields.iter().zip(b_fields.iter()).all(|(a, b)| {
-                    a.name() == b.name()
-                        && a.is_nullable() == b.is_nullable()
-                        && are_data_types_equivalent(a.data_type(), b.data_type())
+            if a_fields.len() != b_fields.len() {
+                return false;
+            }
+            let b_map: HashMap<&str, &Arc<Field>> =
+                b_fields.iter().map(|f| (f.name().as_str(), f)).collect();
+            a_fields.iter().all(|a_field| {
+                b_map.get(a_field.name().as_str()).is_some_and(|b_field| {
+                    a_field.is_nullable() == b_field.is_nullable()
+                        && are_data_types_equivalent(a_field.data_type(), b_field.data_type())
                 })
+            })
         }
         _ => a.equals_datatype(b),
     }
@@ -193,17 +199,18 @@ fn is_type_widening(from: &DataType, to: &DataType) -> bool {
             || is_type_widening(from_field.data_type(), to_field.data_type());
     }
 
-    // Handle Struct types - all fields must be compatible
+    // Handle Struct types - all fields must be compatible (matched by name)
     if let (DataType::Struct(from_fields), DataType::Struct(to_fields)) = (from, to) {
         // Must have same number of fields for widening
         if from_fields.len() != to_fields.len() {
             return false;
         }
-        // Check each field by position (names must match, types must be compatible)
-        for (from_field, to_field) in from_fields.iter().zip(to_fields.iter()) {
-            if from_field.name() != to_field.name() {
+        let to_map: HashMap<&str, &Arc<Field>> =
+            to_fields.iter().map(|f| (f.name().as_str(), f)).collect();
+        for from_field in from_fields.iter() {
+            let Some(to_field) = to_map.get(from_field.name().as_str()) else {
                 return false;
-            }
+            };
             // If types differ, check if it's a valid widening
             if !are_data_types_equivalent(from_field.data_type(), to_field.data_type())
                 && !is_type_widening(from_field.data_type(), to_field.data_type())
@@ -949,6 +956,52 @@ mod tests {
 
         let comparison = compare_schemas(&table, &incoming);
 
+        assert!(comparison.is_compatible);
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_struct_field_reordering_is_equivalent() {
+        use std::sync::Arc;
+
+        // JSON field ordering is not guaranteed — same fields in different order
+        // should be treated as equivalent.
+        let table = make_schema(vec![(
+            "fills",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(
+                    vec![
+                        Arc::new(Field::new("createdAt", DataType::Utf8, true)),
+                        Arc::new(Field::new("executionID", DataType::Utf8, true)),
+                        Arc::new(Field::new("price", DataType::Float64, true)),
+                    ]
+                    .into(),
+                ),
+                true,
+            ))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "fills",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(
+                    vec![
+                        Arc::new(Field::new("createdAt", DataType::Utf8, true)),
+                        Arc::new(Field::new("price", DataType::Float64, true)),
+                        Arc::new(Field::new("executionID", DataType::Utf8, true)),
+                    ]
+                    .into(),
+                ),
+                true,
+            ))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_identical());
         assert!(comparison.is_compatible);
         assert!(comparison.type_changes.is_empty());
     }
