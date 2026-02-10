@@ -227,14 +227,14 @@ pub fn validate_schema_evolution(
                     .chain(comparison.new_fields.iter().map(|f| Arc::new(f.clone())))
                     .collect();
                 Ok(EvolutionAction::Merge {
-                    new_schema: Arc::new(Schema::new(fields)),
+                    new_schema: coerce_schema(&Schema::new(fields)),
                 })
             }
         }
         SchemaEvolutionMode::Overwrite => {
             // Overwrite mode always accepts the incoming schema
             Ok(EvolutionAction::Overwrite {
-                new_schema: Arc::new(incoming_schema.clone()),
+                new_schema: coerce_schema(incoming_schema),
             })
         }
     }
@@ -841,5 +841,45 @@ mod tests {
         assert!(comparison.is_identical());
         assert!(comparison.is_compatible());
         assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_validate_merge_coerces_null_fields() {
+        let table = make_schema(vec![("id", DataType::Int64, false)]);
+        let incoming = make_schema(vec![
+            ("id", DataType::Int64, false),
+            ("maybe_null", DataType::Null, true),
+        ]);
+
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            EvolutionAction::Merge { new_schema } => {
+                assert_eq!(new_schema.fields().len(), 2);
+                assert_eq!(new_schema.field(1).data_type(), &DataType::Utf8);
+            }
+            action => panic!("Expected Merge action, got: {action:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_overwrite_coerces_null_fields() {
+        let table = make_schema(vec![("id", DataType::Int64, false)]);
+        let incoming = make_schema(vec![
+            ("id", DataType::Int64, false),
+            ("maybe_null", DataType::Null, true),
+        ]);
+
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Overwrite);
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            EvolutionAction::Overwrite { new_schema } => {
+                assert_eq!(new_schema.fields().len(), 2);
+                assert_eq!(new_schema.field(1).data_type(), &DataType::Utf8);
+            }
+            action => panic!("Expected Overwrite action, got: {action:?}"),
+        }
     }
 }
