@@ -49,13 +49,6 @@ impl ErrorContext<'_> {
             max = MAX_CONSECUTIVE_ERRORS,
             "{phase} failed"
         );
-        if *self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-            error!(
-                target = self.name,
-                "Reached {MAX_CONSECUTIVE_ERRORS} consecutive errors, giving up"
-            );
-            return ErrorOutcome::Fatal(error);
-        }
         emit!(IterationCompleted {
             service: self.service,
             result: IterationResultType::Error,
@@ -66,6 +59,13 @@ impl ErrorContext<'_> {
             duration: self.iteration_start.elapsed(),
             target: self.name.to_string(),
         });
+        if *self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            error!(
+                target = self.name,
+                "Reached {MAX_CONSECUTIVE_ERRORS} consecutive errors, giving up"
+            );
+            return ErrorOutcome::Fatal(error);
+        }
         let jitter = random_jitter(self.poll_jitter_secs);
         let sleep_duration = self.poll_interval + jitter;
         if self

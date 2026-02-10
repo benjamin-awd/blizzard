@@ -202,6 +202,7 @@ impl AppConfig for Config {
     type Pipeline = Pipeline;
 
     const COMPONENT_NAME: &'static str = "table";
+    const SERVICE_NAME: &'static str = "penguin";
 
     fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
         let config: Self = load_from_paths(paths)?;

@@ -17,7 +17,9 @@ use tracing::{error, info};
 
 use crate::StoragePool;
 use crate::config::GlobalConfig;
+use crate::emit;
 use crate::error::{AddressParseSnafu, MetricsSnafu, PipelineSetupError};
+use crate::metrics::events::PipelineFailed;
 use crate::resource::StoragePoolRef;
 use crate::signal::shutdown_signal;
 
@@ -81,6 +83,7 @@ pub struct PipelineRunner<P: Pipeline> {
     shutdown: CancellationToken,
     poll_jitter_secs: u64,
     typetag: &'static str,
+    service: &'static str,
 }
 
 impl<P: Pipeline> PipelineRunner<P> {
@@ -90,12 +93,14 @@ impl<P: Pipeline> PipelineRunner<P> {
         shutdown: CancellationToken,
         poll_jitter_secs: u64,
         typetag: &'static str,
+        service: &'static str,
     ) -> Self {
         Self {
             pipelines,
             shutdown,
             poll_jitter_secs,
             typetag,
+            service,
         }
     }
 
@@ -112,6 +117,7 @@ impl<P: Pipeline> PipelineRunner<P> {
     pub async fn run(self) {
         let mut handles: JoinSet<PipelineResult<P::Key, P::Error>> = JoinSet::new();
         let typetag = self.typetag;
+        let service = self.service;
 
         for pipeline in self.pipelines {
             let shutdown = self.shutdown.clone();
@@ -152,9 +158,17 @@ impl<P: Pipeline> PipelineRunner<P> {
                 }
                 Ok((key, Err(e))) => {
                     error!(target = %key, error = %e, "{} failed", typetag);
+                    emit!(PipelineFailed {
+                        service,
+                        target: key.to_string(),
+                    });
                 }
                 Err(e) => {
                     error!(error = %e, "{} task panicked", typetag);
+                    emit!(PipelineFailed {
+                        service,
+                        target: "unknown".to_string(),
+                    });
                 }
             }
         }
@@ -181,6 +195,7 @@ pub async fn run_pipelines<P, F>(
     metrics_address: &str,
     global: &GlobalConfig,
     typetag: &'static str,
+    service: &'static str,
     create_pipelines: F,
 ) -> Result<(), PipelineSetupError>
 where
@@ -204,7 +219,13 @@ where
     let pipelines = create_pipelines(context);
 
     // Run pipelines
-    let runner = PipelineRunner::new(pipelines, shutdown, global.poll_jitter_secs, typetag);
+    let runner = PipelineRunner::new(
+        pipelines,
+        shutdown,
+        global.poll_jitter_secs,
+        typetag,
+        service,
+    );
     runner.spawn_shutdown_handler();
     runner.run().await;
 

@@ -539,6 +539,35 @@ impl InternalEvent for BufferedRecords {
 }
 
 // ============================================================================
+// Pipeline lifecycle events
+// ============================================================================
+
+/// Event emitted when a pipeline fails fatally.
+///
+/// Tracks pipeline deaths across both blizzard and penguin services.
+pub struct PipelineFailed {
+    /// Service identifier ("blizzard" or "penguin").
+    pub service: &'static str,
+    /// Target label identifying the pipeline.
+    pub target: String,
+}
+
+impl InternalEvent for PipelineFailed {
+    fn emit(self) {
+        trace!(
+            service = self.service,
+            target = %self.target,
+            "Pipeline failed"
+        );
+        counter!(
+            format!("{service}_pipeline_failed_total", service = self.service),
+            "target" => self.target
+        )
+        .increment(1);
+    }
+}
+
+// ============================================================================
 // Polling iteration events
 // ============================================================================
 

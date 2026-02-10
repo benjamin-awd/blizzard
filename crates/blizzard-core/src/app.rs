@@ -67,6 +67,9 @@ pub trait AppConfig: Mergeable + Sized {
     /// Human-readable name for components (e.g., "pipeline", "table").
     const COMPONENT_NAME: &'static str;
 
+    /// Service name for metrics (e.g., "blizzard", "penguin").
+    const SERVICE_NAME: &'static str;
+
     /// Load config from paths with validation.
     fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError>;
 
@@ -159,6 +162,7 @@ impl<C: AppConfig> Application<C> {
             &Mergeable::metrics(&self.config).address,
             Mergeable::global(&self.config),
             C::COMPONENT_NAME,
+            C::SERVICE_NAME,
             |context| self.config.create_pipelines(context),
         ));
 

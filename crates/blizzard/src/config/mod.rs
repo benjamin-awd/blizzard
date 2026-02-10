@@ -582,6 +582,7 @@ impl AppConfig for Config {
     type Pipeline = Pipeline;
 
     const COMPONENT_NAME: &'static str = "pipeline";
+    const SERVICE_NAME: &'static str = "blizzard";
 
     fn from_paths(paths: &[ConfigPath]) -> Result<Self, ConfigError> {
         let config: Self = load_from_paths(paths)?;
