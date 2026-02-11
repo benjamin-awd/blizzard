@@ -1,6 +1,6 @@
 [package]
 name = "blizzard"
-version = "0.4.6"
+version = "0.4.7"
 description = "File loader for streaming NDJSON.gz files to Parquet staging"
 edition.workspace = true
 rust-version.workspace = true
@@ -34,7 +34,6 @@ zstd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-serde_arrow = { workspace = true }
 
 # CLI
 clap = { workspace = true }

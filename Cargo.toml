@@ -25,9 +25,6 @@ arrow-schema = "57"
 # Parquet (footer-only metadata reads via object_store integration)
 parquet = { version = "57", default-features = false, features = ["object_store"] }
 
-# Arrow serialization (Value → RecordBatch without re-parse round-trip)
-serde_arrow = { version = "0.13", features = ["arrow-57"] }
-
 # Object storage
 object_store = { version = "0.12.5", default-features = false, features = ["aws", "gcp", "azure", "fs"] }
 
