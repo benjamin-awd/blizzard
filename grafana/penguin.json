@@ -19,7 +19,6 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": 0,
   "links": [],
   "panels": [
     {
@@ -259,6 +258,18 @@
           "color": {
             "mode": "thresholds"
           },
+          "custom": {
+            "axisPlacement": "auto",
+            "fillOpacity": 70,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
           "mappings": [
             {
               "options": {
@@ -281,7 +292,7 @@
             "steps": [
               {
                 "color": "orange",
-                "value": null
+                "value": 0
               },
               {
                 "color": "green",
@@ -307,9 +318,11 @@
           "showLegend": false
         },
         "mergeValues": true,
-        "rowHeight": 0.8,
+        "perPage": 15,
+        "rowHeight": 0.6,
         "showValue": "auto",
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
@@ -321,7 +334,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "clamp_max(sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\"}[5m])), 1) or sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m])) * 0",
+          "expr": "clamp_max(sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\", target=~\"$target\"}[5m])), 1) or sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\", target=~\"$target\"}[5m])) * 0",
           "legendFormat": "{{target}}",
           "refId": "A"
         }
@@ -338,13 +351,16 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "fixed",
-            "fixedColor": "text"
+            "fixedColor": "text",
+            "mode": "fixed"
           },
           "custom": {
             "align": "auto",
             "cellOptions": {
               "type": "auto"
+            },
+            "footer": {
+              "reducers": []
             },
             "inspect": false
           },
@@ -354,7 +370,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               }
             ]
           }
@@ -365,24 +381,14 @@
               "id": "byName",
               "options": "Value"
             },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
+            "properties": []
           },
           {
             "matcher": {
               "id": "byName",
               "options": "Time"
             },
-            "properties": [
-              {
-                "id": "custom.hidden",
-                "value": true
-              }
-            ]
+            "properties": []
           }
         ]
       },
@@ -418,7 +424,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "(sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}[5m]))) unless (sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\"}[5m])) > 0)",
+          "expr": "(sum by (target) (increase(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\", target=~\"$target\"}[5m]))) unless (sum by (target) (increase(penguin_polling_iterations_total{result=\"processed\", job=~\"$job\", pod=~\"$pod\", target=~\"$target\"}[5m])) > 0)",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -434,7 +440,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 12
+        "y": 14
       },
       "id": 101,
       "panels": [],
@@ -504,7 +510,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 13
+        "y": 15
       },
       "id": 10,
       "options": {
@@ -601,7 +607,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 13
+        "y": 15
       },
       "id": 11,
       "options": {
@@ -641,7 +647,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 23
       },
       "id": 102,
       "panels": [],
@@ -673,7 +679,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 24
       },
       "id": 20,
       "options": {
@@ -692,7 +698,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -790,7 +796,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 24
       },
       "id": 21,
       "options": {
@@ -848,7 +854,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 32
       },
       "id": 106,
       "panels": [],
@@ -964,7 +970,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 31
+        "y": 33
       },
       "id": 107,
       "options": {
@@ -1023,7 +1029,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 31
+        "y": 33
       },
       "id": 108,
       "options": {
@@ -1042,7 +1048,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -1140,7 +1146,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 41
       },
       "id": 30,
       "options": {
@@ -1236,7 +1242,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 41
       },
       "id": 31,
       "options": {
@@ -1275,7 +1281,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 49
       },
       "id": 103,
       "panels": [],
@@ -1345,7 +1351,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 50
       },
       "id": 204,
       "options": {
@@ -1441,7 +1447,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 58
       },
       "id": 40,
       "options": {
@@ -1539,7 +1545,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 58
       },
       "id": 41,
       "options": {
@@ -1579,7 +1585,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 66
       },
       "id": 104,
       "panels": [],
@@ -1592,7 +1598,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 67
       },
       "id": 105,
       "panels": [],
@@ -1662,7 +1668,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 68
       },
       "id": 50,
       "options": {
@@ -1703,7 +1709,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 76
       },
       "id": 200,
       "panels": [],
@@ -1783,7 +1789,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 75
+        "y": 77
       },
       "id": 201,
       "options": {
@@ -1892,7 +1898,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 75
+        "y": 77
       },
       "id": 202,
       "options": {
@@ -2001,7 +2007,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 75
+        "y": 77
       },
       "id": 203,
       "options": {
@@ -2107,11 +2113,38 @@
         "regex": "",
         "sort": 1,
         "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}, target)",
+        "includeAll": true,
+        "label": "Target",
+        "multi": true,
+        "name": "target",
+        "options": [],
+        "query": {
+          "query": "label_values(penguin_polling_iterations_total{job=~\"$job\", pod=~\"$pod\"}, target)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
       }
     ]
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {
@@ -2129,5 +2162,5 @@
   "timezone": "browser",
   "title": "[SYS] Penguin",
   "uid": "penguin-delta",
-  "version": 7
+  "version": 13
 }
