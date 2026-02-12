@@ -8,7 +8,6 @@
 
 use deltalake::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 pub use blizzard_core::schema::{coerce_field, coerce_schema};
 
@@ -224,14 +223,15 @@ pub fn validate_schema_evolution(
             if comparison.new_fields.is_empty() {
                 Ok(EvolutionAction::None)
             } else {
-                let fields: Vec<Arc<Field>> = table_schema
-                    .fields()
-                    .iter()
-                    .cloned()
-                    .chain(comparison.new_fields.iter().map(|f| Arc::new(f.clone())))
-                    .collect();
+                let new_fields_schema = Schema::new(comparison.new_fields);
+                let merged =
+                    Schema::try_merge([table_schema.clone(), new_fields_schema]).map_err(|e| {
+                        SchemaError::IncompatibleSchema {
+                            details: e.to_string(),
+                        }
+                    })?;
                 Ok(EvolutionAction::Merge {
-                    new_schema: coerce_schema(&Schema::new(fields)),
+                    new_schema: coerce_schema(&merged),
                 })
             }
         }
