@@ -152,28 +152,25 @@ fn are_types_compatible(a: &DataType, b: &DataType) -> bool {
         // treat this as compatible — the table schema stays Utf8 and readers
         // cast at read time.
         (DataType::Utf8 | DataType::LargeUtf8, b) if !b.is_nested() => true,
-        // Scalar widening or structural equality for everything else.
-        _ => {
-            a.equals_datatype(b)
-                || matches!(
-                    (a, b),
-                    // Integer widening
-                    (DataType::Int8, DataType::Int16 | DataType::Int32 | DataType::Int64)
-                        | (DataType::Int16, DataType::Int32 | DataType::Int64)
-                        | (DataType::Int32, DataType::Int64)
-                        // Unsigned integer widening
-                        | (
-                            DataType::UInt8,
-                            DataType::UInt16 | DataType::UInt32 | DataType::UInt64
-                        )
-                        | (DataType::UInt16, DataType::UInt32 | DataType::UInt64)
-                        | (DataType::UInt32, DataType::UInt64)
-                        // Float widening
-                        | (DataType::Float32, DataType::Float64)
-                        // Date widening
-                        | (DataType::Date32, DataType::Date64)
+        // Scalar widening for everything else.
+        _ => matches!(
+            (a, b),
+            // Integer widening
+            (DataType::Int8, DataType::Int16 | DataType::Int32 | DataType::Int64)
+                | (DataType::Int16, DataType::Int32 | DataType::Int64)
+                | (DataType::Int32, DataType::Int64)
+                // Unsigned integer widening
+                | (
+                    DataType::UInt8,
+                    DataType::UInt16 | DataType::UInt32 | DataType::UInt64
                 )
-        }
+                | (DataType::UInt16, DataType::UInt32 | DataType::UInt64)
+                | (DataType::UInt32, DataType::UInt64)
+                // Float widening
+                | (DataType::Float32, DataType::Float64)
+                // Date widening
+                | (DataType::Date32, DataType::Date64)
+        ),
     }
 }
 
