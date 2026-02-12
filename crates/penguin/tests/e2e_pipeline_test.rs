@@ -112,7 +112,7 @@ async fn test_discover_and_commit_pipeline() {
     assert_eq!(total_records, 5, "total records should be 5");
 
     // Infer schema from the first file
-    let inferred_schema = infer_schema_from_files(&storage, &finished_files, "e2e-test")
+    let (inferred_schema, _) = infer_schema_from_files(&storage, &finished_files, "e2e-test")
         .await
         .unwrap();
 
@@ -367,7 +367,7 @@ async fn test_footer_only_metadata_read() {
     );
 
     // Verify schema inference also works via footer-only path
-    let inferred = infer_schema_from_files(&storage, &[finished], "footer-test")
+    let (inferred, _) = infer_schema_from_files(&storage, &[finished], "footer-test")
         .await
         .unwrap();
 

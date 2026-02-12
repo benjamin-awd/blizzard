@@ -145,6 +145,13 @@ fn are_types_compatible(a: &DataType, b: &DataType) -> bool {
         | (DataType::LargeList(a_field), DataType::LargeList(b_field)) => {
             are_types_compatible(a_field.data_type(), b_field.data_type())
         }
+        // Utf8/LargeUtf8 table columns accept any scalar incoming type.
+        // When `coerce_conflicts_to_utf8` was used during inference, the same
+        // field may be inferred as a scalar (e.g., Float64) in files where all
+        // values happen to be numeric. Utf8 can represent any scalar, so we
+        // treat this as compatible — the table schema stays Utf8 and readers
+        // cast at read time.
+        (DataType::Utf8 | DataType::LargeUtf8, b) if !b.is_nested() => true,
         // Scalar widening or structural equality for everything else.
         _ => {
             a.equals_datatype(b)
@@ -881,5 +888,130 @@ mod tests {
             }
             action => panic!("Expected Overwrite action, got: {action:?}"),
         }
+    }
+
+    // ========================================================================
+    // Utf8 compatibility with scalar types
+    // ========================================================================
+
+    #[test]
+    fn test_compare_utf8_table_with_float64_incoming() {
+        let table = make_schema(vec![("value", DataType::Utf8, true)]);
+        let incoming = make_schema(vec![("value", DataType::Float64, true)]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible());
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_utf8_table_with_int64_incoming() {
+        let table = make_schema(vec![("count", DataType::Utf8, true)]);
+        let incoming = make_schema(vec![("count", DataType::Int64, true)]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible());
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_utf8_table_with_boolean_incoming() {
+        let table = make_schema(vec![("flag", DataType::Utf8, true)]);
+        let incoming = make_schema(vec![("flag", DataType::Boolean, true)]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible());
+        assert!(comparison.type_changes.is_empty());
+    }
+
+    #[test]
+    fn test_compare_utf8_table_with_struct_incoming_rejected() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![("data", DataType::Utf8, true)]);
+        let incoming = make_schema(vec![(
+            "data",
+            DataType::Struct(vec![Arc::new(Field::new("key", DataType::Utf8, true))].into()),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible());
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_utf8_table_with_list_incoming_rejected() {
+        use std::sync::Arc;
+
+        let table = make_schema(vec![("tags", DataType::Utf8, true)]);
+        let incoming = make_schema(vec![(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible());
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_compare_float64_table_with_utf8_incoming_rejected() {
+        // Reverse direction: Float64 table with Utf8 incoming is NOT compatible
+        let table = make_schema(vec![("value", DataType::Float64, true)]);
+        let incoming = make_schema(vec![("value", DataType::Utf8, true)]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(!comparison.is_compatible());
+        assert_eq!(comparison.type_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_validate_merge_utf8_with_float64_returns_none() {
+        let table = make_schema(vec![
+            ("id", DataType::Int64, false),
+            ("threshold", DataType::Utf8, true),
+        ]);
+        let incoming = make_schema(vec![
+            ("id", DataType::Int64, false),
+            ("threshold", DataType::Float64, true),
+        ]);
+
+        let result = validate_schema_evolution(&table, &incoming, SchemaEvolutionMode::Merge);
+
+        assert!(result.is_ok());
+        match result.unwrap() {
+            EvolutionAction::None => {} // No schema change needed
+            action => panic!("Expected None action, got: {action:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compare_list_of_utf8_with_list_of_float64() {
+        use std::sync::Arc;
+
+        // Recursive: List<Utf8> table with List<Float64> incoming
+        let table = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )]);
+        let incoming = make_schema(vec![(
+            "values",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            true,
+        )]);
+
+        let comparison = compare_schemas(&table, &incoming);
+
+        assert!(comparison.is_compatible());
+        assert!(comparison.type_changes.is_empty());
     }
 }

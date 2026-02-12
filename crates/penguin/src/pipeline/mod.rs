@@ -211,7 +211,7 @@ impl Processor {
         }
 
         // Infer schema from files
-        let incoming_schema =
+        let (incoming_schema, source_file) =
             infer_schema_from_files(&self.sink_storage, files, self.table_key.as_ref()).await?;
 
         if self.delta_sink.is_none() {
@@ -259,7 +259,12 @@ impl Processor {
         );
 
         // Validate and log the schema evolution action
-        let action = schema_manager.validate_and_log(&incoming_schema)?;
+        let action = schema_manager
+            .validate_and_log(&incoming_schema)
+            .map_err(|source| PipelineError::SchemaValidation {
+                source_file,
+                source,
+            })?;
 
         // Apply the evolution action
         sink.evolve_schema(action).await?;

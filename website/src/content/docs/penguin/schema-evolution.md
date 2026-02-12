@@ -31,6 +31,7 @@ In merge mode:
 - **New required fields**: Rejected (would break existing data)
 - **Missing fields**: Allowed (filled with NULL on read)
 - **Type widening**: Allowed (e.g., Int32 to Int64)
+- **Utf8 compatibility**: Scalar types accepted when table column is Utf8 (e.g., Float64 in Parquet with Utf8 in table)
 - **Type narrowing**: Rejected (could lose data)
 - **Incompatible type changes**: Rejected (e.g., Int64 to String)
 
@@ -65,9 +66,13 @@ tables:
 Overwrite mode can break existing data and downstream consumers. Only use this when you understand the implications and have a recovery plan.
 :::
 
-## Type Widening
+## Type Compatibility
 
-Penguin automatically allows safe type widening operations that don't lose data:
+Penguin automatically allows certain type differences between the table schema and incoming Parquet files without requiring a schema evolution commit.
+
+### Type Widening
+
+Safe numeric widening operations that don't lose data:
 
 | From | To |
 |------|-----|
@@ -80,7 +85,22 @@ Penguin automatically allows safe type widening operations that don't lose data:
 | `Float32` | `Float64` |
 | `Date32` | `Date64` |
 
-These conversions happen transparently without requiring a schema evolution commit.
+### Utf8 Compatibility
+
+When the table schema has a `Utf8` (or `LargeUtf8`) column, Penguin accepts incoming Parquet files where that column has any scalar type (e.g., `Float64`, `Int64`, `Boolean`). The table schema stays as `Utf8` and readers cast the values at read time.
+
+This is particularly useful when using Blizzard's `coerce_conflicts_to_utf8` inference mode. Schema inference may produce different types across restarts depending on the data sampled — for example, a field might be inferred as `Utf8` when the sample contains mixed types (objects and strings), but as `Float64` when the sample only contains numbers. Utf8 compatibility ensures these Parquet files are accepted without error.
+
+Composite types (`Struct`, `List`, `Map`) are **not** compatible with `Utf8` columns and will still be rejected.
+
+| Table Type | Incoming Type | Compatible? |
+|------------|---------------|-------------|
+| `Utf8` | `Float64` | Yes |
+| `Utf8` | `Int64` | Yes |
+| `Utf8` | `Boolean` | Yes |
+| `Utf8` | `Struct(...)` | No |
+| `Utf8` | `List(...)` | No |
+| `Float64` | `Utf8` | No (reverse direction not allowed) |
 
 ## How It Works
 
@@ -155,6 +175,23 @@ In **merge mode**, Penguin will:
 1. Detect the type change from `Int32` to `Int64`
 2. Allow the change (type widening is safe)
 3. Continue processing without schema modification
+
+### Utf8 Column with Scalar Parquet Type
+
+When using Blizzard's `coerce_conflicts_to_utf8` inference, a field like `max_threshold` may be inferred as `Utf8` because the first file contained mixed types (e.g., both `"none"` and `0.5`). The Delta table is created with `Utf8` for that column.
+
+Later, a new file arrives where `max_threshold` only contains numeric values. Blizzard infers it as `Float64` and writes a Parquet file with a `Float64` column:
+
+```
+Table schema:    max_threshold: Utf8
+Parquet file:    max_threshold: Float64
+```
+
+In **merge mode**, Penguin will:
+1. Detect the type difference (`Utf8` → `Float64`)
+2. Accept the file (scalar types are compatible with `Utf8` columns)
+3. Keep the table schema as `Utf8` — no schema evolution commit needed
+4. Readers cast the `Float64` Parquet values to strings at read time
 
 ### Incompatible Change
 

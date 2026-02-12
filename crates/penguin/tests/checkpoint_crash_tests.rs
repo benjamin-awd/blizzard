@@ -276,7 +276,7 @@ async fn test_lazy_schema_inference_creates_correct_table() {
         None,
     )];
 
-    let inferred_schema = infer_schema_from_files(&storage, &files, "test")
+    let (inferred_schema, _) = infer_schema_from_files(&storage, &files, "test")
         .await
         .unwrap();
 

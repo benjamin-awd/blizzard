@@ -163,6 +163,13 @@ pub enum PipelineError {
     #[snafu(display("Schema error: {source}"))]
     Schema { source: SchemaError },
 
+    /// Schema validation error with source file context.
+    #[snafu(display("Schema error in '{source_file}': {source}"))]
+    SchemaValidation {
+        source_file: String,
+        source: SchemaError,
+    },
+
     /// Task join error.
     #[snafu(display("Task join error: {source}"))]
     TaskJoin { source: tokio::task::JoinError },
@@ -188,3 +195,30 @@ blizzard_core::impl_from_error!(PipelineError {
 });
 
 blizzard_core::impl_from_pipeline_setup_error!(PipelineError);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_validation_error_includes_source_file() {
+        let error = PipelineError::SchemaValidation {
+            source_file: "date=2024-01-01/abc.parquet".to_string(),
+            source: SchemaError::TypeChangeNotAllowed {
+                field: "price".to_string(),
+                from: "Int64".to_string(),
+                to: "Utf8".to_string(),
+            },
+        };
+
+        let msg = error.to_string();
+        assert!(
+            msg.contains("date=2024-01-01/abc.parquet"),
+            "error should contain source file, got: {msg}"
+        );
+        assert!(
+            msg.contains("price"),
+            "error should contain field name, got: {msg}"
+        );
+    }
+}

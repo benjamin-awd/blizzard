@@ -50,12 +50,12 @@ pub fn infer_schema_from_parquet_bytes(bytes: &Bytes) -> Result<SchemaRef, Schem
 /// download if footer parsing fails.
 ///
 /// Tries up to 3 files in case some are corrupted or inaccessible.
-/// Returns the schema from the first file that can be successfully read.
+/// Returns the schema and the filename it was inferred from.
 pub async fn infer_schema_from_files(
     storage: &StorageProvider,
     files: &[FinishedFile],
     table: &str,
-) -> Result<SchemaRef, SchemaError> {
+) -> Result<(SchemaRef, String), SchemaError> {
     if files.is_empty() {
         return Err(SchemaError::NoFilesAvailable);
     }
@@ -76,7 +76,7 @@ pub async fn infer_schema_from_files(
                     schema.fields().len(),
                     file_path
                 );
-                return Ok(schema);
+                return Ok((schema, file_path.clone()));
             }
             Err(e) => {
                 warn!(
@@ -282,7 +282,7 @@ mod tests {
             None,
         )];
 
-        let schema = infer_schema_from_files(&storage, &files, "test")
+        let (schema, _) = infer_schema_from_files(&storage, &files, "test")
             .await
             .unwrap();
 
@@ -351,10 +351,11 @@ mod tests {
         ];
 
         // Should succeed by trying the second file
-        let schema = infer_schema_from_files(&storage, &files, "test")
+        let (schema, source_file) = infer_schema_from_files(&storage, &files, "test")
             .await
             .unwrap();
 
         assert_eq!(schema.fields().len(), 2);
+        assert_eq!(source_file, "date=2024-01-01/valid-uuid.parquet");
     }
 }
