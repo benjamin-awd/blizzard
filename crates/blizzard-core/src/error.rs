@@ -62,46 +62,6 @@ impl StorageError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ConfigError {
-    /// Source path is empty.
-    #[snafu(display("Source path cannot be empty"))]
-    EmptySourcePath,
-
-    /// Sink path is empty.
-    #[snafu(display("Sink path cannot be empty"))]
-    EmptySinkPath,
-
-    /// Schema has no fields.
-    #[snafu(display("Schema must have at least one field"))]
-    EmptySchema,
-
-    /// Table URI is empty.
-    #[snafu(display("Table URI cannot be empty"))]
-    EmptyTableUri,
-
-    /// Table URI is empty for a specific table.
-    #[snafu(display("Table '{table}' has empty table_uri"))]
-    EmptyTableUriForTable { table: String },
-
-    /// Source path is empty for a specific pipeline.
-    #[snafu(display("Pipeline '{pipeline}' has empty source path"))]
-    EmptySourcePathForPipeline { pipeline: String },
-
-    /// Table URI is empty for a specific pipeline.
-    #[snafu(display("Pipeline '{pipeline}' has empty table_uri"))]
-    EmptyTableUriForPipeline { pipeline: String },
-
-    /// Schema is empty for a specific pipeline.
-    #[snafu(display(
-        "Pipeline '{pipeline}' has empty schema (specify either 'infer: true' or 'fields')"
-    ))]
-    EmptySchemaForPipeline { pipeline: String },
-
-    /// Schema has conflicting options.
-    #[snafu(display(
-        "Pipeline '{pipeline}' has invalid schema: cannot specify both 'infer: true' and 'fields'"
-    ))]
-    SchemaConflict { pipeline: String },
-
     /// Environment variable interpolation failed.
     #[snafu(display("Environment variable interpolation failed:\n{message}"))]
     EnvInterpolation { message: String },
@@ -113,10 +73,6 @@ pub enum ConfigError {
     /// Failed to read configuration file.
     #[snafu(display("Failed to read configuration file: {source}"))]
     ReadFile { source: std::io::Error },
-
-    /// Resource conflict detected (e.g., two tables using the same staging directory).
-    #[snafu(display("Resource conflict: {message}"))]
-    ResourceConflict { message: String },
 
     /// Duplicate component keys found across config files.
     #[snafu(display("Duplicate component keys: {}", keys.join(", ")))]
