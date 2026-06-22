@@ -20,7 +20,7 @@ use blizzard_core::polling::run_polling_loop;
 use crate::config::{Config, Mergeable, PipelineConfig, PipelineKey};
 use crate::error::PipelineError;
 
-use processor::Processor;
+use processor::PipelineOrchestrator;
 
 /// A blizzard pipeline unit for processing NDJSON files to Parquet.
 pub struct Pipeline {
@@ -61,7 +61,7 @@ impl Pipeline {
                 return Ok(());
             }
 
-            result = Processor::new(
+            result = PipelineOrchestrator::new(
                 self.key.clone(),
                 self.config,
                 self.context.storage_pool,
