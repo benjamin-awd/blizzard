@@ -23,7 +23,7 @@ use blizzard_core::{
     PartitionExtractor, StoragePoolRef, StorageProviderRef, get_or_create_storage,
 };
 
-use super::download::{
+use super::coordinator::{
     Downloader, IncrementalCheckpointConfig, ProcessingContext, SinkWorkerChannels,
 };
 use super::sink::Sink;
