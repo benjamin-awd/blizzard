@@ -4,7 +4,7 @@
 //! trait from blizzard-core. It supports running multiple pipelines
 //! concurrently with shared shutdown handling and optional global concurrency limits.
 
-mod download;
+mod coordinator;
 mod processor;
 mod sink;
 mod tasks;
