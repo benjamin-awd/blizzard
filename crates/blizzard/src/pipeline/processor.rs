@@ -38,257 +38,6 @@ use crate::error::{ConfigError, PipelineError, StorageSnafu};
 use crate::parquet::{ParquetWriterConfig, RollingPolicy};
 use crate::source::{FileReader, NdjsonReader, NdjsonReaderConfig, infer_schema_from_source};
 
-/// Resolves all configuration and creates dependencies for pipeline execution.
-///
-/// Handles all pre-runtime configuration decisions:
-/// - Storage provider creation
-/// - Schema resolution (explicit or inferred)
-/// - Reader creation
-/// - Tracker initialization
-/// - DLQ setup
-///
-/// # Example
-///
-/// ```ignore
-/// let resolver = ConfigResolver::new(key, &config, storage_pool);
-/// let resolved = resolver.resolve().await?;
-/// let orchestrator = PipelineOrchestrator::new(key, config, resolved, shutdown);
-/// ```
-pub(super) struct ConfigResolver<'a> {
-    key: PipelineKey,
-    config: &'a PipelineConfig,
-    storage_pool: Option<StoragePoolRef>,
-}
-
-impl<'a> ConfigResolver<'a> {
-    /// Create a new resolver with the given configuration.
-    pub fn new(
-        key: PipelineKey,
-        config: &'a PipelineConfig,
-        storage_pool: Option<StoragePoolRef>,
-    ) -> Self {
-        Self {
-            key,
-            config,
-            storage_pool,
-        }
-    }
-
-    /// Resolve all configuration and create dependencies.
-    ///
-    /// This is the main entry point that orchestrates all dependency creation.
-    pub async fn resolve(self) -> Result<ResolvedConfig, PipelineError> {
-        let source_storages = self.create_source_storages().await?;
-        let destination_storage = self.create_destination_storage().await?;
-        let multi_tracker = self.create_multi_source_tracker().await?;
-
-        let schema = self.resolve_schema(&source_storages).await?;
-        let readers = self.create_readers(&schema);
-        let partition_extractor = self.create_partition_extractor();
-        let dlq = self.create_dlq().await?;
-        let failure_tracker = self.create_failure_tracker(dlq);
-
-        let ctx = ProcessorContext {
-            source_storages,
-            destination_storage,
-            schema,
-            readers,
-            partition_extractor,
-        };
-
-        Ok(ResolvedConfig {
-            ctx,
-            multi_tracker,
-            failure_tracker,
-        })
-    }
-
-    /// Create storage providers for each configured source.
-    async fn create_source_storages(
-        &self,
-    ) -> Result<IndexMap<String, StorageProviderRef>, PipelineError> {
-        let mut source_storages = IndexMap::new();
-        for (source_name, source_config) in &self.config.sources {
-            let storage = get_or_create_storage(
-                &self.storage_pool,
-                &source_config.path,
-                source_config.storage_options.clone(),
-            )
-            .await
-            .context(StorageSnafu {
-                uri: source_config.path.clone(),
-            })?;
-            source_storages.insert(source_name.clone(), storage);
-        }
-        Ok(source_storages)
-    }
-
-    /// Create storage provider for the destination.
-    async fn create_destination_storage(&self) -> Result<StorageProviderRef, PipelineError> {
-        get_or_create_storage(
-            &self.storage_pool,
-            &self.config.sink.table_uri,
-            self.config.sink.storage_options.clone(),
-        )
-        .await
-        .context(StorageSnafu {
-            uri: self.config.sink.table_uri.clone(),
-        })
-    }
-
-    /// Create multi-source tracker with per-source trackers based on configuration.
-    async fn create_multi_source_tracker(&self) -> Result<MultiSourceTracker, PipelineError> {
-        let mut trackers: IndexMap<String, Box<dyn super::tracker::StateTracker>> = IndexMap::new();
-
-        for (source_name, source_config) in &self.config.sources {
-            let tracker: Box<dyn super::tracker::StateTracker> = if source_config.use_watermark {
-                // Checkpoint manager needs its own storage provider (not pooled)
-                let checkpoint_storage = get_or_create_storage(
-                    &None,
-                    &self.config.sink.table_uri,
-                    self.config.sink.storage_options.clone(),
-                )
-                .await
-                .context(StorageSnafu {
-                    uri: self.config.sink.table_uri.clone(),
-                })?;
-                let checkpoint_manager = CheckpointManager::new(
-                    checkpoint_storage,
-                    self.key.id().to_string(),
-                    source_name.clone(),
-                );
-                Box::new(WatermarkTracker::new(checkpoint_manager))
-            } else {
-                Box::<HashMapTracker>::default()
-            };
-            trackers.insert(source_name.clone(), tracker);
-        }
-
-        Ok(MultiSourceTracker::new(trackers, self.key.id().to_string()))
-    }
-
-    /// Resolve the Arrow schema from explicit config or by inference from source files.
-    async fn resolve_schema(
-        &self,
-        source_storages: &IndexMap<String, StorageProviderRef>,
-    ) -> Result<SchemaRef, PipelineError> {
-        use crate::config::SchemaConfig;
-        match &self.config.schema {
-            SchemaConfig::Infer {
-                coerce_conflicts_to_utf8,
-            } => {
-                let first_source =
-                    self.config
-                        .sources
-                        .values()
-                        .next()
-                        .ok_or_else(|| PipelineError::Config {
-                            source: ConfigError::Internal {
-                                message: "No sources configured".to_string(),
-                            },
-                        })?;
-                let first_storage =
-                    source_storages
-                        .values()
-                        .next()
-                        .ok_or_else(|| PipelineError::Config {
-                            source: ConfigError::Internal {
-                                message: "No source storages available".to_string(),
-                            },
-                        })?;
-                let prefixes = first_source.date_prefixes();
-                Ok(infer_schema_from_source(
-                    first_storage,
-                    first_source.compression,
-                    prefixes.as_deref(),
-                    self.key.as_ref(),
-                    *coerce_conflicts_to_utf8,
-                )
-                .await?)
-            }
-            SchemaConfig::Explicit { .. } => Ok(self.config.schema.to_arrow_schema()?),
-        }
-    }
-
-    /// Create per-source readers (compression may differ between sources).
-    fn create_readers(&self, schema: &SchemaRef) -> IndexMap<String, Arc<dyn FileReader>> {
-        let mut readers = IndexMap::new();
-        let coerce_objects = self.config.schema.coerce_conflicts_to_utf8();
-
-        for (source_name, source_config) in &self.config.sources {
-            let mut reader_config =
-                NdjsonReaderConfig::new(source_config.batch_size, source_config.compression);
-            if coerce_objects {
-                reader_config = reader_config.coerce_objects_to_strings();
-            }
-            let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
-                schema.clone(),
-                reader_config,
-                self.key.id().to_string(),
-            ));
-            readers.insert(source_name.clone(), reader);
-        }
-        readers
-    }
-
-    /// Create partition extractor from sink configuration.
-    fn create_partition_extractor(&self) -> PartitionExtractor {
-        let partition_columns = self
-            .config
-            .sink
-            .partition_by
-            .as_ref()
-            .map(|p| p.partition_columns())
-            .unwrap_or_default();
-        PartitionExtractor::new(partition_columns)
-    }
-
-    /// Create DLQ if configured.
-    async fn create_dlq(&self) -> Result<Option<Arc<DeadLetterQueue>>, PipelineError> {
-        Ok(DeadLetterQueue::from_config(&self.config.error_handling)
-            .await?
-            .map(Arc::new))
-    }
-
-    /// Create failure tracker with optional DLQ.
-    fn create_failure_tracker(&self, dlq: Option<Arc<DeadLetterQueue>>) -> FailureTracker {
-        FailureTracker::new(
-            self.config.error_handling.max_failures,
-            dlq,
-            self.key.id().to_string(),
-        )
-    }
-}
-
-/// Runtime dependencies shared across processing iterations.
-///
-/// Groups the components needed for reading source files and writing output,
-/// reducing field count in the main processor struct.
-pub(super) struct ProcessorContext {
-    /// Storage providers for reading source files, keyed by source name.
-    pub source_storages: IndexMap<String, StorageProviderRef>,
-    /// Storage provider for writing destination files.
-    pub destination_storage: StorageProviderRef,
-    /// Arrow schema (from config or inferred).
-    pub schema: SchemaRef,
-    /// File readers for parsing source files, keyed by source name (compression may differ).
-    pub readers: IndexMap<String, Arc<dyn FileReader>>,
-    /// Extracts partition values from source paths.
-    pub partition_extractor: PartitionExtractor,
-}
-
-/// Container for all resolved configuration and dependencies.
-///
-/// Produced by [`ConfigResolver::resolve()`] and consumed by [`PipelineOrchestrator::new()`].
-pub(super) struct ResolvedConfig {
-    /// Runtime I/O dependencies.
-    pub ctx: ProcessorContext,
-    /// Per-source state trackers.
-    pub multi_tracker: MultiSourceTracker,
-    /// Failure tracking and DLQ management.
-    pub failure_tracker: FailureTracker,
-}
-
 /// Encapsulates the state and logic for a single processing iteration.
 ///
 /// Created fresh for each iteration, isolating per-iteration components
@@ -311,12 +60,10 @@ impl Iteration {
     /// forming the pipeline: discovery → download → parse → N sink workers.
     fn new(
         discovery_task: DiscoveryTask,
-        ctx: &ProcessorContext,
-        config: &PipelineConfig,
-        shutdown: CancellationToken,
-        global_semaphore: Option<Arc<Semaphore>>,
-        key: &str,
+        orchestrator: &PipelineOrchestrator,
     ) -> Result<Self, PipelineError> {
+        let config = &orchestrator.config;
+        let key = orchestrator.key.id();
         let sink_parallelism = config.sink_parallelism;
 
         // Build rolling policies from config
@@ -339,18 +86,18 @@ impl Iteration {
 
         for _ in 0..sink_parallelism {
             let upload_task = UploadTask::spawn(
-                ctx.destination_storage.clone(),
+                orchestrator.destination_storage.clone(),
                 config.sink.max_concurrent_uploads,
-                global_semaphore.clone(),
+                orchestrator.global_semaphore.clone(),
                 key.to_string(),
                 multipart_config.clone(),
             );
 
             let sink = Sink::new(
-                ctx.schema.clone(),
+                orchestrator.schema.clone(),
                 writer_config.clone(),
                 upload_task,
-                ctx.partition_extractor.clone(),
+                orchestrator.partition_extractor.clone(),
                 key.to_string(),
             )?;
 
@@ -376,15 +123,16 @@ impl Iteration {
         // Feed discovery channel into download task
         let download_task = DownloadTask::spawn(
             discovery_task.rx,
-            ctx.source_storages.clone(),
-            shutdown,
+            orchestrator.source_storages.clone(),
+            orchestrator.shutdown.clone(),
             config.max_concurrent_files,
-            global_semaphore,
+            orchestrator.global_semaphore.clone(),
             key.to_string(),
         );
 
         let max_in_flight = config.sink_parallelism.saturating_add(2);
-        let downloader = Downloader::new(ctx.readers.clone(), max_in_flight, key.to_string());
+        let downloader =
+            Downloader::new(orchestrator.readers.clone(), max_in_flight, key.to_string());
 
         // Get checkpoint config from first source that uses watermark
         let checkpoint_config = config
@@ -458,78 +206,224 @@ impl Iteration {
 
 /// Runtime orchestrator for the pipeline polling loop.
 ///
-/// Handles the prepare/process cycle for file processing. Created by
-/// [`Processor::new()`] after configuration resolution.
+/// Handles configuration resolution, the prepare/process cycle, and
+/// all runtime state for file processing.
 pub(super) struct PipelineOrchestrator {
-    /// Identifier for this pipeline (used in logging and metrics).
     key: PipelineKey,
-    /// Configuration for this specific pipeline.
     config: PipelineConfig,
-    /// Runtime dependencies for reading and writing.
-    ctx: ProcessorContext,
-    /// Tracks which source files have been processed (per-source).
+    source_storages: IndexMap<String, StorageProviderRef>,
+    destination_storage: StorageProviderRef,
+    schema: SchemaRef,
+    readers: IndexMap<String, Arc<dyn FileReader>>,
+    partition_extractor: PartitionExtractor,
     multi_tracker: MultiSourceTracker,
-    /// Tracks failures and manages DLQ.
     failure_tracker: FailureTracker,
-    /// Shutdown signal for graceful termination.
     shutdown: CancellationToken,
-    /// Optional global semaphore for cross-pipeline concurrency limiting.
     global_semaphore: Option<Arc<Semaphore>>,
-    /// Persistent utilization timer for tracking working vs idle time.
     util_timer: UtilizationTimer,
 }
 
 impl PipelineOrchestrator {
-    /// Create a new orchestrator from resolved configuration.
-    fn new(
-        key: PipelineKey,
-        config: PipelineConfig,
-        resolved: ResolvedConfig,
-        global_semaphore: Option<Arc<Semaphore>>,
-        shutdown: CancellationToken,
-    ) -> Self {
-        let util_timer = UtilizationTimer::new(key.id());
-        Self {
-            key,
-            config,
-            ctx: resolved.ctx,
-            multi_tracker: resolved.multi_tracker,
-            failure_tracker: resolved.failure_tracker,
-            shutdown,
-            global_semaphore,
-            util_timer,
-        }
-    }
-}
-
-/// Public API for creating pipeline processors.
-///
-/// Acts as a facade that coordinates configuration resolution and
-/// orchestrator creation.
-pub(super) struct Processor;
-
-impl Processor {
-    /// Create a new processor with the given configuration.
-    ///
-    /// Resolves all configuration and dependencies, then returns an
-    /// orchestrator that implements [`PollingProcessor`].
-    #[allow(clippy::new_ret_no_self)]
+    /// Create a new orchestrator, resolving all configuration and dependencies.
     pub async fn new(
         key: PipelineKey,
         config: PipelineConfig,
         storage_pool: Option<StoragePoolRef>,
         global_semaphore: Option<Arc<Semaphore>>,
         shutdown: CancellationToken,
-    ) -> Result<impl PollingProcessor<State = (), Error = PipelineError>, PipelineError> {
-        let resolver = ConfigResolver::new(key.clone(), &config, storage_pool);
-        let resolved = resolver.resolve().await?;
-        Ok(PipelineOrchestrator::new(
+    ) -> Result<Self, PipelineError> {
+        let source_storages = Self::create_source_storages(&config, &storage_pool).await?;
+        let destination_storage = Self::create_destination_storage(&config, &storage_pool).await?;
+        let multi_tracker = Self::create_multi_source_tracker(&key, &config, &storage_pool).await?;
+        let schema = Self::resolve_schema(&key, &config, &source_storages).await?;
+        let readers = Self::create_readers(&key, &config, &schema);
+        let partition_extractor = Self::create_partition_extractor(&config);
+        let dlq = Self::create_dlq(&config).await?;
+        let failure_tracker = Self::create_failure_tracker(&key, &config, dlq);
+        let util_timer = UtilizationTimer::new(key.id());
+
+        Ok(Self {
             key,
             config,
-            resolved,
-            global_semaphore,
+            source_storages,
+            destination_storage,
+            schema,
+            readers,
+            partition_extractor,
+            multi_tracker,
+            failure_tracker,
             shutdown,
-        ))
+            global_semaphore,
+            util_timer,
+        })
+    }
+
+    async fn create_source_storages(
+        config: &PipelineConfig,
+        storage_pool: &Option<StoragePoolRef>,
+    ) -> Result<IndexMap<String, StorageProviderRef>, PipelineError> {
+        let mut source_storages = IndexMap::new();
+        for (source_name, source_config) in &config.sources {
+            let storage = get_or_create_storage(
+                storage_pool,
+                &source_config.path,
+                source_config.storage_options.clone(),
+            )
+            .await
+            .context(StorageSnafu {
+                uri: source_config.path.clone(),
+            })?;
+            source_storages.insert(source_name.clone(), storage);
+        }
+        Ok(source_storages)
+    }
+
+    async fn create_destination_storage(
+        config: &PipelineConfig,
+        storage_pool: &Option<StoragePoolRef>,
+    ) -> Result<StorageProviderRef, PipelineError> {
+        get_or_create_storage(
+            storage_pool,
+            &config.sink.table_uri,
+            config.sink.storage_options.clone(),
+        )
+        .await
+        .context(StorageSnafu {
+            uri: config.sink.table_uri.clone(),
+        })
+    }
+
+    async fn create_multi_source_tracker(
+        key: &PipelineKey,
+        config: &PipelineConfig,
+        storage_pool: &Option<StoragePoolRef>,
+    ) -> Result<MultiSourceTracker, PipelineError> {
+        let mut trackers: IndexMap<String, Box<dyn super::tracker::StateTracker>> = IndexMap::new();
+
+        for (source_name, source_config) in &config.sources {
+            let tracker: Box<dyn super::tracker::StateTracker> = if source_config.use_watermark {
+                let checkpoint_storage = get_or_create_storage(
+                    &None,
+                    &config.sink.table_uri,
+                    config.sink.storage_options.clone(),
+                )
+                .await
+                .context(StorageSnafu {
+                    uri: config.sink.table_uri.clone(),
+                })?;
+                let checkpoint_manager = CheckpointManager::new(
+                    checkpoint_storage,
+                    key.id().to_string(),
+                    source_name.clone(),
+                );
+                Box::new(WatermarkTracker::new(checkpoint_manager))
+            } else {
+                Box::<HashMapTracker>::default()
+            };
+            trackers.insert(source_name.clone(), tracker);
+        }
+
+        // Ignore storage_pool for checkpoint storage — it needs its own provider
+        let _ = storage_pool;
+
+        Ok(MultiSourceTracker::new(trackers, key.id().to_string()))
+    }
+
+    async fn resolve_schema(
+        key: &PipelineKey,
+        config: &PipelineConfig,
+        source_storages: &IndexMap<String, StorageProviderRef>,
+    ) -> Result<SchemaRef, PipelineError> {
+        use crate::config::SchemaConfig;
+        match &config.schema {
+            SchemaConfig::Infer {
+                coerce_conflicts_to_utf8,
+            } => {
+                let first_source =
+                    config
+                        .sources
+                        .values()
+                        .next()
+                        .ok_or_else(|| PipelineError::Config {
+                            source: ConfigError::Internal {
+                                message: "No sources configured".to_string(),
+                            },
+                        })?;
+                let first_storage =
+                    source_storages
+                        .values()
+                        .next()
+                        .ok_or_else(|| PipelineError::Config {
+                            source: ConfigError::Internal {
+                                message: "No source storages available".to_string(),
+                            },
+                        })?;
+                let prefixes = first_source.date_prefixes();
+                Ok(infer_schema_from_source(
+                    first_storage,
+                    first_source.compression,
+                    prefixes.as_deref(),
+                    key.as_ref(),
+                    *coerce_conflicts_to_utf8,
+                )
+                .await?)
+            }
+            SchemaConfig::Explicit { .. } => Ok(config.schema.to_arrow_schema()?),
+        }
+    }
+
+    fn create_readers(
+        key: &PipelineKey,
+        config: &PipelineConfig,
+        schema: &SchemaRef,
+    ) -> IndexMap<String, Arc<dyn FileReader>> {
+        let mut readers = IndexMap::new();
+        let coerce_objects = config.schema.coerce_conflicts_to_utf8();
+
+        for (source_name, source_config) in &config.sources {
+            let mut reader_config =
+                NdjsonReaderConfig::new(source_config.batch_size, source_config.compression);
+            if coerce_objects {
+                reader_config = reader_config.coerce_objects_to_strings();
+            }
+            let reader: Arc<dyn FileReader> = Arc::new(NdjsonReader::new(
+                schema.clone(),
+                reader_config,
+                key.id().to_string(),
+            ));
+            readers.insert(source_name.clone(), reader);
+        }
+        readers
+    }
+
+    fn create_partition_extractor(config: &PipelineConfig) -> PartitionExtractor {
+        let partition_columns = config
+            .sink
+            .partition_by
+            .as_ref()
+            .map(|p| p.partition_columns())
+            .unwrap_or_default();
+        PartitionExtractor::new(partition_columns)
+    }
+
+    async fn create_dlq(
+        config: &PipelineConfig,
+    ) -> Result<Option<Arc<DeadLetterQueue>>, PipelineError> {
+        Ok(DeadLetterQueue::from_config(&config.error_handling)
+            .await?
+            .map(Arc::new))
+    }
+
+    fn create_failure_tracker(
+        key: &PipelineKey,
+        config: &PipelineConfig,
+        dlq: Option<Arc<DeadLetterQueue>>,
+    ) -> FailureTracker {
+        FailureTracker::new(
+            config.error_handling.max_failures,
+            dlq,
+            key.id().to_string(),
+        )
     }
 }
 
@@ -554,7 +448,7 @@ impl PollingProcessor for PipelineOrchestrator {
         // Take discovery snapshots from trackers before spawning
         let discovery_sources = self
             .multi_tracker
-            .discovery_sources(&self.ctx.source_storages, &self.config.sources)?;
+            .discovery_sources(&self.source_storages, &self.config.sources)?;
 
         // Spawn discovery task — streams files through a channel
         let discovery_task = DiscoveryTask::spawn(
@@ -563,14 +457,7 @@ impl PollingProcessor for PipelineOrchestrator {
             self.key.id().to_string(),
         );
 
-        let iteration = Iteration::new(
-            discovery_task,
-            &self.ctx,
-            &self.config,
-            self.shutdown.clone(),
-            self.global_semaphore.clone(),
-            self.key.id(),
-        )?;
+        let iteration = Iteration::new(discovery_task, self)?;
 
         let (result, discovery_count) = iteration
             .run(

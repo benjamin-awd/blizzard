@@ -10,4 +10,4 @@ mod types;
 
 pub use queue::DeadLetterQueue;
 pub use tracker::FailureTracker;
-pub use types::{FailedFile, FailureStats};
+pub use types::FailedFile;

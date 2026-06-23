@@ -69,14 +69,6 @@ pub enum ParquetError {
     /// Writer unavailable (already closed).
     #[snafu(display("Parquet writer unavailable (already closed)"))]
     WriterUnavailable,
-
-    /// Buffer lock failed.
-    #[snafu(display("Failed to lock Parquet buffer"))]
-    BufferLock,
-
-    /// Buffer still in use.
-    #[snafu(display("Parquet buffer still in use by another task"))]
-    BufferInUse,
 }
 
 /// Errors that can occur during table write operations.

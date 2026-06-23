@@ -16,7 +16,7 @@ use blizzard_core::config::ErrorHandlingConfig;
 use blizzard_core::error::{DlqError, DlqSerializeSnafu, DlqStorageSnafu, DlqWriteSnafu};
 use blizzard_core::metrics::events::FailureStage;
 
-use super::types::{FailedFile, FailureStats};
+use super::types::FailedFile;
 
 /// Dead Letter Queue for recording failed files.
 ///
@@ -26,7 +26,7 @@ pub struct DeadLetterQueue {
     storage: Arc<StorageProvider>,
     filename: String,
     buffer: Mutex<Vec<FailedFile>>,
-    stats: Mutex<FailureStats>,
+    total_recorded: Mutex<usize>,
     buffer_size: usize,
 }
 
@@ -54,7 +54,7 @@ impl DeadLetterQueue {
             storage: Arc::new(storage),
             filename,
             buffer: Mutex::new(Vec::new()),
-            stats: Mutex::new(FailureStats::default()),
+            total_recorded: Mutex::new(0),
             buffer_size: 100, // Flush every 100 records
         }))
     }
@@ -75,11 +75,7 @@ impl DeadLetterQueue {
             stage.as_str()
         );
 
-        // Update stats
-        {
-            let mut stats = self.stats.lock().await;
-            stats.increment(stage);
-        }
+        *self.total_recorded.lock().await += 1;
 
         // Add to buffer
         let should_flush = {
@@ -130,15 +126,10 @@ impl DeadLetterQueue {
     /// Finalize the DLQ, flushing any remaining records.
     pub async fn finalize(&self) -> Result<(), DlqError> {
         self.flush().await?;
-        let stats = self.stats.lock().await;
-        info!(
-            "DLQ finalized: {} total failures (download={}, decompress={}, parse={}, upload={})",
-            stats.total(),
-            stats.download,
-            stats.decompress,
-            stats.parse,
-            stats.upload
-        );
+        let total = *self.total_recorded.lock().await;
+        if total > 0 {
+            info!("DLQ finalized: {total} total failures recorded");
+        }
         Ok(())
     }
 }

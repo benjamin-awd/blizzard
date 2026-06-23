@@ -12,20 +12,14 @@ use deltalake::parquet::file::properties::WriterProperties;
 use snafu::prelude::*;
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::{MB, ParquetCompression};
-use crate::error::{
-    BufferInUseSnafu, BufferLockSnafu, ParquetError, ParquetWriteSnafu, WriterCreateSnafu,
-    WriterUnavailableSnafu,
-};
+use crate::error::{ParquetError, ParquetWriteSnafu, WriterCreateSnafu, WriterUnavailableSnafu};
 use blizzard_core::FinishedFile;
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BufferedRecords, ParquetWriteCompleted};
-
-use super::{BatchWriter, BatchWriterError};
 
 /// Statistics for tracking writer state.
 #[derive(Debug, Clone, Copy)]
@@ -73,32 +67,22 @@ impl RollingPolicy {
     }
 }
 
-/// A buffer with interior mutability for the ArrowWriter.
-#[derive(Clone)]
-struct SharedBuffer {
-    buffer: Arc<Mutex<bytes::buf::Writer<BytesMut>>>,
-}
+/// An in-memory write buffer backed by `BytesMut`.
+struct InMemoryBuffer(bytes::buf::Writer<BytesMut>);
 
-impl SharedBuffer {
+impl InMemoryBuffer {
     fn new(capacity: usize) -> Self {
-        Self {
-            buffer: Arc::new(Mutex::new(BytesMut::with_capacity(capacity).writer())),
-        }
+        Self(BytesMut::with_capacity(capacity).writer())
     }
 
-    fn into_inner(self) -> Result<BytesMut, ParquetError> {
-        let mutex = Arc::into_inner(self.buffer).context(BufferInUseSnafu)?;
-        let writer = mutex.into_inner().map_err(|_| BufferLockSnafu.build())?;
-        Ok(writer.into_inner())
+    fn into_inner(self) -> BytesMut {
+        self.0.into_inner()
     }
 }
 
-impl Write for SharedBuffer {
+impl Write for InMemoryBuffer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut buffer = self.buffer.try_lock().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, "buffer lock contention")
-        })?;
-        Write::write(&mut *buffer, buf)
+        Write::write(&mut self.0, buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -164,17 +148,12 @@ impl ParquetWriterConfig {
 pub struct ParquetWriter {
     schema: SchemaRef,
     config: ParquetWriterConfig,
-    writer: Option<ArrowWriter<SharedBuffer>>,
-    buffer: SharedBuffer,
+    writer: Option<ArrowWriter<InMemoryBuffer>>,
     current_file_name: String,
-    /// Writer statistics (bytes written, records, timing).
     stats: WriterStats,
     finished_files: Vec<FinishedFile>,
-    /// Current partition values for file naming and metadata.
     current_partition_values: HashMap<String, String>,
-    /// Pipeline identifier for metrics labeling.
     pipeline: String,
-    /// Current source name for logging context.
     current_source: String,
 }
 
@@ -194,8 +173,7 @@ impl ParquetWriter {
             config.row_group_size_bytes as f64 / 1024.0 / 1024.0,
             config.rolling_policies
         );
-        let buffer = SharedBuffer::new(64 * MB);
-        let writer = Self::create_writer(&schema, &config, buffer.clone())?;
+        let writer = Self::create_writer(&schema, &config)?;
         let partition_values = HashMap::new();
         let current_file_name = Self::generate_filename(&partition_values);
 
@@ -203,7 +181,6 @@ impl ParquetWriter {
             schema,
             config,
             writer: Some(writer),
-            buffer,
             current_file_name,
             stats: WriterStats::new(),
             finished_files: Vec::new(),
@@ -216,9 +193,9 @@ impl ParquetWriter {
     fn create_writer(
         schema: &SchemaRef,
         config: &ParquetWriterConfig,
-        buffer: SharedBuffer,
-    ) -> Result<ArrowWriter<SharedBuffer>, ParquetError> {
+    ) -> Result<ArrowWriter<InMemoryBuffer>, ParquetError> {
         let writer_properties = Self::writer_properties(config);
+        let buffer = InMemoryBuffer::new(64 * MB);
 
         ArrowWriter::try_new(buffer, schema.clone(), Some(writer_properties))
             .context(WriterCreateSnafu)
@@ -354,22 +331,14 @@ impl ParquetWriter {
     fn roll_file(&mut self) -> Result<(), ParquetError> {
         let start = Instant::now();
         let writer = self.writer.take().context(WriterUnavailableSnafu)?;
-        writer.close().context(ParquetWriteSnafu)?;
-
-        // Capture the bytes before replacing the buffer
-        let bytes = std::mem::replace(
-            &mut self.buffer,
-            SharedBuffer::new(64 * 1024 * 1024), // 64MB initial capacity
-        )
-        .into_inner()?
-        .freeze();
+        let buffer = writer.into_inner().context(ParquetWriteSnafu)?;
+        let bytes = buffer.into_inner().freeze();
 
         emit!(ParquetWriteCompleted {
             duration: start.elapsed(),
             target: self.pipeline.clone(),
         });
 
-        // Create finished file record with bytes
         let finished = FinishedFile {
             filename: self.current_file_name.clone(),
             size: bytes.len(),
@@ -381,11 +350,7 @@ impl ParquetWriter {
         self.finished_files.push(finished);
 
         // Reset for next file
-        self.writer = Some(Self::create_writer(
-            &self.schema,
-            &self.config,
-            self.buffer.clone(),
-        )?);
+        self.writer = Some(Self::create_writer(&self.schema, &self.config)?);
         self.current_file_name = Self::generate_filename(&self.current_partition_values);
         self.stats = WriterStats::new();
 
@@ -400,9 +365,8 @@ impl ParquetWriter {
         if self.stats.records_written > 0 {
             let start = Instant::now();
             let writer = self.writer.take().context(WriterUnavailableSnafu)?;
-            writer.close().context(ParquetWriteSnafu)?;
-
-            let bytes = self.buffer.into_inner()?.freeze();
+            let buffer = writer.into_inner().context(ParquetWriteSnafu)?;
+            let bytes = buffer.into_inner().freeze();
 
             emit!(ParquetWriteCompleted {
                 duration: start.elapsed(),
@@ -466,40 +430,17 @@ impl ParquetWriter {
             .map(|rg| usize::try_from(rg.total_byte_size()).unwrap_or(0))
             .sum();
 
-        let estimated = if total_uncompressed > 0 {
-            in_progress * total_compressed / total_uncompressed
-        } else {
-            in_progress
-        };
+        let estimated = (in_progress * total_compressed)
+            .checked_div(total_uncompressed)
+            .unwrap_or(in_progress);
         bytes_written + estimated
-    }
-}
-
-impl BatchWriter for ParquetWriter {
-    fn set_partition_context(
-        &mut self,
-        values: HashMap<String, String>,
-    ) -> Result<(), BatchWriterError> {
-        self.set_partition_context(values)?;
-        Ok(())
-    }
-
-    fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), BatchWriterError> {
-        self.write_batch(batch)?;
-        Ok(())
-    }
-
-    fn take_finished_files(&mut self) -> Vec<FinishedFile> {
-        self.take_finished_files()
-    }
-
-    fn close(self: Box<Self>) -> Result<Vec<FinishedFile>, BatchWriterError> {
-        Ok(ParquetWriter::close(*self)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::test_util::{test_batch, test_schema};
 
