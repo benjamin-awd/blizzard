@@ -16,13 +16,10 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::{MB, ParquetCompression};
-use crate::error::{
-    ParquetError, ParquetWriteSnafu, WriterCreateSnafu, WriterUnavailableSnafu,
-};
+use crate::error::{ParquetError, ParquetWriteSnafu, WriterCreateSnafu, WriterUnavailableSnafu};
 use blizzard_core::FinishedFile;
 use blizzard_core::emit;
 use blizzard_core::metrics::events::{BufferedRecords, ParquetWriteCompleted};
-
 
 /// Statistics for tracking writer state.
 #[derive(Debug, Clone, Copy)]

@@ -239,8 +239,7 @@ impl PipelineOrchestrator {
     ) -> Result<Self, PipelineError> {
         let source_storages = Self::create_source_storages(&config, &storage_pool).await?;
         let destination_storage = Self::create_destination_storage(&config, &storage_pool).await?;
-        let multi_tracker =
-            Self::create_multi_source_tracker(&key, &config, &storage_pool).await?;
+        let multi_tracker = Self::create_multi_source_tracker(&key, &config, &storage_pool).await?;
         let schema = Self::resolve_schema(&key, &config, &source_storages).await?;
         let readers = Self::create_readers(&key, &config, &schema);
         let partition_extractor = Self::create_partition_extractor(&config);
