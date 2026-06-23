@@ -369,7 +369,7 @@ impl CheckpointRecovery for DeltaSink {
 
             // Process in descending version order (most recent first)
             let mut fetched_sorted: Vec<_> = fetched.into_iter().collect();
-            fetched_sorted.sort_by(|a, b| b.0.cmp(&a.0));
+            fetched_sorted.sort_by_key(|b| std::cmp::Reverse(b.0));
 
             for (version, result) in fetched_sorted {
                 let commit_bytes =

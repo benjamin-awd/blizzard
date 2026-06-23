@@ -430,11 +430,9 @@ impl ParquetWriter {
             .map(|rg| usize::try_from(rg.total_byte_size()).unwrap_or(0))
             .sum();
 
-        let estimated = if total_uncompressed > 0 {
-            in_progress * total_compressed / total_uncompressed
-        } else {
-            in_progress
-        };
+        let estimated = (in_progress * total_compressed)
+            .checked_div(total_uncompressed)
+            .unwrap_or(in_progress);
         bytes_written + estimated
     }
 }

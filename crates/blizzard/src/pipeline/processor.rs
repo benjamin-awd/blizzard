@@ -60,16 +60,10 @@ impl Iteration {
     /// forming the pipeline: discovery → download → parse → N sink workers.
     fn new(
         discovery_task: DiscoveryTask,
-        source_storages: &IndexMap<String, StorageProviderRef>,
-        destination_storage: &StorageProviderRef,
-        schema: &SchemaRef,
-        readers: &IndexMap<String, Arc<dyn FileReader>>,
-        partition_extractor: &PartitionExtractor,
-        config: &PipelineConfig,
-        shutdown: CancellationToken,
-        global_semaphore: Option<Arc<Semaphore>>,
-        key: &str,
+        orchestrator: &PipelineOrchestrator,
     ) -> Result<Self, PipelineError> {
+        let config = &orchestrator.config;
+        let key = orchestrator.key.id();
         let sink_parallelism = config.sink_parallelism;
 
         // Build rolling policies from config
@@ -92,18 +86,18 @@ impl Iteration {
 
         for _ in 0..sink_parallelism {
             let upload_task = UploadTask::spawn(
-                destination_storage.clone(),
+                orchestrator.destination_storage.clone(),
                 config.sink.max_concurrent_uploads,
-                global_semaphore.clone(),
+                orchestrator.global_semaphore.clone(),
                 key.to_string(),
                 multipart_config.clone(),
             );
 
             let sink = Sink::new(
-                schema.clone(),
+                orchestrator.schema.clone(),
                 writer_config.clone(),
                 upload_task,
-                partition_extractor.clone(),
+                orchestrator.partition_extractor.clone(),
                 key.to_string(),
             )?;
 
@@ -129,15 +123,16 @@ impl Iteration {
         // Feed discovery channel into download task
         let download_task = DownloadTask::spawn(
             discovery_task.rx,
-            source_storages.clone(),
-            shutdown,
+            orchestrator.source_storages.clone(),
+            orchestrator.shutdown.clone(),
             config.max_concurrent_files,
-            global_semaphore,
+            orchestrator.global_semaphore.clone(),
             key.to_string(),
         );
 
         let max_in_flight = config.sink_parallelism.saturating_add(2);
-        let downloader = Downloader::new(readers.clone(), max_in_flight, key.to_string());
+        let downloader =
+            Downloader::new(orchestrator.readers.clone(), max_in_flight, key.to_string());
 
         // Get checkpoint config from first source that uses watermark
         let checkpoint_config = config
@@ -462,18 +457,7 @@ impl PollingProcessor for PipelineOrchestrator {
             self.key.id().to_string(),
         );
 
-        let iteration = Iteration::new(
-            discovery_task,
-            &self.source_storages,
-            &self.destination_storage,
-            &self.schema,
-            &self.readers,
-            &self.partition_extractor,
-            &self.config,
-            self.shutdown.clone(),
-            self.global_semaphore.clone(),
-            self.key.id(),
-        )?;
+        let iteration = Iteration::new(discovery_task, self)?;
 
         let (result, discovery_count) = iteration
             .run(
